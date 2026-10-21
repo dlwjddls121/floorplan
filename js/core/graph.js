@@ -718,6 +718,25 @@ export function removeEdge(doc, edgeId) {
   return finish(w);
 }
 
+// Remove several edges at once (the 지우개 tool, core/erase.js): all of them first, then the nodes they
+// left are settled as removeEdge does (orphans go; a node left between two collinear edges of one kind
+// is dissolved). One edge at a time could merge two edges of the list into one id before its turn.
+// Unknown ids are ignored. → doc (the same object when nothing was removed)
+export function removeEdges(doc, edgeIds) {
+  const ids = new Set(edgeIds || []);
+  const w = work(doc);
+  const ends = [];
+  const kept = [];
+  for (const e of w.edges) {
+    if (ids.has(e.id)) ends.push(e.a, e.b);
+    else kept.push(e);
+  }
+  if (!ends.length) return doc;
+  w.edges = kept;
+  for (const nid of new Set(ends)) settle(w, nid);
+  return finish(w);
+}
+
 // removeEdge on a working copy. → false when there is no such edge
 function dropEdge(w, edgeId) {
   const idx = w.edges.findIndex((e) => e.id === edgeId);

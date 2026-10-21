@@ -27,6 +27,7 @@ import { drawOpenings } from './ui/draw-openings.js';
 import { FixtureTool } from './ui/fixtures-ui.js';
 import { drawFixtures, drawNotRoomSpaces } from './ui/draw-fixtures.js';
 import { MemoTool, drawMemo } from './ui/memo-ui.js';
+import { EraserTool } from './ui/eraser-ui.js';
 import { openInfoForm, SURVEYOR_KEY } from './ui/info-form.js';
 import { ChecksPanel, countForBadge } from './ui/checks-ui.js';
 import { drawDimensions, layoutDimensions, dimDragTarget } from './ui/draw-dims.js';
@@ -109,7 +110,7 @@ class Editor {
     this._dimRowCache = null;   // { project, map } (see _dimRowOk)
     this._dimObstacles = null;  // { project, derived, scale, boxes } (치수선 보기)
 
-    const command = (fn, label) => this.command(fn, label);
+    const command = (fn, label, opts) => this.command(fn, label, opts);
     const requestRender = () => this.requestRender();
     const panelHost = $('#panel');
 
@@ -162,6 +163,15 @@ class Editor {
       overlayHost: this.wrap,
     });
 
+    // 지우개: rub what should go (red preview, one undo step, its own toast).
+    this.eraserTool = new EraserTool({
+      store: () => this.store,
+      view: this.view,
+      command,
+      toast,
+      requestRender,
+    });
+
     this.checks = new ChecksPanel($('#checksPopover'), {
       store: () => this.store,
       command,
@@ -197,6 +207,7 @@ class Editor {
       openingPrefs: this.openingPrefs,
       fixtureTool: this.fixtureTool,
       memoTool: this.memoTool,
+      eraserTool: this.eraserTool,
       tapExtra: (world) => this._tapDimension(world),
       roomNameAt: (world, padPx) => this.roomNameAt(world, padPx),
       closePanels: () => this.closePanels(),
@@ -290,7 +301,9 @@ class Editor {
   // ---- commands and store changes --------------------------------------------------------------
 
   // Run a store command; never let an engine error lose the document or break the UI.
-  command(fn, label = '작업') {
+  // opts.report = false: the caller says itself what happened to the values (the 지우개's toast), so the
+  // general "길이 값 …" toast is not shown.
+  command(fn, label = '작업', { report = true } = {}) {
     if (!this.store) return false;
     try {
       fn();
@@ -300,14 +313,16 @@ class Editor {
       this.requestRender();
       return false;
     }
-    this._reportDropped();
+    this._reportDropped(report);
     return true;
   }
 
-  _reportDropped() {
+  _reportDropped(show = true) {
     const dropped = this.store && this.store.lastDropped;
     const detached = this.store && this.store.lastDetached;
-    if (dropped && dropped !== this.lastDroppedSeen && dropped.length) {
+    if (!show) {
+      // already reported by the caller
+    } else if (dropped && dropped !== this.lastDroppedSeen && dropped.length) {
       toast(`없어진 벽의 길이 값 ${dropped.length}개가 지워졌습니다. 다시 넣어 주세요.`, { type: 'warn', ms: 4000 });
     } else if (detached && detached.length && detached !== this.lastDetachedSeen) {
       // Values whose side is gone for now (DESIGN.md §7.7): kept, they attach again when it is drawn.
@@ -329,20 +344,28 @@ class Editor {
     this.requestRender();
     const merged = change && change.roomChanges && change.roomChanges.merged;
     if (merged && merged.length && change.type !== 'undo' && change.type !== 'redo') {
-      this._askMergedNames(merged, prev);
+      this._askMergedNames(merged, prev, change.type);
     }
   }
 
   // Two rooms became one (a wall was removed): keep the name the user picks (plan §5-7).
-  async _askMergedNames(merged, prev) {
+  // After the 지우개 (type 'eraseItems') the name goes into the erase's undo step while nothing else
+  // happened in between (store.setRoomAfterErase), so one ↶ still gives the plan back.
+  async _askMergedNames(merged, prev, type = null) {
     const store = this.store;
+    const afterErase = type === 'eraseItems' && typeof store.setRoomAfterErase === 'function';
+    const rename = (kept, patch) => (afterErase ? store.setRoomAfterErase(kept, patch) : store.setRoom(kept, patch));
+    // Not inside the erase's own notification: the erase finishes first (its undo step, the values it left
+    // waiting for the toast), then the name is folded into that step.
+    if (afterErase) await Promise.resolve();
+    if (this.store !== store) return;
     for (const { kept, removed } of merged) {
       const gone = prev && (prev.rooms || []).find((r) => r.id === removed);
       const room = (store.project.rooms || []).find((r) => r.id === kept);
       if (!gone || !room || !gone.name || gone.name === room.name) continue;
       const height = room.height != null ? room.height : gone.height;
       if (!room.name) {
-        this.command(() => store.setRoom(kept, { name: gone.name, height }), '실 이름');
+        this.command(() => rename(kept, { name: gone.name, height }), '실 이름');
         continue;
       }
       const res = await openDialog({
@@ -351,7 +374,7 @@ class Editor {
         buttons: [{ label: gone.name, value: 'gone' }, { label: room.name, value: 'kept', kind: 'primary' }],
       });
       if (this.store !== store) return;
-      if (res.button === 'gone') this.command(() => store.setRoom(kept, { name: gone.name, height }), '실 이름');
+      if (res.button === 'gone') this.command(() => rename(kept, { name: gone.name, height }), '실 이름');
     }
   }
 
@@ -1123,6 +1146,8 @@ class Editor {
       this.tools.openings.drawOverlay(ctx, openingOpts);
       this.fixtureTool.drawOverlay(ctx, fixtureOpts);
       this.memoTool.drawOverlay(ctx, memoOpts);
+      // 지우개: what the rub so far will erase, in red, over everything.
+      this.eraserTool.drawOverlay(ctx, base);
     } catch (err) {
       console.error('tool overlay failed', err);
     }

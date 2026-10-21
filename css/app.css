@@ -289,6 +289,13 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 .tool-soon, .tool-soon:active { color: var(--soon); background: transparent; cursor: default; min-height: 56px; }
 .tool-soon small { font-size: 10px; font-weight: 500; }
 .toolbar-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+/* Nine tools since 지우개 (0.6.2): a short landscape tablet (Galaxy Tab: about 730 css px under the
+   system bars) still shows them all without scrolling the toolbar. */
+@media (max-height: 780px) {
+  .toolbar { gap: 4px; }
+  .tool { min-height: 56px; }
+  .toolbar-sep { margin: 2px 2px; }
+}
 
 .canvas-wrap {
   position: relative;

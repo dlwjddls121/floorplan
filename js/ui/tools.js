@@ -12,7 +12,10 @@
 //   window / door (창 / 문)  drag a ghost onto a wall, or tap a wall (openings-ui.js OpeningTool)
 //   fixture (설비)     type chips + tap/drag to place (fixtures-ui.js FixtureTool, gets every gesture)
 //   memo    (메모)     handwriting pen / eraser (memo-ui.js MemoTool, gets every gesture)
-// In every tool except 설비 and 메모 a tap opens the panel of what is under it: a room NAME (the room
+//   eraser  (지우개)   rub or tap what should go: a touched wall as its whole straight wall, each touched
+//                      window / door / fixture / memo stroke / 구역 나누기 line; red preview while rubbing,
+//                      one undo step (eraser-ui.js EraserTool, gets every gesture; no panels, no names)
+// In every tool except 설비, 메모 and 지우개 a tap opens the panel of what is under it: a room NAME (the room
 // panel with its name field open), a window/door, a fixture, a wall (length panel) or a room (room
 // panel), in that order. A window/door counts only on its symbol in the wall band (OpeningTool
 // .tapOnSymbol), so a tap just inside the room next to it still opens the wall's length panel (in the
@@ -28,11 +31,12 @@ import { roundTo } from './panel.js';
 import { OpeningTool } from './openings-ui.js';
 import { FIXTURE_HINT } from './fixtures-ui.js';
 import { MEMO_HINT } from './memo-ui.js';
+import { ERASER_HINT } from './eraser-ui.js';
 import { wallThickness, finishBeside } from '../core/dims.js';
 import { normalizeFixture, fixtureBounds } from '../core/fixtures.js';
 import { straightenStroke } from '../core/sketch.js';
 
-export const TOOL_NAMES = ['wall', 'select', 'room', 'divider', 'window', 'door', 'fixture', 'memo'];
+export const TOOL_NAMES = ['wall', 'select', 'room', 'divider', 'window', 'door', 'fixture', 'memo', 'eraser'];
 
 export const TOOL_HINTS = {
   wall: '벽: 손가락이나 S펜으로 벽을 그으세요. 비스듬히 그으면 사선 벽이 됩니다.',
@@ -44,6 +48,7 @@ export const TOOL_HINTS = {
   door: '문: 벽 위로 끌어다 놓으세요. 실 안쪽으로 열리게 놓이고, [열림 방향]으로 바꿀 수 있습니다.',
   fixture: FIXTURE_HINT,
   memo: MEMO_HINT,
+  eraser: ERASER_HINT,
 };
 
 const DRAG_SLOP_PX = 8;
@@ -72,7 +77,7 @@ export class ToolController {
   //        onToolChange(name),
   //        openOpening(id, { at })  open the window/door panel (OpeningPanel.open; at = the tap point)
   //        openingPrefs             shared OpeningPrefs (the panel uses the same instance)
-  //        fixtureTool, memoTool    FixtureTool / MemoTool (optional)
+  //        fixtureTool, memoTool, eraserTool   FixtureTool / MemoTool / EraserTool (optional)
   //        tapExtra(world) -> bool  optional: a tap the editor handles first (e.g. a dimension in 보기)
   //        roomNameAt(world) -> roomId | null   optional: the room whose name text is under the point
   //        labelAt(screen) -> hit | null        optional (선택): the movable text under a screen point,
@@ -103,10 +108,11 @@ export class ToolController {
     }
   }
 
-  // The controller that takes every gesture in the current tool (설비, 메모), or null.
+  // The controller that takes every gesture in the current tool (설비, 메모, 지우개), or null.
   _delegate() {
     if (this.tool === 'fixture') return this.ctx.fixtureTool || null;
     if (this.tool === 'memo') return this.ctx.memoTool || null;
+    if (this.tool === 'eraser') return this.ctx.eraserTool || null;
     return null;
   }
 
@@ -137,6 +143,7 @@ export class ToolController {
     if (this.openings.cancel()) done = true;
     if (this.ctx.fixtureTool && this.ctx.fixtureTool.cancel()) done = true;
     if (this.ctx.memoTool && this.ctx.memoTool.cancel()) done = true;
+    if (this.ctx.eraserTool && this.ctx.eraserTool.cancel()) done = true;
     if (this.ctx.panel.mode === 'rect') {
       this.ctx.panel.close();
       done = true;
@@ -160,9 +167,11 @@ export class ToolController {
     const d = this._delegate();
     if (d) {
       // Right on a room name (and not on a resize handle): wait — a tap renames the room, a drag or
-      // stroke goes to the tool as usual once it moves past the tap distance.
+      // stroke goes to the tool as usual once it moves past the tap distance. The 지우개 takes every
+      // gesture at once: a name is never erased, and a tap there erases what is under it (the preview
+      // shows it from the first point).
       const onHandle = d.handleAt && g.screen && g.screen.length && d.handleAt(g.screen[0]);
-      const nameRoom = onHandle ? null : this._roomNameAt(g.points[0], NAME_PAD_PX.exact);
+      const nameRoom = onHandle || this.tool === 'eraser' ? null : this._roomNameAt(g.points[0], NAME_PAD_PX.exact);
       if (nameRoom) {
         this.active = { kind: 'delegate', to: d, nameRoom, pending: true };
         return undefined;

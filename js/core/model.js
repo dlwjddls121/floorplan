@@ -18,6 +18,7 @@ import { installFixtures, normalizeFixture } from './fixtures.js';
 import { installMemo, validMemo } from './memo.js';
 import { installDims } from './dims.js';
 import { installRotate } from './rotate.js';
+import { installErase, carryMerged } from './erase.js';
 
 export const DEFAULT_SETTINGS = Object.freeze({ extWall: 150, intWall: 100, twoSideTolerance: 300, closureTolerance: 300 });
 export const UNDO_LIMIT = 100;
@@ -1538,7 +1539,9 @@ export class DocStore {
     }
     return this._commit('deleteEdge', (p) => {
       if (!p.edges.some((e) => e.id === edgeId)) return null;
-      const doc = removeEdge(p, edgeId);
+      // A wall left whole by the removal (a T's bar when its stem goes) keeps its 확인필요 flag and the
+      // fixtures standing against it (erase.js carryMerged, checker 2026-10-22).
+      const doc = carryMerged(p, removeEdge(p, edgeId), [edgeId]);
       const ids = new Set(doc.edges.map((e) => e.id));
       const isOwn = (m) => own.has(`${m.room}|${sideKeyOf(m)}`) || own.has(`span|${m.id}`);
       const measures = (doc.measures || []).filter((m) => !isOwn(m));
@@ -1786,6 +1789,7 @@ function runDeriveHooks(prevProject, nextProject, nextDerived, prevDerived = nul
 //   memo.js      addMemoStroke, deleteMemoStroke, clearMemo
 //   dims.js      setDimOverride, setLabelOffset, resetOutputLayout
 //   rotate.js    rotatePlan (도면 돌리기; NOT an undo step: it turns the history with the plan)
+//   erase.js     eraseItems (지우개: walls, windows / doors, fixtures, memo in one undo step), lastErased
 // The 확인 완료 commands (checks-full.js installChecks) are installed by main.js, because
 // checks-full.js imports this module.
 installOpenings(DocStore);
@@ -1793,6 +1797,7 @@ installFixtures(DocStore);
 installMemo(DocStore);
 installDims(DocStore);
 installRotate(DocStore);
+installErase(DocStore);
 
 // ---- internal helpers ----------------------------------------------------------------------------
 
