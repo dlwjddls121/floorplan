@@ -1,0 +1,107 @@
+/* 검사 panel (js/ui/checks-ui.js). Uses the variables of css/app.css (--touch, --line, --warn, ...).
+   The panel renders into the editor's #checksPopover; ChecksPanel adds the class ck-host to it. */
+
+.checks-popover.ck-host {
+  width: min(600px, calc(100vw - 24px));
+  max-height: calc(100vh - var(--topbar-h, 60px) - 24px);
+  padding: 0;
+  overscroll-behavior: contain;
+}
+
+.ck-panel { padding: 4px 12px 12px; }
+
+.ck-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  background: var(--surface, #fff);
+  border-bottom: 1px solid var(--line, #D5D9DF);
+}
+.ck-title { margin: 0; font-size: 18px; }
+.ck-summary { flex: 1; color: var(--muted, #5F6670); font-size: 15px; }
+.ck-close { min-height: var(--touch, 48px); min-width: 72px; }
+
+.ck-empty { margin: 14px 2px; font-size: 16px; color: var(--muted, #5F6670); }
+.ck-ok { color: var(--ok, #1E7F3C); font-weight: 600; }
+
+.ck-group { margin-top: 12px; }
+.ck-group-title {
+  margin: 0;
+  padding: 8px 2px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.ck-group-check > .ck-group-title { color: #9A4A00; }
+details.ck-group > summary.ck-group-title {
+  min-height: var(--touch, 48px);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--text, #1B1F24);
+  list-style: none;
+}
+details.ck-group > summary.ck-group-title::-webkit-details-marker { display: none; }
+details.ck-group > summary.ck-group-title::before {
+  content: "▸";
+  display: inline-block;
+  width: 1.2em;
+  color: var(--muted, #5F6670);
+}
+details.ck-group[open] > summary.ck-group-title::before { content: "▾"; }
+details.ck-group > summary.ck-group-title::after {
+  content: "누르면 펼쳐집니다";
+  margin-left: 10px;
+  font-size: 13px;
+  font-weight: normal;
+  color: var(--muted, #5F6670);
+}
+details.ck-group[open] > summary.ck-group-title::after { content: "누르면 접힙니다"; }
+.ck-hint { margin: 0 2px 8px; font-size: 13px; line-height: 1.45; color: var(--muted, #5F6670); }
+
+.ck-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 2px;
+  border-top: 1px solid var(--line, #D5D9DF);
+}
+.ck-text { flex: 1 1 260px; min-width: 0; font-size: 15px; line-height: 1.45; }
+.ck-chip {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.ck-chip-check { background: #FDEBD3; color: #9A4A00; }
+.ck-chip-info { background: #ECEFF3; color: var(--muted, #5F6670); }
+.ck-level-check .ck-message { color: var(--text, #1B1F24); font-weight: 600; }
+.ck-level-info .ck-message { color: var(--text, #1B1F24); }
+.ck-status { display: block; margin-top: 2px; font-size: 12px; color: var(--warn, #E8710A); }
+.ck-status-done { color: var(--ok, #1E7F3C); }
+
+.ck-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.ck-btn {
+  min-height: var(--touch, 48px);
+  min-width: 96px;
+  padding: 0 14px;
+  font-size: 15px;
+}
+.ck-resolve { border-color: var(--ok, #1E7F3C); color: var(--ok, #1E7F3C); }
+.ck-locate[disabled] { opacity: 0.45; }
+
+.ck-resolved .ck-text { opacity: 0.55; }
+.ck-resolved .ck-message { text-decoration: line-through; text-decoration-color: rgba(0, 0, 0, 0.35); font-weight: normal; }
+
+@media (max-width: 560px) {
+  .ck-actions { width: 100%; }
+  .ck-btn { flex: 1; }
+}

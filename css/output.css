@@ -1,0 +1,142 @@
+/* [출력] dialog (stage C, js/ui/output.js). Builds on .dialog-backdrop / .dialog / .btn from app.css. */
+
+.out-dialog {
+  width: min(820px, 100%);
+}
+.out-body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.out-preview {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.out-preview-canvas {
+  display: block;
+  width: 300px;
+  height: 424px;   /* A4 portrait; a landscape page gets its size from output.js (380 × 269) */
+  background: #FFFFFF;
+  border: 1px solid var(--line-strong, #AEB4BC);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.out-scale-info {
+  font-size: 14px;
+  color: var(--muted, #5F6670);
+}
+.out-options {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.out-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.out-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--muted, #5F6670);
+}
+.out-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.out-seg-btn {
+  flex: 1 1 0;
+  min-width: 84px;
+}
+.out-seg-btn.out-seg-on {
+  background: var(--primary, #1F3A5F);
+  border-color: var(--primary, #1F3A5F);
+  color: var(--primary-text, #FFFFFF);
+}
+.out-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.out-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--touch, 48px);
+  font-size: 17px;
+  cursor: pointer;
+}
+.out-check-input {
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--primary, #1F3A5F);
+}
+.out-check-off {
+  opacity: 0.4;
+  cursor: default;
+}
+.out-select {
+  min-height: var(--touch, 48px);
+  padding: 0 10px;
+  border: 1px solid var(--line-strong, #AEB4BC);
+  border-radius: var(--radius, 10px);
+  background: var(--surface, #FFFFFF);
+  font: inherit;
+  font-size: 17px;
+  color: var(--text, #1B1F24);
+}
+.out-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius, 10px);
+  background: #E8F1FB;
+  color: #0B4A80;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.out-warn {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius, 10px);
+  background: #FFF1E0;
+  color: #9A4A00;
+  font-size: 15px;
+  line-height: 1.45;
+}
+/* 종류 치수선 없이: what the page holds. */
+.out-kind-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius, 10px);
+  background: #F1F3F5;
+  color: var(--text, #1B1F24);
+  font-size: 15px;
+  line-height: 1.45;
+}
+/* [↻ 도면 회전] and its hint. */
+.out-rotate-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.out-rotate-hint {
+  color: #9A4A00;
+  font-size: 15px;
+}
+.out-rotate-hint:empty { display: none; }
+.out-select:disabled { opacity: 0.45; }
+.out-note[hidden], .out-warn[hidden], .out-kind-note[hidden] { display: none; }
+
+/* Narrow or short screens (tablet portrait, phones): preview above the options. */
+@media (max-width: 700px) {
+  .out-body { flex-direction: column; align-items: stretch; }
+  .out-preview-canvas { width: 220px !important; height: 311px !important; }
+  .out-preview-canvas.out-landscape { width: 300px !important; height: 212px !important; }
+}

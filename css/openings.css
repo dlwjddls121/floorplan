@@ -1,0 +1,30 @@
+/* Opening panel (창·문). Builds on the panel, chip, field and btn styles of app.css. */
+
+.op-panel .panel-main { gap: 8px; }
+
+.op-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; }
+.op-preview { font-size: 18px; font-weight: 700; color: #0070C0; }
+.op-preview-empty { color: var(--muted, #6B7280); font-weight: 600; font-size: 16px; }
+
+.op-choices { display: flex; flex-direction: column; gap: 6px; }
+.op-row { flex-wrap: wrap; }
+.op-row-label {
+  min-width: 4.5em;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted, #6B7280);
+  margin-right: 2px;
+}
+.op-toggle { margin-left: 6px; }
+
+.op-size-block { display: flex; flex-direction: column; gap: 6px; }
+.op-field { min-width: 120px; }
+.op-size { font-variant-numeric: tabular-nums; }
+.op-size-recent { border-style: dashed; }
+.op-drawwidth { min-width: 5.5em; text-align: center; font-size: 15px; color: var(--muted, #6B7280); }
+.op-swing { font-size: 14px; color: var(--muted, #6B7280); }
+
+/* Narrow screens: keep the numpad below the choices. */
+@media (max-width: 820px) {
+  .op-panel { flex-direction: column; }
+}

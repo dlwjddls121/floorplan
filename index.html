@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#1f5fae">
+  <meta name="description" content="한국해비타트 서울지회 현장 실측 평면도">
+  <title>평면도</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./css/app.css">
+  <link rel="stylesheet" href="./css/openings.css">
+  <link rel="stylesheet" href="./css/fixtures.css">
+  <link rel="stylesheet" href="./css/output.css">
+  <link rel="stylesheet" href="./css/checks.css">
+  <link rel="stylesheet" href="./css/settings.css">
+  <script type="module" src="./js/main.js"></script>
+</head>
+<body>
+  <div id="updateBanner" class="update-banner" role="status" hidden>
+    <span>새 버전이 있습니다. 저장된 도면은 그대로 남습니다.</span>
+    <button id="btnApplyUpdate" type="button" class="btn btn-primary">지금 적용</button>
+  </div>
+
+  <!-- 세대 목록 (filled by js/ui/list.js) -->
+  <main id="list" class="screen list-screen" hidden></main>
+
+  <!-- 그리기 화면 -->
+  <section id="editor" class="screen editor" hidden aria-label="평면도 그리기">
+    <header class="topbar">
+      <button id="btnBack" type="button" class="btn btn-top">≡ 목록</button>
+      <button id="btnTitle" type="button" class="title-btn" title="세대 정보 바꾸기">새 세대</button>
+      <span id="saveState" class="save-state" aria-live="polite"></span>
+      <div class="topbar-right">
+        <button id="btnUndo" type="button" class="btn btn-top btn-icon" aria-label="되돌리기" title="되돌리기 (Ctrl+Z)" disabled>↶</button>
+        <button id="btnRedo" type="button" class="btn btn-top btn-icon" aria-label="다시 실행" title="다시 실행 (Ctrl+Y)" disabled>↷</button>
+        <button id="btnChecks" type="button" class="btn btn-top" aria-haspopup="true">검사 0</button>
+        <button id="btnExport" type="button" class="btn btn-top btn-primary" title="프로젝트 파일로 보내기 (드라이브·PC)">내보내기</button>
+        <button id="btnOutput" type="button" class="btn btn-top" title="A4 도면 그림(PNG·JPG·PDF)으로 저장">출력</button>
+        <button id="btnSettings" type="button" class="btn btn-top" title="창·문 목록, 띄어 쓰기, 기본값, 조사자 이름">설정</button>
+      </div>
+    </header>
+
+    <div class="editor-body">
+      <nav id="toolbar" class="toolbar" aria-label="도구">
+        <button type="button" class="tool" data-tool="wall" aria-pressed="true">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 6h6v14h14v6H6z" fill="currentColor"/></svg>
+          <span>벽</span>
+        </button>
+        <button type="button" class="tool" data-tool="select" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 4l16 12-7 1.5 4 8-3.5 1.8-4-8L8 24z" fill="currentColor"/></svg>
+          <span>선택</span>
+        </button>
+        <button type="button" class="tool" data-tool="room" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="7" width="20" height="18" fill="none" stroke="currentColor" stroke-width="3"/><path d="M26 2v8M22 6h8" stroke="currentColor" stroke-width="2.5"/></svg>
+          <span>실 추가</span>
+        </button>
+        <button type="button" class="tool" data-tool="divider" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="6" width="24" height="20" fill="none" stroke="currentColor" stroke-width="3"/><path d="M16 7v18" stroke="currentColor" stroke-width="2" stroke-dasharray="3 2.5"/></svg>
+          <span>구역 나누기</span>
+        </button>
+        <div class="toolbar-sep" role="separator"></div>
+        <button type="button" class="tool" data-tool="window" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="12" width="26" height="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 16h26" stroke="currentColor" stroke-width="1.2"/></svg>
+          <span>창</span>
+        </button>
+        <button type="button" class="tool" data-tool="door" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 26V6M6 6a20 20 0 0 1 20 20" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          <span>문</span>
+        </button>
+        <button type="button" class="tool" data-tool="fixture" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="8" width="22" height="16" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 24L27 8" stroke="currentColor" stroke-width="1.5"/></svg>
+          <span>설비</span>
+        </button>
+        <button type="button" class="tool" data-tool="memo" aria-pressed="false">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22c4-8 7 4 11-3s6 2 13-6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+          <span>메모</span>
+        </button>
+      </nav>
+
+      <div id="canvasWrap" class="canvas-wrap">
+        <canvas id="plan" aria-label="평면도 그림"></canvas>
+        <p id="hint" class="hint"></p>
+        <span id="penChip" class="pen-chip" hidden>S펜 사용 중 · 도면 위 손 터치는 무시</span>
+        <div class="view-btns">
+          <button id="btnRotate" type="button" class="btn" aria-label="도면 회전" title="누를 때마다 도면이 오른쪽으로 90° 회전합니다 (네 번 누르면 원래대로)">↻ 회전</button>
+          <button id="btnDims" type="button" class="btn" aria-pressed="false" title="출력될 치수 줄 보기">치수선 보기</button>
+          <button id="btnFit" type="button" class="btn" title="도면 전체가 보이게">전체 보기</button>
+        </div>
+        <section id="panel" class="panel" aria-label="입력" hidden></section>
+      </div>
+    </div>
+
+    <div id="checksPopover" class="checks-popover" role="dialog" aria-label="검사 결과" hidden></div>
+  </section>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <span id="appVersion" class="app-version"></span>
+</body>
+</html>

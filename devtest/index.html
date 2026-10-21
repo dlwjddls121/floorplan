@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>평면도 앱 기기 시험</title>
+<meta name="theme-color" content="#1f5fae">
+<!-- The app manifest lets Chrome offer "install" from this page too (scope = app root). -->
+<link rel="manifest" href="../manifest.webmanifest">
+<link rel="icon" href="../icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./devtest.css">
+<script type="module" src="./devtest.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <h1>평면도 앱 기기 시험 (0단계)</h1>
+    <p class="intro">
+      갤럭시 탭의 <b>크롬</b>에서 위에서부터 하나씩 해 보세요. 결과는 자동으로 기억됩니다.
+      다 끝나면 아래 <b>[결과 복사]</b>를 눌러 카톡이나 메일에 붙여넣어 보내 주세요.
+    </p>
+    <p class="intro"><a href="../index.html">◀ 평면도 앱(세대 목록)으로 돌아가기</a></p>
+    <div class="row">
+      <button id="copyBtn" class="primary huge" type="button">결과 복사</button>
+      <button id="shareResultBtn" type="button">결과 보내기(공유)</button>
+      <button id="resetBtn" class="small" type="button">처음부터 다시</button>
+    </div>
+    <p id="copyMsg" class="msg" role="status"></p>
+    <div id="copyFallbackBox" hidden>
+      <p>아래 글을 길게 눌러 <b>전체 선택 → 복사</b>해 주세요.</p>
+      <textarea id="copyFallback" readonly></textarea>
+    </div>
+    <ul id="overview" class="overview"></ul>
+  </div>
+</header>
+
+<main>
+
+  <!-- 1. Pen -->
+  <section class="test" id="t-pen">
+    <h2>1. 펜 감지</h2>
+    <div class="status" data-status="pending"></div>
+    <p>S펜이 화면에 <b>닿기 전에</b> 크롬이 알아채는지 봅니다. 아래 흰 칸에서 차례로 해 보세요.</p>
+    <ol>
+      <li><b>S펜을 화면 가까이 대 보세요</b> — 화면에 닿지 않게 1cm쯤 띄우고 움직입니다. (‘떠 있음’ 숫자가 올라가는지 보세요)</li>
+      <li><b>S펜으로 그려 보세요</b> — 몇 번 그었다 뗐다 해 주세요.</li>
+      <li><b>S펜을 든 채로 손바닥을 화면에 대 보세요</b> — 글씨 쓸 때처럼 손을 흰 칸에 올립니다.</li>
+      <li>마지막으로 펜을 멀리 치우고, <b>두 손가락</b>을 동시에 흰 칸에 대 보세요.</li>
+    </ol>
+    <div class="pad-wrap" id="penPad">
+      <canvas id="penInk"></canvas>
+      <canvas id="penOverlay"></canvas>
+      <span class="pad-hint">검정 = S펜, 파랑 = 손가락, 빨강 = 펜이 가까이 있을 때의 손 터치(앱에서는 무시할 것)</span>
+    </div>
+    <div class="live" id="penLive"></div>
+    <div class="row">
+      <button id="penClear" class="small" type="button">그림 지우기</button>
+      <button id="penReset" class="small" type="button">숫자 초기화</button>
+    </div>
+    <h3>펜 신호 순서 (최근)</h3>
+    <p class="seq" id="penSeq">아직 없음</p>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 2. Share to Drive -->
+  <section class="test" id="t-share">
+    <h2>2. 드라이브로 보내기</h2>
+    <div class="status" data-status="pending"></div>
+    <p>도면 파일을 구글 드라이브로 보낼 수 있는지 봅니다. 버튼을 누르면 공유 창이 뜹니다. <b>“드라이브”</b>를 고르고 <b>[저장]</b>을 눌러 주세요.</p>
+    <div class="row">
+      <button id="shareJson" class="primary" type="button">.json 파일 보내기</button>
+      <button id="shareTxt" class="primary" type="button">.txt 파일 보내기</button>
+      <button id="downloadJson" class="small" type="button">(PC용) .json 내려받기</button>
+    </div>
+    <p id="shareMsg" class="msg" role="status"></p>
+    <div id="shareConfirm" hidden>
+      <p>드라이브에 파일이 생겼나요? (드라이브 앱이나 drive.google.com에서 확인)</p>
+      <div class="row">
+        <button class="small" type="button" data-confirm="json-yes">.json 생겼어요</button>
+        <button class="small" type="button" data-confirm="json-no">.json 안 생겼어요</button>
+        <button class="small" type="button" data-confirm="txt-yes">.txt 생겼어요</button>
+        <button class="small" type="button" data-confirm="txt-no">.txt 안 생겼어요</button>
+      </div>
+    </div>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 3. File import -->
+  <section class="test" id="t-file">
+    <h2>3. 파일 불러오기</h2>
+    <div class="status" data-status="pending"></div>
+    <p>2번에서 드라이브에 저장한 파일을 다시 불러올 수 있는지 봅니다. 아래 버튼 → 파일 선택 창 왼쪽 메뉴(≡)에서 <b>“드라이브”</b> → 시험 파일을 고르세요.
+      파일이 회색으로 막혀서 고를 수 없으면 알려 주세요.</p>
+    <div class="row">
+      <label class="filebtn">파일 고르기<input type="file" id="fileInput"></label>
+    </div>
+    <p class="intro">PC에서는 파일을 이 칸에 끌어다 놓아도 됩니다.</p>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 4. Storage -->
+  <section class="test" id="t-storage">
+    <h2>4. 저장공간</h2>
+    <div class="status" data-status="pending"></div>
+    <p>도면이 기기 안에 안전하게 저장되는지 봅니다. 버튼을 누르면 크롬에 “이 앱 저장공간 유지”를 요청하고, 시험 기록을 저장했다가 다시 읽어 봅니다.</p>
+    <div class="row">
+      <button id="storageBtn" class="primary" type="button">저장공간 시험하기</button>
+    </div>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 5. Install / offline -->
+  <section class="test" id="t-install">
+    <h2>5. 설치 · 인터넷 없이 열기</h2>
+    <div class="status" data-status="pending"></div>
+    <ol>
+      <li>인터넷이 되는 곳에서 이 페이지를 한 번 엽니다(지금 상태). 몇 초 기다려 아래 ‘오프라인용 저장’이 ✅인지 봅니다.</li>
+      <li><b>홈 화면에 추가:</b> 아래 [홈 화면에 설치] 버튼이 보이면 누릅니다. 안 보이면 크롬 오른쪽 위 <b>⋮</b> 메뉴 → <b>“홈 화면에 추가”</b>(또는 “앱 설치”)를 누릅니다.</li>
+      <li><b>비행기 모드</b>를 켭니다.</li>
+      <li>크롬에서 이 페이지를 다시 엽니다(새로고침 ⟳). 페이지가 뜨면 성공이고, 자동으로 기록됩니다.</li>
+      <li>홈 화면의 <b>평면도</b> 아이콘도 눌러 봅니다. 앱 첫 화면이 뜨면 성공입니다.</li>
+      <li>비행기 모드를 끄고, 이 페이지에서 [결과 복사]를 누릅니다.</li>
+    </ol>
+    <div class="row">
+      <button id="installBtn" class="primary" type="button" hidden>홈 화면에 설치</button>
+      <button id="installRecheck" class="small" type="button">다시 확인</button>
+    </div>
+    <div class="row" id="homeIconConfirm">
+      <span>홈 화면 아이콘이 비행기 모드에서 열렸나요?</span>
+      <button class="small" type="button" data-home="yes">열렸어요</button>
+      <button class="small" type="button" data-home="no">안 열렸어요</button>
+    </div>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 6. Print -->
+  <section class="test" id="t-print">
+    <h2>6. 출력 (한글 PDF · 고해상도 PNG)</h2>
+    <div class="status" data-status="pending"></div>
+    <p>A4 인쇄용 시험 PDF(300dpi)를 만듭니다. 안에 <b>100mm 사각형</b>과 <b>1:60 축척 예(3,000mm 벽 = 50mm)</b>, 한글 글자가 들어 있습니다.</p>
+    <ol>
+      <li>[시험 PDF 만들기] → [PDF 보내기]로 드라이브에 저장하거나 [PDF 내려받기]를 누릅니다.</li>
+      <li>인쇄할 때 크기를 <b>“실제 크기”</b>(또는 배율 100%)로 고릅니다. <b>“페이지에 맞춤”은 끄세요.</b></li>
+      <li>인쇄한 종이를 자로 재서 아래 칸에 적어 주세요.</li>
+    </ol>
+    <div class="row">
+      <button id="pdfMake" class="primary" type="button">시험 PDF 만들기</button>
+      <button id="pdfShare" type="button" disabled>PDF 보내기</button>
+      <button id="pdfDownload" type="button" disabled>PDF 내려받기</button>
+    </div>
+    <div class="row">
+      <button id="pngMake" class="primary" type="button">고해상도 PNG 만들기</button>
+      <button id="pngShare" type="button" disabled>PNG 보내기</button>
+      <button id="pngDownload" type="button" disabled>PNG 내려받기</button>
+    </div>
+    <p id="printMsg" class="msg" role="status"></p>
+    <div class="preview" id="printPreview"></div>
+    <h3>인쇄해서 잰 값</h3>
+    <div class="row">
+      <label>사각형 한 변 <input type="number" id="measSquare" inputmode="decimal" step="0.1" placeholder="100"> mm</label>
+      <label>3,000mm 벽(1:60) <input type="number" id="measWall" inputmode="decimal" step="0.1" placeholder="50"> mm</label>
+    </div>
+    <div class="row">
+      <span>한글 글자가 깨지지 않고 잘 나왔나요?</span>
+      <button class="small" type="button" data-korean="yes">잘 나왔어요</button>
+      <button class="small" type="button" data-korean="no">깨졌어요</button>
+    </div>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 7. Device info -->
+  <section class="test" id="t-device">
+    <h2>7. 기기 정보</h2>
+    <div class="status" data-status="pending"></div>
+    <p>개발에 참고할 기기 정보입니다. 따로 할 일은 없습니다. (탭을 가로로 둔 상태에서 보내 주세요)</p>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 8. Sliding door drawing -->
+  <section class="test" id="t-door">
+    <h2>8. 미서기문 그림 확인</h2>
+    <div class="status" data-status="pending"></div>
+    <p>지금 도면에는 미서기문 예가 없어서, 제가 제안하는 모양입니다(원호 없이 겹친 문짝). 마음에 드시는지 골라 주세요.</p>
+    <canvas id="doorCanvas" class="door-canvas" width="1800" height="600"></canvas>
+    <div class="row">
+      <button class="small" type="button" data-door="ok">이 모양이 좋아요</button>
+      <button class="small" type="button" data-door="change">다르게 해 주세요</button>
+    </div>
+    <textarea id="doorNote" class="note" placeholder="바꾸고 싶은 점이 있으면 적어 주세요 (선택)"></textarea>
+    <ul class="facts"></ul>
+  </section>
+
+  <!-- 9. Update -->
+  <section class="test" id="t-update">
+    <h2>9. 업데이트</h2>
+    <div class="status" data-status="pending"></div>
+    <p>탭에 설치한 앱이 새 버전을 제대로 받는지 봅니다. 5번(설치)을 먼저 해 주세요. 개발자와 함께 하는 시험입니다.</p>
+    <ol>
+      <li>인터넷이 되는 곳에서 [지금 버전 기록]을 누릅니다.</li>
+      <li>개발자에게 “새 버전 올려 주세요”라고 알리고, 올렸다는 답을 기다립니다.</li>
+      <li>홈 화면의 <b>평면도</b> 앱을 엽니다. 이미 열려 있었다면 다른 앱으로 갔다가 다시 돌아옵니다. 1~2분 안에 화면 위에 <b>“새 버전이 있습니다 [지금 적용]”</b>이 뜨는지 봅니다.</li>
+      <li>[지금 적용]을 누릅니다. 앱이 다시 열리면, 그려 두었던 도면이 목록에 그대로 있는지 봅니다.</li>
+      <li>이 페이지로 돌아와 [버전 다시 확인]을 누르고, 아래 질문에 답해 주세요.</li>
+    </ol>
+    <div class="row">
+      <button id="updateRecord" class="primary" type="button">지금 버전 기록</button>
+      <button id="updateRecheck" type="button">버전 다시 확인</button>
+    </div>
+    <div class="row">
+      <span>“새 버전이 있습니다” 안내가 떴나요?</span>
+      <button class="small" type="button" data-update-banner="yes">떴어요</button>
+      <button class="small" type="button" data-update-banner="no">안 떴어요</button>
+    </div>
+    <div class="row">
+      <span>[지금 적용] 뒤에 도면이 그대로 있었나요?</span>
+      <button class="small" type="button" data-update-kept="yes">그대로 있어요</button>
+      <button class="small" type="button" data-update-kept="no">없어졌어요</button>
+    </div>
+    <ul class="facts"></ul>
+  </section>
+
+</main>
+
+<footer id="footer">평면도 앱 기기 시험 페이지</footer>
+</body>
+</html>

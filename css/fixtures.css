@@ -1,0 +1,70 @@
+/* Stage B package "fixtures + info + memo": 설비 chip bar and panel, 메모 bar, 세대 정보 form.
+   Builds on app.css (.btn, .chip, .field, .numpad, .dialog*). Linked after app.css. */
+
+/* ---- floating tool bars over the canvas (설비 types, 메모 modes) ---------------------------- */
+
+.fx-bar, .memo-bar {
+  position: absolute;
+  top: 66px;                 /* under the tool hint (.hint, top left, up to two lines) */
+  left: 10px;
+  max-width: calc(100% - 20px);
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.10);
+  touch-action: manipulation;
+  pointer-events: auto;
+}
+.fx-bar-label, .memo-bar-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.fx-chip { min-width: 0; }
+
+/* ---- fixture panel ------------------------------------------------------------------------ */
+
+.fx-panel .panel-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.fx-label-preview { font-weight: 500; color: var(--text); }
+.fx-wall {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ok);
+  border: 1px solid #A8D5B5;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.fx-types .chip-small { min-width: 0; padding: 0 12px; }
+/* 기타: name box (keyboard) */
+.fx-name-row { align-items: center; margin: 6px 0; }
+.fx-name-row .chip-label { flex: none; }
+/* [벽 속에 넣기] (옷장 / 신발장 against a wall) */
+.fx-in-wall { white-space: nowrap; }
+
+/* ---- 세대 정보 form ------------------------------------------------------------------------ */
+
+.info-form { width: min(720px, 100%); }
+.info-note { color: var(--muted); font-size: 15px; }
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+.info-field { margin: 8px 0; }
+.info-label { font-size: 16px; font-weight: 700; color: var(--text); }
+.info-input { min-height: 56px; font-size: 19px; }
+.info-sub { font-size: 13px; color: var(--muted); }
+.info-address, .info-title { grid-column: 1 / -1; }
+.info-fill-row { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-top: -4px; }
+.info-form .dialog-buttons .btn { min-width: 110px; min-height: 56px; font-size: 18px; }
+
+@media (max-width: 620px) {
+  .info-grid { grid-template-columns: 1fr; }
+}
