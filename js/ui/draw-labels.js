@@ -18,6 +18,7 @@
 import { placeLabels } from '../core/labels.js';
 import { PAPER_STYLE, PT_MM } from '../core/printlayout.js';
 import { canvasFont, TEXT_PX } from './theme.js';
+import { fixtureInnerLineMM } from './draw-fixtures.js';
 
 export const SCREEN_LABEL_PX = { name: TEXT_PX.name, height: TEXT_PX.height, opening: 12, fixture: 12 };
 
@@ -51,6 +52,8 @@ function placeFor(ctx, project, derived, opts) {
     nameObstacles: opts.nameObstacles,
     // Hand-moved offsets at the automatic print scale (opts.offsetScale; screen = paper).
     offsetWorldPerPaperMM: opts.offsetScale > 0 ? opts.offsetScale : undefined,
+    // The plain boxes' inner outline (draw-fixtures.js): their labels keep inside it.
+    fixtureInner: opts.paper ? fixtureInnerLineMM({ worldPerPaperMM: U.worldPerPaperMM }) : fixtureInnerLineMM({ pxPerMM: opts.pxPerMM }),
   });
   ctx.restore();
   return { labels, U };

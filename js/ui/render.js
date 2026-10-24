@@ -27,6 +27,7 @@ import {
 } from '../core/labels.js';
 import { PAPER_STYLE, PT_MM } from '../core/printlayout.js';
 import { pointInPolygon } from '../core/geom.js';
+import { FIXTURE_STYLE, fixtureInnerLineMM } from './draw-fixtures.js';
 
 const DEFAULTS = {
   mode: 'screen',          // 'screen' | 'export'
@@ -646,7 +647,7 @@ function drawScreenText(ctx, view, project, derived, geo, font, o) {
     project, derived, scale: view.scale, labels: !!o.labels, sideLabels: !!o.sideLabels,
     openingLabels: !!o.openingLabels, fixtureLabels: !!o.fixtureLabels, notRoomLabels: !!o.notRoomLabels,
     wppm: o.worldPerPaperMM, roomLabel: o.roomLabel, obstacles: o.textObstacles, forceShow: o.forceShow,
-    exclude: o.fixtureExclude || null,
+    exclude: o.fixtureExclude || null, inner: FIXTURE_STYLE.innerLine,
     active: o.activeSide ? `${o.activeSide.roomId}|${o.activeSide.sideKey}` : '', font: JSON.stringify(font),
   };
   let layout = textCache && sameKeys(textCache.key, key) ? textCache.layout : null;
@@ -1089,6 +1090,8 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
       withCandidates: true,
       extraDepth: o.sideLabels ? SIDE_VALUE_BAND_PX.map(W) : 0,
       fixtureBoxes: fixtures, obstacles: extra,
+      // The plain boxes' inner outline (draw-fixtures.js): their labels keep inside it.
+      fixtureInner: paper ? fixtureInnerLineMM({ worldPerPaperMM: o.paperText.gapWorldPerPaperMM }) : fixtureInnerLineMM({ pxPerMM: k }),
     });
     for (const l of labels) {
       if (l.kind === 'fixture' && o.fixtureExclude && l.refId === o.fixtureExclude) continue;

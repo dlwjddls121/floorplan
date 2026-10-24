@@ -587,12 +587,12 @@ export class PanelController {
     this.state = null;
     this.ctx.command(() => store.deleteEdge(edgeId), '벽 지우기');
     this.close();
-    // Only the deleted wall's own values go (DESIGN.md §7.7); the others are kept, and the ones whose
-    // side is open now wait until the wall is drawn again.
+    // The wall's own values go with it (drawn again, it starts without values); the other walls' values
+    // stay, and the ones whose side is open now come back when the wall is drawn again (DESIGN.md §7.7).
     const dropped = (store.lastDropped || []).length, waiting = (store.lastDetached || []).length;
     let msg = '지웠습니다.';
     if (dropped) msg += ` 이 벽의 길이 값 ${dropped}개도 지웠습니다.`;
-    if (waiting) msg += ` 다른 길이 값 ${waiting}개는 그대로 두었다가 벽을 다시 그리면 다시 붙습니다.`;
+    if (waiting) msg += ` 다른 벽의 길이 값 ${waiting}개는 그대로 두었다가, 벽을 다시 그려 방이 닫히면 다시 보입니다.`;
     this.ctx.toast(`${msg} ↶ 버튼으로 되돌릴 수 있습니다.`, {
       action: { label: '되돌리기', run: () => this.ctx.command(() => this.ctx.store().undo(), '되돌리기') },
     });

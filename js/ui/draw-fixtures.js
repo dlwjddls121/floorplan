@@ -3,7 +3,14 @@
 //   - 싱크대, 옷장, 신발장 and 실 아님 spaces: the outline over a plain white fill (FIXTURE_FILL), no
 //     diagonal, no colour and no sink basin (user feedback 2026-10-17: the diagonal made the text hard
 //     to read; 2026-10-18: no gray, white); the label says what it is. The same in 그림만, minus the
-//     text. FIXTURE_STYLE.innerLine (off): a second, inner outline, the alternative shown to the user.
+//     text.
+//   - every plain box (core/fixtures.js isPlainBox: 싱크대, 옷장, 신발장, 보일러, 기타) has a second, inner
+//     outline innerGap inside its outline, as thick as the outline (user 2026-10-25: of the two looks
+//     in 아침확인_그림/14 "②, 다른것까지 한줄 더 그어줘"); on screen, on paper and in 그림만. Its label keeps
+//     inside the inner line (core/labels.js, placeLabels opts.fixtureInner). Where the inner box would be
+//     under 2 × innerGap at this scale, or the label would not fit inside it even at 70 %, that fixture
+//     keeps the plain outline (core/labels.js fixtureInnerLineShown). Not 변기 / 세면대 / 욕조 (symbols),
+//     기둥 (solid black), 계단 (treads), nor 실 아님 spaces (their outline is the walls).
 //   - subtle glyphs for 변기, 세면대, 욕조
 //   - an in-wall fixture (inWall) is drawn over its wall: its opaque box replaces the wall band there
 //   - black labels of about 8.8 pt on paper ("싱크대 1950")
@@ -19,11 +26,17 @@ import { FONT_STACK, COLORS, LINES } from './theme.js';
 import {
   normalizeFixture, fixtureLabel, fixtureTypeInfo, localToWorld, fixturePolygon, fixtureFrame,
   isColumn, fixtureBounds, fixtureFlushSides, isStair, stairTreads, stairArrowLocal,
-  hasGrayFill, FIXTURE_FILL, roomInnerPolygon,
+  hasGrayFill, FIXTURE_FILL, roomInnerPolygon, isPlainBox,
 } from '../core/fixtures.js';
 import { pointInPolygon } from '../core/geom.js';
+import {
+  fixtureInnerLineShown, fixtureTextFit, fixtureInnerTextInset, fixtureTextArea, fixtureInnerLineDrawn, fixtureObstacles,
+} from '../core/labels.js';
 
 const PT_MM = 25.4 / 72;
+// How much wider than measured the drawing takes a label when it decides on the inner outline (see
+// innerOutline).
+const INNER_FIT_MARGIN = 1.003;
 
 export const FIXTURE_STYLE = {
   color: '#111111',          // outline and label (plan: label in black)
@@ -34,8 +47,54 @@ export const FIXTURE_STYLE = {
   ghost: '#1A73E8',          // drag preview (same as COLORS.preview)
   paper: { line: 0.18, glyph: 0.13, labelPt: 8.8, innerGap: 0.8 },   // paper mm / pt
   screen: { line: 1.25, glyph: 0.9, labelPx: 12, innerGap: 3 },      // CSS px
-  innerLine: false,          // 싱크대 / 옷장 / 신발장: also an inner outline innerGap inside (not used)
+  innerLine: true,           // plain boxes (isPlainBox): also an inner outline innerGap inside (2026-10-25)
 };
+
+// The plain boxes' inner outline in world mm, for placeLabels opts.fixtureInner: on paper at
+// worldPerPaperMM (the print scale), on screen at pxPerMM (canvas px per world mm). → { gap, line } | null
+export function fixtureInnerLineMM({ worldPerPaperMM = 0, pxPerMM = 0 } = {}) {
+  if (!FIXTURE_STYLE.innerLine) return null;
+  if (worldPerPaperMM > 0) {
+    return { gap: FIXTURE_STYLE.paper.innerGap * worldPerPaperMM, line: FIXTURE_STYLE.paper.line * worldPerPaperMM };
+  }
+  if (pxPerMM > 0) return { gap: FIXTURE_STYLE.screen.innerGap / pxPerMM, line: FIXTURE_STYLE.screen.line / pxPerMM };
+  return null;
+}
+
+// The inner outline of a plain box f whose outline is the canvas rect `box`, when it is drawn at this
+// scale (fixtureInnerLineShown: the inner box at least 2 × gap, and the label `text` at fontPx fits
+// inside it; the label is measured also in 그림만, so both kinds of output draw the same lines).
+// place: { area (core/labels.js fixtureTextArea: the part of the box other fixtures leave free for the
+// label), k (canvas px per world mm) } — then the rule is the label placement's own
+// (fixtureInnerLineDrawn, world mm), so a label pushed aside by a column in the box never crosses a line
+// drawn here (checker 2026-10-25). Without it (the drag preview) the whole box decides.
+// → { rect: the inner outline, textBox: the space inside it for the label } (canvas px) | null
+function innerOutline(ctx, f, box, sz, text, fontPx = sz.font, place = null) {
+  if (!FIXTURE_STYLE.innerLine || !isPlainBox(f)) return null;
+  const g = sz.innerGap;
+  let tw = 0;
+  if (text) {
+    ctx.save();
+    ctx.font = `normal ${fontPx}px ${FONT_STACK}`;
+    tw = ctx.measureText(text).width;
+    ctx.restore();
+  }
+  // The label layers measure the same text at another canvas size (치수선 없이: at the pt size under a
+  // scaled context), which comes out up to a few 0.01 % wider: the drawing decides with the text taken
+  // INNER_FIT_MARGIN wider, so wherever it draws the line the label placement keeps inside it too
+  // (checker 2026-10-25; at the very edge the label may keep inside a line that is not drawn).
+  const twFit = tw * INNER_FIT_MARGIN;
+  const k = place && place.k > 0 ? place.k : 0;
+  const shown = k && place.area
+    ? fixtureInnerLineDrawn(place.area, g / k, sz.line / k, twFit / k, fontPx / k)
+    : fixtureInnerLineShown(box.w, box.h, g, sz.line, twFit, fontPx);
+  if (!shown) return null;
+  const i = fixtureInnerTextInset(g, sz.line);
+  return {
+    rect: { x: box.x + g, y: box.y + g, w: box.w - 2 * g, h: box.h - 2 * g },
+    textBox: { x: box.x + i, y: box.y + i, w: box.w - 2 * i, h: box.h - 2 * i },
+  };
+}
 
 function sizes(opts) {
   const k = opts.paper && opts.paper.pxPerPaperMM;
@@ -87,23 +146,36 @@ function localRect(opts, f, u0, u1, v0, v1) {
 // the box in that direction instead of covering the small fixture.
 // halo: a thin white outline around the letters (where lines or symbols cross the text); a box with
 // the plain gray fill does not need it.
-function drawLabel(ctx, text, c, box, fontPx, color, outside = null, withHalo = true) {
+// inner: box is the space inside a plain box's inner outline (innerOutline textBox): the text is turned
+// and shrunk as the label placement does it (core/labels.js fixtureTextFit) and stays inside.
+function drawLabel(ctx, text, c, box, fontPx, color, outside = null, withHalo = true, inner = false) {
   if (!text) return;
   ctx.font = `normal ${fontPx}px ${FONT_STACK}`;
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const tw = ctx.measureText(text).width;
-  const pad = fontPx * 0.8;
-  const fitsAcross = tw + pad <= box.w && fontPx * 1.1 <= box.h;
-  const fitsAlong = tw + pad <= box.h && fontPx * 1.1 <= box.w;
-  let vertical = !fitsAcross && box.h > box.w;
+  let tw = ctx.measureText(text).width;
+  let vertical = false;
   let halo = withHalo;
-  if (!fitsAcross && !fitsAlong && outside) {
-    vertical = false;
-    halo = false;   // outside the box a halo could cut into a room name nearby
-    const ext = Math.abs(outside.x) * (box.w / 2 + tw / 2) + Math.abs(outside.y) * (box.h / 2 + fontPx * 0.6) + fontPx * 0.3;
-    c = { x: box.x + box.w / 2 + outside.x * ext, y: box.y + box.h / 2 + outside.y * ext };
+  if (inner) {
+    const fit = fixtureTextFit(tw, fontPx, box.w, box.h, true);
+    if (fit.k !== 1) {
+      fontPx *= fit.k;
+      ctx.font = `normal ${fontPx}px ${FONT_STACK}`;
+      tw = ctx.measureText(text).width;
+    }
+    vertical = fit.rot !== 0;
+  } else {
+    const pad = fontPx * 0.8;
+    const fitsAcross = tw + pad <= box.w && fontPx * 1.1 <= box.h;
+    const fitsAlong = tw + pad <= box.h && fontPx * 1.1 <= box.w;
+    vertical = !fitsAcross && box.h > box.w;
+    if (!fitsAcross && !fitsAlong && outside) {
+      vertical = false;
+      halo = false;   // outside the box a halo could cut into a room name nearby
+      const ext = Math.abs(outside.x) * (box.w / 2 + tw / 2) + Math.abs(outside.y) * (box.h / 2 + fontPx * 0.6) + fontPx * 0.3;
+      c = { x: box.x + box.w / 2 + outside.x * ext, y: box.y + box.h / 2 + outside.y * ext };
+    }
   }
   ctx.save();
   ctx.translate(c.x, c.y);
@@ -277,7 +349,7 @@ function drawScreenMarks(ctx, f, box, o) {
   }
 }
 
-function drawOneFixture(ctx, f, opts, sz, o) {
+function drawOneFixture(ctx, f, opts, sz, o, place = null) {
   const poly = fixturePolygon(f);
   const box = pxRect(opts, poly);
   if (sz.screen && box.w < 3 && box.h < 3) return;
@@ -292,22 +364,23 @@ function drawOneFixture(ctx, f, opts, sz, o) {
     ctx.fill();
   }
   drawGlyph(ctx, f, opts, sz);
+  const text = fixtureLabel(f);
+  // Plain boxes: the inner outline, as thick as the outline (user 2026-10-25), where it fits.
+  const inner = innerOutline(ctx, f, box, sz, text, sz.font, place);
   ctx.strokeStyle = FIXTURE_STYLE.color;
   ctx.lineWidth = sz.line;
   ctx.lineJoin = 'miter';
   ctx.beginPath();
   polygonPath(ctx, opts, poly);
-  if (gray && FIXTURE_STYLE.innerLine) {
-    const g = Math.min(sz.innerGap, box.w / 4, box.h / 4);
-    if (g > sz.line) ctx.rect(box.x + g, box.y + g, box.w - 2 * g, box.h - 2 * g);
-  }
+  if (inner) ctx.rect(inner.rect.x, inner.rect.y, inner.rect.w, inner.rect.h);
   ctx.stroke();
   // On paper every text label comes from draw-labels.js (one placement with collision avoidance and
   // hand-moved offsets; '그림만' leaves it out), so only the screen writes fixture labels here.
   if (!o.drawingOnly && !opts.paper) {
     const c = opts.toPx({ x: f.x, y: f.y });
     const { n } = fixtureFrame(f.rot);
-    drawLabel(ctx, fixtureLabel(f), c, box, sz.font, FIXTURE_STYLE.color, { x: -n.x, y: -n.y }, !gray);
+    if (inner) drawLabel(ctx, text, c, inner.textBox, sz.font, FIXTURE_STYLE.color, null, !gray, true);
+    else drawLabel(ctx, text, c, box, sz.font, FIXTURE_STYLE.color, { x: -n.x, y: -n.y }, !gray);
   }
   if (sz.screen) drawScreenMarks(ctx, f, box, o);
 }
@@ -317,6 +390,10 @@ export function drawFixtures(ctx, project, derived, opts) {
   if (!list.length) return;
   const sz = sizes(opts);
   const o = optionsOf(opts);
+  // The boxes of all fixtures: where one covers part of another, that one's label keeps to the free
+  // part (core/labels.js fixtureTextArea), and so does the rule for its inner outline.
+  const boxes = FIXTURE_STYLE.innerLine ? fixtureObstacles(project) : null;
+  const k = opts.pxPerMM > 0 ? opts.pxPerMM : 0;
   ctx.save();
   for (const raw of list) {
     const f = normalizeFixture(raw);
@@ -324,7 +401,10 @@ export function drawFixtures(ctx, project, derived, opts) {
     try {
       if (isColumn(f)) drawColumn(ctx, f, opts, sz, o, project, derived);
       else if (isStair(f)) drawStair(ctx, f, opts, sz, o);
-      else drawOneFixture(ctx, f, opts, sz, o);
+      else {
+        const place = boxes && k && isPlainBox(f) ? { area: fixtureTextArea(f, project, derived, boxes), k } : null;
+        drawOneFixture(ctx, f, opts, sz, o, place);
+      }
     } catch (err) {
       console.error('fixture draw failed', f.id, err);
     }
@@ -355,7 +435,17 @@ export function drawFixtureGhost(ctx, fixture, opts) {
     return;
   }
   const box = pxRect(opts, poly);
-  drawLabel(ctx, f.type, opts.toPx({ x: f.x, y: f.y }), box, 12, FIXTURE_STYLE.ghost);
+  // A plain box shows its inner outline too (dashed, as it will be drawn), its type name inside it.
+  const inner = innerOutline(ctx, f, box, sizes(opts), f.type, 12);
+  if (inner) {
+    ctx.lineWidth = FIXTURE_STYLE.screen.line;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(inner.rect.x, inner.rect.y, inner.rect.w, inner.rect.h);
+    ctx.setLineDash([]);
+    drawLabel(ctx, f.type, opts.toPx({ x: f.x, y: f.y }), inner.textBox, 12, FIXTURE_STYLE.ghost, null, true, true);
+  } else {
+    drawLabel(ctx, f.type, opts.toPx({ x: f.x, y: f.y }), box, 12, FIXTURE_STYLE.ghost);
+  }
   ctx.restore();
 }
 

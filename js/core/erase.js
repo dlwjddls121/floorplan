@@ -600,9 +600,14 @@ export function carryMerged(before, doc, removedIds = []) {
 //   (pass erasePlan's edgeIds: the straight walls), windows / doors, fixtures and memo strokes in ONE
 //   undo step, with the consequences of the single deletes: a window / door on an erased wall goes with
 //   it; a fixture standing against an erased wall stays where it is, free; rooms merge or vanish (their
-//   names wait in detachedRooms and come back with the room); every value of an erased wall is KEPT,
-//   detached, and attaches again when the side is drawn again (unlike [벽 지우기], which drops the wall's
-//   own values); 확인필요 flags of erased walls go. Nothing to erase → false, no undo step.
+//   names wait in detachedRooms and come back with the room); the values of the erased walls go with
+//   them, as with [벽 지우기] (user 2026-10-25: "벽 지웠다가 다시 그릴때는 숫자 리셋되게 해줘. 괜히
+//   헷갈릴거같아", "지우개로 지울때도 그런거면 똑같이 리셋"): the measures of the room sides along an
+//   erased wall (both faces), the spans with a part along one, the parts typed on either side of an
+//   erased wall / divider that divided a span, and the waiting values taken along one — nothing of them
+//   waits or comes back when a wall is drawn there again (store.lastDropped; ↶ gives them back with the
+//   wall). Values of the walls that stay are kept exactly as with [벽 지우기] (user 2026-10-17 "지운 벽만
+//   사라지고 나머지 사이즈는 유지"): on their side, else waiting until the side is drawn again (§7.7). 확인필요 flags of erased walls go. Nothing to erase → false, no undo step.
 //   store.lastErased = { edgeIds, openingIds, fixtureIds, memoIds } — what really went.
 export function installErase(DocStore) {
   const proto = DocStore.prototype;
@@ -613,14 +618,19 @@ export function installErase(DocStore) {
     const memoSet = new Set(items.memoIds || []);
     const before = this.project;
     const edgesGone = (before.edges || []).filter((e) => edgeSet.has(e.id)).map((e) => e.id);
+    // The values of the walls that go (model.js; read on the plan before the erase).
+    // The same rule as [벽 지우기] (deleteEdge): the parts typed on either side of an erased wall are the
+    // values of the walls that stay, so they wait like those (2026-10-25: the two must behave the same).
+    const own = edgesGone.length ? this._wallOwnValues(edgesGone) : null;
     const ok = this._commit('eraseItems', (p) => {
       const edges = (p.edges || []).filter((e) => edgeSet.has(e.id)).map((e) => e.id);
       const openings = (p.openings || []).filter((o) => !openSet.has(o.id) && !edgeSet.has(o.edge));
       const memo = (p.memo || []).filter((s) => !memoSet.has(s.id));
       if (!edges.length && openings.length === (p.openings || []).length
         && !(p.fixtures || []).some((f) => fixSet.has(f.id)) && memo.length === (p.memo || []).length) return null;
-      // The walls left whole by the removal keep their 확인필요 flags and their fixtures (carryMerged).
-      const doc = edges.length ? carryMerged(p, removeEdges(p, edges), edges) : p;
+      // The walls left whole by the removal keep their 확인필요 flags and their fixtures (carryMerged);
+      // the values of the erased walls go with them (reported in lastDropped).
+      const doc = edges.length ? this._dropWallValues(p, carryMerged(p, removeEdges(p, edges), edges), edges, own) : p;
       const fixtures = (doc.fixtures || []).filter((f) => !fixSet.has(f.id));
       const ids = new Set((doc.edges || []).map((e) => e.id));
       return {

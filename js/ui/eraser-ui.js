@@ -165,7 +165,9 @@ function touchCount(t) {
   return t.wallIds.size + t.dividerIds.size + t.openingIds.size + t.fixtureIds.size + t.memoIds.size;
 }
 
-// '벽 2줄, 창 1개를 지웠습니다. … 잘못 지웠으면 ↶를 누르세요.' (after store.eraseItems(plan))
+// '벽 2줄, 창 1개를 지웠습니다. 잘못 지웠으면 ↶를 누르세요.' (after store.eraseItems(plan)); when values
+// went with the walls (their own values, user 2026-10-25: no value waits for the wall to be drawn
+// again), '… 길이 값 3개도 함께 지웠습니다. …'.
 export function eraseToastText(plan, store) {
   const c = plan.counts || {};
   const parts = [];
@@ -179,10 +181,10 @@ export function eraseToastText(plan, store) {
   const last = parts[parts.length - 1];
   const particle = last.endsWith('줄') ? '을' : '를';
   let msg = `${parts.join(', ')}${particle} 지웠습니다.`;
-  const waiting = ((store && store.lastDetached) || []).length;
   const dropped = ((store && store.lastDropped) || []).length;
-  if (waiting) msg += ` 길이 값 ${waiting}개는 그대로 두었다가 벽을 다시 그리면 다시 붙습니다.`;
-  if (dropped) msg += ` 길이 값 ${dropped}개는 지워졌습니다.`;
+  const waiting = ((store && store.lastDetached) || []).length;
+  if (dropped) msg += ` 지운 벽의 길이 값 ${dropped}개도 지웠습니다.`;
+  if (waiting) msg += ` 다른 벽의 길이 값 ${waiting}개는 그대로 두었다가, 벽을 다시 그려 방이 닫히면 다시 보입니다.`;
   return `${msg} 잘못 지웠으면 ↶를 누르세요.`;
 }
 

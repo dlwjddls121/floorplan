@@ -135,6 +135,18 @@ export function hasGrayFill(f) {
   return !!(t && t.fill);
 }
 
+// True for the types drawn as a plain box with nothing inside but their label — 싱크대, 옷장, 신발장,
+// 보일러, 기타 (and an unknown type, read as 기타): these get the second, inner outline (user 2026-10-25,
+// "다른것까지 한줄 더 그어줘"; ui/draw-fixtures.js FIXTURE_STYLE.innerLine, core/labels.js
+// fixtureInnerLineShown). Not 변기 / 세면대 / 욕조 (their own symbols), 기둥 (solid black), 계단 (treads).
+// A record or a type name.
+export function isPlainBox(f) {
+  const type = migratedType(typeof f === 'string' ? f : f && f.type);
+  if (type === COLUMN_TYPE || type === STAIR_TYPE) return false;
+  const t = fixtureTypeInfo(type);
+  return !!t && !t.glyph && !t.column && !t.stair;
+}
+
 // True for the types of which usually only the width is measured (the depth is the average).
 export function isWidthOnly(f) {
   const type = typeof f === 'string' ? f : f && f.type;

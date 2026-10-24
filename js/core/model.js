@@ -1665,38 +1665,86 @@ export class DocStore {
     return { edgeIds };
   }
 
-  // Delete a wall or divider. Only the deleted wall's OWN values go (the measures of room sides that
-  // contain it, on both faces, and spans with a part along it; reported in lastDropped). Every other
-  // measure is kept: on its side if the side still exists, else detached until the side is drawn
-  // again (DESIGN.md §7.7).
+  // Delete a wall or divider ([벽 지우기] / [선 지우기]). Only the deleted wall's OWN values go (the measures
+  // of room sides that contain it, on both faces, and spans with a part along it; reported in lastDropped):
+  // drawn again, it starts without values (user 2026-10-25 "벽 지웠다가 다시 그릴때는 숫자 리셋되게 해줘";
+  // the 지우개 does the same). Every other measure is kept (user 2026-10-17 "지운 벽만 사라지고 나머지
+  // 사이즈는 유지"): on its side if the side still exists, else detached until the side is drawn again
+  // (DESIGN.md §7.7). ↶ gives everything back.
   deleteEdge(edgeId) {
-    const own = new Set(sidesForEdge(this.derived, edgeId).map(({ roomId, side }) => `${roomId}|${side.key}`));
-    for (const sp of this.derived.spans || []) {
-      const hit = sp.parts.some((part) => {
-        const dr = this._room(part.roomId);
-        const side = dr && dr.sides[part.sideIndex];
-        return side && side.edgeIds.includes(edgeId);
-      });
-      if (hit) own.add(`span|${sp.measureId}`);
-    }
+    const own = this._wallOwnValues([edgeId]);
     return this._commit('deleteEdge', (p) => {
       if (!p.edges.some((e) => e.id === edgeId)) return null;
       // A wall left whole by the removal (a T's bar when its stem goes) keeps its 확인필요 flag and the
       // fixtures standing against it (erase.js carryMerged, checker 2026-10-22).
-      const doc = carryMerged(p, removeEdge(p, edgeId), [edgeId]);
+      const doc = this._dropWallValues(p, carryMerged(p, removeEdge(p, edgeId), [edgeId]), [edgeId], own);
       const ids = new Set(doc.edges.map((e) => e.id));
-      const isOwn = (m) => own.has(`${m.room}|${sideKeyOf(m)}`) || own.has(`span|${m.id}`);
-      const measures = (doc.measures || []).filter((m) => !isOwn(m));
-      // A value that is waiting (its room is open) and was taken along this very wall is the wall's own
-      // value too: it goes with the wall instead of coming back when another wall is drawn there.
-      const edge = p.edges.find((e) => e.id === edgeId);
-      const nodeMap = new Map(p.nodes.map((n) => [n.id, n]));
-      const ownWaiting = (m) => edge && detachedAlongEdge(m, nodeMap.get(edge.a), nodeMap.get(edge.b), nodeMap);
-      const detachedMeasures = (doc.detachedMeasures || []).filter((m) => !ownWaiting(m));
-      const gone = (doc.measures || []).filter(isOwn).concat((doc.detachedMeasures || []).filter(ownWaiting));
-      if (gone.length) this._pendingDropped = gone;
-      return { ...doc, measures, detachedMeasures, wallChecks: (doc.wallChecks || []).filter((w) => ids.has(w.edge)) };
+      return { ...doc, wallChecks: (doc.wallChecks || []).filter((w) => ids.has(w.edge)) };
     }, { detail: { edgeId } });
+  }
+
+  // The values that belong to the walls / dividers edgeIds, on the current derived data (before they are
+  // removed): the measures of the room sides that contain one of them (both faces) and the spans with a
+  // part along one of them. opts.parts (the 지우개, user 2026-10-25: "벽 지웠다가 다시 그릴때는 숫자 리셋되게
+  // 해줘. 괜히 헷갈릴거같아"): also the parts typed on either side of one of them where it divides a span
+  // (a wall drawn across a measured side, §7.9, or a 구역 나누기 line, §7.7) — measured up to it, they are
+  // its values too. [벽 지우기] (deleteEdge) leaves those waiting (§7.9). → Set of keys ('room|side',
+  // 'span|<id>', 'id|<id>')
+  _wallOwnValues(edgeIds, { parts = false } = {}) {
+    const ids = new Set(edgeIds);
+    const own = new Set();
+    for (const id of ids) {
+      for (const { roomId, side } of sidesForEdge(this.derived, id)) own.add(`${roomId}|${side.key}`);
+    }
+    // The removed edges at each of their end nodes, with the direction to their other end.
+    const pos = new Map(this.project.nodes.map((n) => [n.id, n]));
+    const nodeEdges = new Map();
+    for (const e of this.project.edges) {
+      if (!ids.has(e.id)) continue;
+      for (const [n, o] of [[e.a, e.b], [e.b, e.a]]) {
+        const N = pos.get(n), O = pos.get(o);
+        if (N && O) nodeEdges.set(n, (nodeEdges.get(n) || []).concat({ id: e.id, d: { x: O.x - N.x, y: O.y - N.y } }));
+      }
+    }
+    for (const sp of this.derived.spans || []) {
+      const sides = sp.parts.map((part) => {
+        const dr = this._room(part.roomId);
+        return dr ? dr.sides[part.sideIndex] || null : null;
+      });
+      if (sides.some((side) => side && side.edgeIds.some((id) => ids.has(id)))) own.add(`span|${sp.measureId}`);
+      if (!parts) continue;
+      // Two parts that meet at an end of a removed wall / divider that divides the span there: it leaves
+      // the measured line into the rooms of the parts (not a wall on the line's other face).
+      for (let i = 0; i + 1 < sides.length; i++) {
+        const a = sides[i], b = sides[i + 1];
+        if (!a || !b) continue;
+        const at = [a.from, a.to].filter((n) => n === b.from || n === b.to);
+        const inward = a.inwardNormal || { x: 0, y: 0 };
+        const crosses = at.some((n) => (nodeEdges.get(n) || []).some((r) => !a.edgeIds.includes(r.id) && !b.edgeIds.includes(r.id)
+          && r.d.x * inward.x + r.d.y * inward.y > 1e-6 * Math.hypot(r.d.x, r.d.y)));
+        if (!crosses) continue;
+        for (const part of [sp.parts[i], sp.parts[i + 1]]) if (part.measureId) own.add(`id|${part.measureId}`);
+      }
+    }
+    return own;
+  }
+
+  // doc (the project after removing the walls edgeIds from p) without the values `own` of those walls
+  // (_wallOwnValues) and without the waiting values taken along one of them: a value waiting (its room
+  // is open) that was taken along that very wall is its own value too, and goes with it instead of
+  // coming back when another wall is drawn there. The values that went are left in _pendingDropped
+  // (lastDropped). → doc
+  _dropWallValues(p, doc, edgeIds, own) {
+    const isOwn = (m) => own.has(`${m.room}|${sideKeyOf(m)}`) || own.has(`span|${m.id}`) || own.has(`id|${m.id}`);
+    const ids = new Set(edgeIds);
+    const edges = p.edges.filter((e) => ids.has(e.id));
+    const nodeMap = new Map(p.nodes.map((n) => [n.id, n]));
+    const ownWaiting = (m) => edges.some((e) => detachedAlongEdge(m, nodeMap.get(e.a), nodeMap.get(e.b), nodeMap));
+    const measures = (doc.measures || []).filter((m) => !isOwn(m));
+    const detachedMeasures = (doc.detachedMeasures || []).filter((m) => !ownWaiting(m));
+    const gone = (doc.measures || []).filter(isOwn).concat((doc.detachedMeasures || []).filter(ownWaiting));
+    if (gone.length) this._pendingDropped = (this._pendingDropped || []).concat(gone);
+    return { ...doc, measures, detachedMeasures };
   }
 
   // Drag a corner. A loose wall end (one wall at it) dropped within opts.snapMM of a corner or a wall

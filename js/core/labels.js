@@ -53,6 +53,13 @@
 //    box.avoid), turned in tall narrow fixtures, shrunk to fit (down to 70 %). A white halo only
 //    where lines can cross the text (toilet / basin / bath symbols); 싱크대, 옷장 and 신발장 have a
 //    plain gray fill (no diagonal, no basin since 2026-10-17), so their text needs none.
+//    Plain boxes (fixtures.js isPlainBox: 싱크대, 옷장, 신발장, 보일러, 기타) have a second, inner outline
+//    (user 2026-10-25; ui/draw-fixtures.js): with opts.fixtureInner { gap, line } (world mm) their
+//    label keeps inside that inner line — the box shrunk by fixtureInnerTextInset on every side (the
+//    line, half of it as clearance, and a quarter gap of white: 1.18 paper mm), the text shrunk
+//    (down to 70 %) to fit along and across it. Where it would not fit even so, or the inner box is
+//    under 2 × gap, the inner line is not drawn (fixtureInnerLineShown; the drawing uses the same rule)
+//    and the label fits the outline as before.
 //  - 실 아님 names sit in the middle of the space (gray fill, no diagonal; no halo).
 //  - Fixtures are obstacles (2026-10-17, plan §1-2): a room name (with its H) that would sit on a
 //    fixture, column or stair moves to the nearest free spot inside the room (findFreeSpot); window /
@@ -87,13 +94,51 @@
 
 import { pointInPolygon } from './geom.js';
 import { wallPolygons, planOuterBounds, wallThickness, boxOf, polygonBoxArea, innerCorners, finishBeside } from './dims.js';
-import { hasGrayFill, normalizeFixture, fixtureBounds, isColumn, isStair } from './fixtures.js';
+import { hasGrayFill, normalizeFixture, fixtureBounds, isColumn, isStair, isPlainBox } from './fixtures.js';
 
 export const labelHooks = { labelOf: null, fixtureLabel: null, openingAnchor: null, fixtureBox: null };
 
 export const LABEL_COLORS = { name: '#000000', height: '#0070C0', opening: '#0070C0', fixture: '#000000' };
 const LINE_HEIGHT = 1.2;
 const MIN_NAME_SCALE = 0.7;
+
+// ---- fixture text in its box ---------------------------------------------------------------------
+
+// How a fixture label fits a box w × h (any one unit: world mm, canvas px): tw = the text's width and
+// em = its font size, both at full size. Turned (rot -90, reads bottom→top) in a tall narrow box when
+// it does not fit across; shrunk to fit along it, down to MIN_NAME_SCALE. inner: the box is the inside
+// of a plain box's inner line — the letters must also fit across it (shrunk for that too), and `fits`
+// says whether the text at k lies inside. → { rot, k, fits }
+export function fixtureTextFit(tw, em, w, h, inner = false) {
+  let rot = 0, avail = w, cross = h;
+  if (tw > w * 0.95 && h > w) { rot = -90; avail = h; cross = w; }
+  let k = tw > avail * 0.95 ? Math.max(MIN_NAME_SCALE, (avail * 0.95) / tw) : 1;
+  if (!inner) return { rot, k, fits: tw * k <= avail * 0.95 + 1e-9 };
+  if (em > 0 && em * k > cross * 0.95) k = Math.max(MIN_NAME_SCALE, Math.min(k, (cross * 0.95) / em));
+  const fits = w > 0 && h > 0 && tw * k <= avail * 0.95 + 1e-9 && em * k <= cross * 0.95 + 1e-9;
+  return { rot, k, fits };
+}
+
+// How far inside a plain box's outline its label keeps when the inner line (gap inside the outline,
+// `line` wide) is drawn: past the inner line by half its width plus another half (clearance) and a
+// quarter gap of white, so the letters never touch it (paper: 0.8 + 0.18 + 0.2 = 1.18 mm).
+export function fixtureInnerTextInset(gap, line) {
+  return gap * 1.25 + Math.max(0, line || 0);
+}
+
+// Is the inner outline of a plain box drawn (user 2026-10-25: "다른것까지 한줄 더 그어줘")? Box w × h,
+// the inner line `gap` inside the outline and `line` wide, the label tw wide at font size em (tw 0: no
+// label), all in one unit. Not when the inner box would be under 2 × gap (too small at this scale), nor
+// when the label would not fit inside the inner line (box shrunk by fixtureInnerTextInset) even at
+// 70 %: then the fixture keeps its plain outline and the label fits it as before. The drawing
+// (ui/draw-fixtures.js) and the label placement (placeLabels opts.fixtureInner) both decide by this. → bool
+export function fixtureInnerLineShown(w, h, gap, line, tw = 0, em = 0) {
+  if (!(gap > 0) || !(w > 0) || !(h > 0)) return false;
+  if (Math.min(w, h) - 2 * gap < 2 * gap) return false;
+  if (!(tw > 0)) return true;
+  const inset = fixtureInnerTextInset(gap, line);
+  return fixtureTextFit(tw, em, w - 2 * inset, h - 2 * inset, true).fits;
+}
 
 // Deterministic width estimate in font units (em fractions of a typical Korean UI font).
 export function estimateTextWidth(text, size, weight = 'normal') {
@@ -709,6 +754,8 @@ export function isLabelMoved(project, key, measureId = null) {
 //         offsetWorldPerPaperMM: world mm per paper mm for the manual offsets (paper: the automatic
 //         print scale, also when the user picked another one; default worldPerPaperMM),
 //         nameObstacles: world boxes the names of rooms with a diagonal side keep clear of,
+//         fixtureInner: { gap, line } world mm of the plain boxes' inner outline (null: none; the
+//         label keeps inside that line where it is drawn, see fixtureInnerLineShown),
 //         withCandidates, extraDepth: screen only (see the header) }
 export function placeLabels(project, derived, opts = {}) {
   if (!project || !derived || !Array.isArray(derived.rooms)) return [];
@@ -739,6 +786,7 @@ export function placeLabels(project, derived, opts = {}) {
     ? (project.openings || []).map((o) => ({ id: o.id, g: openingLabelGeometry(o, project, derived) })).filter((x) => x.g)
     : [];
   const withCands = !!opts.withCandidates;
+  const fixtureInner = opts.fixtureInner && opts.fixtureInner.gap > 0 ? opts.fixtureInner : null;
   // Extra distances from the wall for window / door spots (screen): a number or a list.
   const depths = [0].concat((Array.isArray(opts.extraDepth) ? opts.extraDepth : [opts.extraDepth]).filter((v) => v > 0));
   const placed = [];
@@ -1081,16 +1129,23 @@ export function placeLabels(project, derived, opts = {}) {
   function placeFixture(f) {
     const text = String(safeCall(labelHooks.fixtureLabel, f) || '').trim();
     if (!text) return;
-    const full = safeCall(labelHooks.fixtureBox, f, project, derived) || defaultFixtureBox(f);
-    if (!full || !full.center) return;
     // Other fixtures (a column in a 옷장) are avoided like the symbols inside the box.
-    const own = { minX: full.center.x - full.w / 2, minY: full.center.y - full.h / 2, maxX: full.center.x + full.w / 2, maxY: full.center.y + full.h / 2 };
-    const others = fixtureBoxes.filter((ob) => ob.id !== f.id && overlapArea(own, ob) > 0);
-    const box = freePartOf(others.length ? { ...full, avoid: [...(full.avoid || []), ...others] } : full);
+    const area = fixtureTextArea(f, project, derived, fixtureBoxes);
+    if (!area) return;
+    const { full } = area;
+    let box = area.box;
     const tw = width(text, fonts.fixture);
-    let rot = 0, avail = box.w;
-    if (tw > box.w * 0.95 && box.h > box.w) { rot = -90; avail = box.h; }
-    const k = tw > avail * 0.95 ? Math.max(MIN_NAME_SCALE, (avail * 0.95) / tw) : 1;
+    // A plain box with its inner line drawn: the text keeps inside that line (user 2026-10-25). The
+    // drawing decides by the same rule (fixtureInnerLineDrawn), also for the part of the box another
+    // fixture leaves free (checker 2026-10-25: a 수납장 with a 보일러 over its end had its label pushed
+    // across the inner line).
+    const em = fonts.fixture * wpu;
+    const inner = !!fixtureInner && isPlainBox(f) && fixtureInnerLineDrawn(area, fixtureInner.gap, fixtureInner.line, tw, em);
+    if (inner) {
+      const inset = fixtureInnerTextInset(fixtureInner.gap, fixtureInner.line);
+      box = { ...box, w: Math.max(0, box.w - 2 * inset), h: Math.max(0, box.h - 2 * inset) };
+    }
+    const { rot, k } = fixtureTextFit(tw, em, box.w, box.h, inner);
     const lines = [{ text, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
     const b = block(lines);
     // halo: drawn with a white outline, so a line of the symbol under it never strikes through it;
@@ -1113,22 +1168,55 @@ export function placeLabels(project, derived, opts = {}) {
       base: { x: full.center.x, y: full.center.y }, rot, lines, lineHeight: LINE_HEIGHT, w: b.w, h: b.h, halo, cands,
     });
   }
+}
 
-  // The part of a fixture box (along its long axis) outside the symbols drawn in it (box.avoid, e.g.
-  // the sink basin): the larger free stretch. → { center, w, h }
-  function freePartOf(box) {
-    const long = box.w >= box.h ? 'x' : 'y';
-    const size = long === 'x' ? box.w : box.h;
-    let lo = box.center[long] - size / 2, hi = box.center[long] + size / 2;
-    for (const a of box.avoid || []) {
-      const alo = long === 'x' ? a.minX : a.minY, ahi = long === 'x' ? a.maxX : a.maxY;
-      if (ahi <= lo || alo >= hi) continue;
-      if (alo - lo >= hi - ahi) hi = Math.max(lo, alo); else lo = Math.min(hi, ahi);
-    }
-    if (!(hi - lo > 0.25 * size)) return box; // the symbol fills the box: keep the centre
-    const center = { ...box.center, [long]: (lo + hi) / 2 };
-    return long === 'x' ? { center, w: hi - lo, h: box.h } : { center, w: box.w, h: hi - lo };
+// The part of a fixture box (along its long axis) outside the boxes given as box.avoid (symbols drawn
+// in it, other fixtures over it): the larger free stretch. → { center, w, h }
+function freePartOf(box) {
+  const long = box.w >= box.h ? 'x' : 'y';
+  const size = long === 'x' ? box.w : box.h;
+  let lo = box.center[long] - size / 2, hi = box.center[long] + size / 2;
+  for (const a of box.avoid || []) {
+    const alo = long === 'x' ? a.minX : a.minY, ahi = long === 'x' ? a.maxX : a.maxY;
+    if (ahi <= lo || alo >= hi) continue;
+    if (alo - lo >= hi - ahi) hi = Math.max(lo, alo); else lo = Math.min(hi, ahi);
   }
+  if (!(hi - lo > 0.25 * size)) return box; // the symbol fills the box: keep the centre
+  const center = { ...box.center, [long]: (lo + hi) / 2 };
+  return long === 'x' ? { center, w: hi - lo, h: box.h } : { center, w: box.w, h: hi - lo };
+}
+
+// Where the label of fixture f goes (world mm): `full`, its whole box (labelHooks.fixtureBox, else read
+// from the record), and `box`, the part of it no other fixture covers (fixtureBoxes: fixtureObstacles of
+// the project; a column standing in a 옷장). placeLabels and the drawing of the inner outline
+// (ui/draw-fixtures.js) both use it. → { full, box } | null
+export function fixtureTextArea(f, project, derived, fixtureBoxes = null) {
+  let full = safeCall(labelHooks.fixtureBox, f, project, derived) || defaultFixtureBox(f);
+  if (!full || !full.center) {
+    const n = normalizeFixture(f);
+    const b = n ? fixtureBounds(n) : null;
+    if (!b) return null;
+    full = { center: { x: n.x, y: n.y }, w: b.maxX - b.minX, h: b.maxY - b.minY, avoid: [] };
+  }
+  const own = { minX: full.center.x - full.w / 2, minY: full.center.y - full.h / 2, maxX: full.center.x + full.w / 2, maxY: full.center.y + full.h / 2 };
+  const id = f && f.id;
+  const others = (fixtureBoxes || fixtureObstacles(project)).filter((ob) => ob.id !== id && overlapArea(own, ob) > 0);
+  const box = freePartOf(others.length ? { ...full, avoid: [...(full.avoid || []), ...others] } : full);
+  return { full, box };
+}
+
+// Is the inner outline of a plain box drawn, its label area being `area` (fixtureTextArea)? As
+// fixtureInnerLineShown for the whole box, and the label (tw wide at size em; 0: none) must also fit
+// inside the line in the part of the box other fixtures leave free (else the label would be pushed
+// across the line: the fixture keeps its plain outline, its label as in 0.6.5). gap / line / tw / em in
+// world mm. → bool
+export function fixtureInnerLineDrawn(area, gap, line, tw = 0, em = 0) {
+  if (!area || !area.full) return false;
+  const { full, box } = area;
+  if (!fixtureInnerLineShown(full.w, full.h, gap, line, tw, em)) return false;
+  if (!(tw > 0) || !box) return true;
+  const inset = fixtureInnerTextInset(gap, line);
+  return fixtureTextFit(tw, em, box.w - 2 * inset, box.h - 2 * inset, true).fits;
 }
 
 // Unit vector toward a fixture's front (away from the wall its back stands against).
