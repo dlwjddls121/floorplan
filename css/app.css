@@ -2,7 +2,8 @@
    (buttons >= 48px, numpad keys >= 64px). PC (fine pointer) gets a smaller numpad. */
 
 :root {
-  --font: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
+  /* Same list as FONT_STACK in js/ui/theme.js: Roboto gives the Latin letters a sans face on Android. */
+  --font: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", Roboto, "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
   --bg: #F4F5F7;
   --surface: #FFFFFF;
   --text: #1B1F24;

@@ -8,15 +8,27 @@
 
 import { A4, mmToPx, canvasToBlob, buildRasterPdf } from '../js/io/export.js';
 
-const DEVTEST_VERSION = '2'; // 2: section 9 (update)
+// 2: section 9 (update). 3 (2026-10-24, after the Galaxy Tab S9 FE test): 1-5 S Pen side button, 1-6 finger
+// after the pen went away (the app's new pen-near rule), Roboto in the font list, 3 with the file types,
+// 4 says a refusal before installing is normal.
+const DEVTEST_VERSION = '3';
 
 // Same string as FONT_STACK in js/ui/theme.js (kept local so that this page does not depend on the UI package).
+// Roboto (on every Android) before the Noto names: on the Galaxy Tab the Latin letters came out in a serif
+// face with the old list (FONT_STACK_V2).
 const FONT_STACK =
+  '"Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", Roboto, "Noto Sans KR", "Noto Sans CJK KR", sans-serif';
+const FONT_STACK_V2 =
   '"Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif';
 const FONT_NAMES = ['Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR', 'Noto Sans CJK KR', 'NanumBarunGothic', 'Nanum Barun Gothic'];
 
-// "Pen near" window used by the app's palm rejection (DESIGN.md §5).
+// The app's "pen near" rule (js/ui/input.js, DESIGN.md §5): a pen is down, or a pen event came within the
+// last PEN_NEAR_MS; a pen counted as down lets go PEN_DOWN_HOLD_MS after its last event; a pen pointerout
+// leaving the page ends it at once, except right after a lift.
 const PEN_NEAR_MS = 800;
+const PEN_DOWN_HOLD_MS = 5000;
+// The file types of the app's [불러오기] (js/io/fileio.js IMPORT_ACCEPT); index.html #fileInput has the same.
+const IMPORT_ACCEPT = '.json,.txt,application/json,text/plain,application/octet-stream';
 
 const STORE_KEY = 'floorplan-devtest-v1';
 const IDB_NAME = 'floorplan-devtest'; // separate from the app's 'floorplan-db'
@@ -51,6 +63,18 @@ function defaultMem() {
       hover: 0, draw: 0, downs: 0, touchTotal: 0, touchNear: 0, touchCancel: 0, maxTouches: 0,
       mouse: 0, sideButton: 0, eraser: 0, minP: null, maxP: null, tilt: false,
       maxContact: 0, maxContactNear: 0, seq: [],
+      // v3, 1-5: pen events with the side button / eraser end ('down 2/2 닿음': count), pen moves that
+      // would rub out in the app, context menus on the pad ('pen', 'touch', …).
+      btnSeen: {}, sideMoves: 0, contextMenu: 0, contextMenuTypes: [],
+      // v3, 1-6: pen leave / out after hovering (a real "went away") or right after a lift; the last
+      // finger landings: { since (ms after the last pen event, null: none), after (that event), leave, finger }.
+      leaveAfterHover: 0, leaveAfterUp: 0, fingerLog: [],
+      // v3 (checker): every pen down / up as 'down 0/1 힘>0' (button/buttons, pressure 0 or not) — tells a
+      // side button that Chrome reports as the tip (0/1) pressed in the air ('힘0'); pen moves with a button
+      // but no pressure; a pen pointerdown while that pen is already down; the longest pause between two
+      // hover moves of a pen that stayed in range (no over / down / up in between) and how many were
+      // longer than PEN_NEAR_MS (a palm landing then counts as a finger).
+      downKinds: {}, airButtonMoves: 0, downWhileDown: 0, maxHoverGap: 0, hoverGapsOver: 0, hoverGapsLong: 0,
     },
     share: { json: null, txt: null, driveJson: null, driveTxt: null },
     file: null,
@@ -205,8 +229,14 @@ window.addEventListener('unhandledrejection', (e) => recordError(`처리 안 된
 // 1. Pen detection
 
 const pen = {
-  lastPenTime: 0,
-  hovering: false,
+  // The app's rule (js/ui/input.js): every pen event on the page, tracked like the app does.
+  lastPenTime: -Infinity,
+  lastPenType: '',
+  lastWasHover: false,   // the last pen event was a hover move (for the hover pauses)
+  down: new Set(),
+  // For 1-6: the last pen down / move / up / cancel ({ at, what }) and whether a pen leave / out came after it.
+  lastActivity: null,
+  leaveSinceActivity: false,
   activeTouches: new Set(),
   nearTouches: new Set(), // touch pointers that started while the pen was near
   lastPoint: new Map(),
@@ -219,7 +249,74 @@ const pen = {
 };
 
 function penIsNear(now = performance.now()) {
-  return pen.hovering || now - pen.lastPenTime < PEN_NEAR_MS;
+  return now < pen.lastPenTime + (pen.down.size ? PEN_DOWN_HOLD_MS : PEN_NEAR_MS);
+}
+
+// The pen is hovering: its last event was a hover move, a moment ago (shown only).
+function penHovering(now = performance.now()) {
+  const a = pen.lastActivity;
+  return !!a && a.what === '떠 있음' && now - a.at < PEN_NEAR_MS;
+}
+
+// The side button (barrel) or the eraser end of a pen, and whether the tip touches (as js/ui/input.js).
+function penEraseButtons(e) {
+  return e.pointerType === 'pen' && (e.button === 2 || e.button === 5 || ((e.buttons | 0) & (2 | 32)) !== 0);
+}
+function penContact(e) {
+  return ((e.buttons | 0) & (1 | 32)) !== 0 || e.pressure > 0;
+}
+
+// Pen events anywhere on the page, as the app counts them for "pen near".
+function onDocPen(e) {
+  if (e.pointerType !== 'pen') return;
+  const now = performance.now();
+  const t = e.type;
+  if (t === 'pointerout' && !e.relatedTarget) {
+    // The pen left the page: the app counts fingers at once, except right after a lift.
+    const a = pen.lastActivity;
+    if (a && a.what === 'up') mem.pen.leaveAfterUp++;
+    else mem.pen.leaveAfterHover++;
+    pen.leaveSinceActivity = true;
+    if (!pen.down.size && pen.lastPenType !== 'pointerup' && pen.lastPenType !== 'pointercancel') pen.lastPenTime = -Infinity;
+    pen.lastWasHover = false;
+    pushSeq('펜 out(페이지 밖)');
+    pen.dirty = true;
+    scheduleUpdatePen();
+    save();
+    return;
+  }
+  const p = mem.pen;
+  if (t === 'pointerdown' && pen.down.has(e.pointerId)) p.downWhileDown++;
+  if (t === 'pointerdown' || t === 'pointerup') {
+    const key = `${t.replace('pointer', '')} ${e.button}/${e.buttons} ${e.pressure > 0 ? '힘>0' : '힘0'}`;
+    if (key in p.downKinds || Object.keys(p.downKinds).length < 12) p.downKinds[key] = (p.downKinds[key] || 0) + 1;
+  }
+  if (t === 'pointermove' && e.buttons && !(e.pressure > 0)) p.airButtonMoves++;
+  const hoverMove = t === 'pointermove' && e.buttons === 0;
+  if (hoverMove && pen.lastWasHover) {
+    // Nothing but hover moves since the last one: how long the pen sent nothing. Up to 3 s it most likely
+    // stayed in range, held still; a longer pause may be the pen going away and coming back (this tablet
+    // sends no pointerout when it leaves, maybe no pointerover when it comes back either).
+    const gap = now - pen.lastPenTime;
+    if (gap <= 3000) {
+      if (gap > p.maxHoverGap) p.maxHoverGap = Math.round(gap);
+      if (gap > PEN_NEAR_MS) p.hoverGapsOver++;
+    } else {
+      p.hoverGapsLong++;
+    }
+  }
+  if (t !== 'pointerout') pen.lastWasHover = hoverMove;
+  if (t === 'pointerdown') pen.down.add(e.pointerId);
+  else if (t === 'pointerup' || t === 'pointercancel') pen.down.delete(e.pointerId);
+  else if (t === 'pointermove' && e.buttons === 0) pen.down.delete(e.pointerId);
+  if (t !== 'pointerout') pen.lastPenType = t;
+  pen.lastPenTime = now;
+  // As the app: touches still down when a pen event comes are palm from now on.
+  for (const id of pen.activeTouches) pen.nearTouches.add(id);
+  if (t === 'pointerdown' || t === 'pointermove' || t === 'pointerup' || t === 'pointercancel') {
+    pen.lastActivity = { at: now, what: t === 'pointermove' ? (e.buttons ? '그리기' : '떠 있음') : t.replace('pointer', '') };
+    pen.leaveSinceActivity = false;
+  }
 }
 
 function setupPen() {
@@ -230,9 +327,23 @@ function setupPen() {
   sizePad();
   window.addEventListener('resize', sizePad);
 
+  for (const t of ['pointerover', 'pointermove', 'pointerdown', 'pointerup', 'pointercancel', 'pointerout']) {
+    document.addEventListener(t, onDocPen, true);
+  }
   const types = ['pointerenter', 'pointerleave', 'pointerdown', 'pointermove', 'pointerup', 'pointercancel'];
   for (const t of types) pen.ink.addEventListener(t, onPadPointer);
-  pen.ink.addEventListener('contextmenu', (e) => e.preventDefault());
+  // 1-5: does the S Pen side button (or a long press) bring up a context menu? (The app suppresses it.)
+  pen.ink.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const p = mem.pen;
+    p.contextMenu++;
+    const kind = e.pointerType || '알 수 없음';
+    if (!p.contextMenuTypes.includes(kind)) p.contextMenuTypes.push(kind);
+    pushSeq(`메뉴(contextmenu, ${kind})`);
+    pen.dirty = true;
+    scheduleUpdatePen();
+    save();
+  });
 
   $('#penClear').addEventListener('click', () => {
     pen.inkCtx.clearRect(0, 0, pen.ink.width, pen.ink.height);
@@ -277,6 +388,22 @@ function seqText() {
   return seq.map((s) => (s.n > 1 ? `${s.l}×${s.n}` : s.l)).join(' → ');
 }
 
+// 'down 2/2 닿음×3, move -1/3 닿음×20' (button / buttons of pen events with the side button), or '없음'.
+function btnSeenText(seen) {
+  const keys = Object.keys(seen || {});
+  if (!keys.length) return '없음';
+  return keys.map((k) => `${k}×${seen[k]}`).join(', ');
+}
+
+// The last finger landings: '3.2초 뒤(마지막 펜: 떠 있음), leave 없음 → 손가락 / …'.
+function fingerLogText(log) {
+  if (!log || !log.length) return '아직 없음';
+  return log.map((f) => {
+    const when = f.since == null ? '펜 신호 없이' : `${(f.since / 1000).toFixed(1)}초 뒤(마지막 펜: ${f.after})`;
+    return `${when}, leave ${f.leave ? '있음' : '없음'} → ${f.finger ? '손가락' : '손바닥(무시)'}`;
+  }).join(' / ');
+}
+
 function onPadPointer(e) {
   const now = performance.now();
   const p = mem.pen;
@@ -290,25 +417,40 @@ function onPadPointer(e) {
   if (e.type === 'pointerdown' || (e.type === 'pointermove' && e.buttons)) e.preventDefault();
 
   if (kind === 'pen') {
-    pen.lastPenTime = now;
-    if (e.type === 'pointerenter') pen.hovering = true;
-    if (e.type === 'pointerleave' || e.type === 'pointercancel') pen.hovering = false;
+    // (pen.lastPenTime / pen.down: onDocPen, which sees this event first.)
+    const erase = penEraseButtons(e);
+    const touching = penContact(e);
+    // 1-5: every pen down / move / up with the side button or the eraser end (or any button but the tip),
+    // counted by 'type button/buttons 닿음|떠있음'.
+    if ((e.button > 0 || ((e.buttons | 0) & ~1)) && /^pointer(down|move|up)$/.test(e.type)) {
+      const key = `${short} ${e.button}/${e.buttons}${e.type === 'pointerup' ? '' : touching ? ' 닿음' : ' 떠있음'}`;
+      if (key in p.btnSeen || Object.keys(p.btnSeen).length < 16) p.btnSeen[key] = (p.btnSeen[key] || 0) + 1;
+    }
     if (e.type === 'pointermove') {
       if (e.buttons === 0) {
         p.hover++;
         short = 'move(떠있음)';
-        pen.hovering = true;
         drawHoverCursor(pt);
-      } else {
+      } else if (erase && touching) {
+        // What the app takes for a rub of the 지우개 (drawn orange).
+        p.sideMoves++;
+        short = 'move(옆 버튼 문지르기)';
+        drawInk(e.pointerId, pt, '#E8710A', 6);
+      } else if (touching) {
         p.draw++;
         short = 'move(그리기)';
         drawInk(e.pointerId, pt, '#111', 1 + 4 * (e.pressure || 0.5));
+      } else {
+        short = 'move(버튼 누른 채 떠있음)';
+        pen.lastPoint.set(e.pointerId, pt);
+        drawHoverCursor(pt);
       }
     }
     if (e.type === 'pointerdown') {
-      p.downs++;
+      if (touching) p.downs++;
       if (e.button === 2 || (e.buttons & 2)) p.sideButton++;
       if (e.button === 5 || (e.buttons & 32)) p.eraser++;
+      if (erase) short = touching ? 'down(옆 버튼)' : 'down(옆 버튼, 떠있음)';
       pen.lastPoint.set(e.pointerId, pt);
       clearOverlay();
     }
@@ -321,15 +463,29 @@ function onPadPointer(e) {
     if (e.type === 'pointerleave') clearOverlay();
   } else if (kind === 'touch') {
     if (e.type === 'pointerdown') {
+      // A primary touch: no other touch is really down (anything left is a lost pointerup), as the app.
+      if (e.isPrimary) { pen.activeTouches.clear(); pen.nearTouches.clear(); }
       p.touchTotal++;
+      // The app's rule: a palm while the pen is near, and also while a touch taken for a palm is down.
+      const near = penIsNear(now);
+      const palm = near || pen.nearTouches.size > 0;
       pen.activeTouches.add(e.pointerId);
       p.maxTouches = Math.max(p.maxTouches, pen.activeTouches.size);
       p.maxContact = Math.max(p.maxContact, Math.round(contact));
-      if (penIsNear(now)) {
+      if (near) {
         p.touchNear++;
         p.maxContactNear = Math.max(p.maxContactNear, Math.round(contact));
-        pen.nearTouches.add(e.pointerId);
         short = 'down(펜 가까이)';
+      } else if (palm) {
+        short = 'down(손바닥이 닿아 있는 동안)';
+      }
+      if (palm) pen.nearTouches.add(e.pointerId);
+      drawDot(pt, palm ? '#d32f2f' : '#1f5fa8');
+      if (e.isPrimary) {
+        // 1-6: how long after the last pen event this finger landed, and what the app makes of it.
+        const a = pen.lastActivity;
+        p.fingerLog.push({ since: a ? Math.round(now - a.at) : null, after: a ? a.what : null, leave: pen.leaveSinceActivity, finger: !palm });
+        if (p.fingerLog.length > 6) p.fingerLog.splice(0, p.fingerLog.length - 6);
       }
       pen.lastPoint.set(e.pointerId, pt);
     }
@@ -359,6 +515,7 @@ function onPadPointer(e) {
     type: e.type.replace('pointer', ''),
     kind: kind || '(없음)',
     pressure: e.pressure,
+    button: e.button,
     buttons: e.buttons,
     tilt: `${e.tiltX || 0} / ${e.tiltY || 0}`,
     size: `${Math.round(e.width || 0)}×${Math.round(e.height || 0)}`,
@@ -383,6 +540,15 @@ function drawInk(id, pt, color, width) {
   pen.lastPoint.set(id, pt);
 }
 
+// A dot where a finger landed (a tap draws no line).
+function drawDot(pt, color) {
+  const ctx = pen.inkCtx;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 function drawHoverCursor(pt) {
   const ctx = pen.overlayCtx;
   clearOverlay();
@@ -404,18 +570,20 @@ function renderPenLive() {
   const ev = pen.liveEvent;
   const p = mem.pen;
   const near = penIsNear();
+  const hovering = penHovering();
   const cells = [
     ['마지막 신호', ev ? ev.type : '-'],
     ['종류(pointerType)', ev ? ev.kind : '-'],
     ['누르는 힘(pressure)', ev && ev.pressure != null ? ev.pressure.toFixed(2) : '-'],
-    ['버튼(buttons)', ev ? String(ev.buttons) : '-'],
+    ['버튼(button / buttons)', ev ? `${ev.button} / ${ev.buttons}` : '-'],
     ['기울기 X / Y', ev ? ev.tilt : '-'],
     ['접촉 크기(px)', ev ? ev.size : '-'],
-    ['펜 떠 있음', pen.hovering ? '예' : '아니요', pen.hovering],
-    ['펜 가까이(0.8초)', near ? '예' : '아니요', near],
+    ['펜 떠 있음', hovering ? '예' : '아니요', hovering],
+    ['펜 가까이(앱 규칙)', near ? '예' : '아니요', near],
     ['떠 있음 신호 수', String(p.hover), p.hover > 0],
     ['펜으로 그린 신호 수', String(p.draw)],
     ['펜이 닿은 횟수', String(p.downs)],
+    ['옆 버튼 문지르기 신호', String(p.sideMoves), p.sideMoves > 0],
     ['펜 가까이일 때 손 터치', String(p.touchNear)],
     ['손 터치 전체', String(p.touchTotal)],
     ['동시에 닿은 손가락(최대)', String(p.maxTouches)],
@@ -455,6 +623,17 @@ function updatePen() {
     ['동시에 닿은 손가락(최대)', `${p.maxTouches}개`],
     ['손 접촉 크기 최대(펜 가까이일 때)', `${p.maxContact}px (${p.maxContactNear}px)`],
     ['마우스 클릭', `${p.mouse}회`],
+    // v3, 1-5 (S Pen side button) and 1-6 (a finger after the pen went away).
+    ['펜 옆 버튼 신호(5번)', btnSeenText(p.btnSeen)],
+    ['펜 옆 버튼을 누른 채 문지른 신호(앱에서 지우기)', `${p.sideMoves}회`],
+    ['화면 메뉴(contextmenu)', `${p.contextMenu}회${p.contextMenuTypes.length ? ` (${p.contextMenuTypes.join(', ')})` : ''}`],
+    ['펜이 떠 있다가 페이지를 떠난 신호(pointerout)', `${p.leaveAfterHover}회 (펜을 뗀 직후: ${p.leaveAfterUp}회)`],
+    // Checker: what a press of the pen looks like (a side button reported as the tip shows as '힘0').
+    ['펜 누름·뗌 신호 전체(button/buttons, 힘)', btnSeenText(p.downKinds)],
+    ['버튼은 눌렸는데 힘이 0인 펜 움직임', `${p.airButtonMoves}회`],
+    ['펜이 닿아 있는데 또 온 누름 신호', `${p.downWhileDown}회`],
+    ['가만히 떠 있는 펜의 가장 긴 신호 멈춤', `${(p.maxHoverGap / 1000).toFixed(1)}초 (${(PEN_NEAR_MS / 1000).toFixed(1)}초 넘음 ${p.hoverGapsOver}회, 3초 넘음 ${p.hoverGapsLong}회)`],
+    ['손가락이 닿을 때(6번, 최근)', fingerLogText(p.fingerLog)],
     ['신호 순서', seqText()],
   ];
 
@@ -465,6 +644,12 @@ function updatePen() {
     verdict = `S펜이 화면에 닿기 전에도 크롬이 알아채요(떠 있음 신호 ${p.hover}회). ` +
       "계획대로 'S펜이 가까이 있으면 손 터치는 무시'하는 방식으로 만들 수 있어요.";
     if (p.touchTotal === 0) verdict += ' (손바닥 시험 3번과 두 손가락 시험 4번도 해 주세요.)';
+    if (p.sideMoves > 0) verdict += ' 옆 버튼을 누른 채 문지르면 앱에서 지워집니다.';
+    else if (Object.keys(p.btnSeen).length) verdict += ' 옆 버튼 신호는 왔지만, 화면에 닿은 채로 문지른 신호는 아직 없어요(5번).';
+    else verdict += ' (5번: 옆 버튼을 누른 채 흰 칸을 문질러 주세요.)';
+    const fingers = p.fingerLog.filter((f) => f.finger);
+    if (!fingers.length) verdict += ' (6번: 펜을 멀리 치운 뒤 손가락 하나로 눌러 주세요.)';
+    else verdict += ' 펜을 치운 뒤 닿은 손가락은 앱에서 손가락으로 인식돼요.';
   } else if (p.downs >= 2) {
     status = 'fail';
     verdict = 'S펜이 화면에 닿아 있을 때만 알 수 있고, 가까이 있는 것은 알 수 없어요. ' +
@@ -623,6 +808,8 @@ function updateShare() {
 
 function setupFile() {
   const input = $('#fileInput');
+  // index.html has the same list; kept equal to the app's [불러오기] here.
+  if (input.getAttribute('accept') !== IMPORT_ACCEPT) input.setAttribute('accept', IMPORT_ACCEPT);
   input.addEventListener('change', () => {
     if (input.files && input.files[0]) handleFile(input.files[0]);
     input.value = '';
@@ -679,11 +866,14 @@ async function handleFile(file) {
 
 function updateFile() {
   const r = mem.file;
+  const input = $('#fileInput');
+  const accept = ['고를 수 있는 파일 종류(accept)', (input && input.getAttribute('accept')) || '(제한 없음)'];
   if (!r) {
-    setResult('file', 'pending', '아직 시험하지 않았어요. [파일 고르기]를 눌러 2번에서 드라이브에 저장한 파일을 골라 주세요.', []);
+    setResult('file', 'pending', '아직 시험하지 않았어요. [파일 고르기]를 눌러 2번에서 드라이브에 저장한 파일을 골라 주세요.', [accept]);
     return;
   }
   const facts = [
+    accept,
     ['파일 이름', r.name],
     ['크기', fmtBytes(r.size)],
     ['형식(type)', r.type || '(비어 있음)'],
@@ -768,7 +958,8 @@ async function storageOnLoad() {
 }
 
 async function runStorageTest() {
-  const r = { at: new Date().toISOString(), persistApi: !!(navigator.storage && navigator.storage.persist), persistResult: null, idb: null };
+  // mode: 'browser' (a Chrome tab) or the installed app's display mode, when the request was made.
+  const r = { at: new Date().toISOString(), persistApi: !!(navigator.storage && navigator.storage.persist), persistResult: null, idb: null, mode: displayMode() };
   try {
     if (r.persistApi) r.persistResult = await navigator.storage.persist();
   } catch (err) {
@@ -818,9 +1009,14 @@ function updateStorage() {
     setResult('storage', 'pending', '아직 시험하지 않았어요. [저장공간 시험하기]를 눌러 주세요.', facts);
     return;
   }
+  // Chrome refuses persist() for a page that is not installed (or not used much yet): that is normal.
+  const beforeInstall = r.mode ? r.mode === 'browser' : null;
+  const asked = r.persistResult === true ? '허락됨'
+    : r.persistResult === false ? `거절됨${beforeInstall === true ? ' (설치 전 크롬 탭에서 요청: 보통 거절됩니다)' : ''}`
+      : r.persistApi ? String(r.persistResult) : '기능 없음';
   facts.unshift(
-    ['시험한 시각', fmtTime(r.at)],
-    ['저장공간 유지 요청 결과', r.persistResult === true ? '허락됨' : r.persistResult === false ? '거절됨' : r.persistApi ? String(r.persistResult) : '기능 없음'],
+    ['시험한 시각', `${fmtTime(r.at)}${r.mode ? ` (${r.mode === 'browser' ? '크롬 탭' : `설치한 앱 화면(${r.mode})`})` : ''}`],
+    ['저장공간 유지 요청 결과', asked],
     ['기기 안 저장·읽기(IndexedDB)', r.idb === 'ok' ? '됨' : r.idb === 'mismatch' ? '읽은 내용이 달라요' : r.idb]
   );
   let status;
@@ -831,11 +1027,12 @@ function updateStorage() {
     verdict = '기기 안에 저장하거나 읽지 못했어요. 크롬 설정에서 사이트 데이터가 막혀 있는지 확인이 필요해요.';
   } else if (persisted) {
     status = 'ok';
-    verdict = "기기 안 저장이 잘 되고, 크롬이 '저장공간 유지'도 허락했어요.";
+    verdict = "기기 안 저장이 잘 되고, 크롬이 '저장공간 유지'도 허락했어요." +
+      (r.persistResult === false ? ' (설치하기 전의 요청은 거절됐지만, 지금은 허락된 상태예요. 정상입니다.)' : '');
   } else {
     status = 'warn';
-    verdict = "기기 안 저장은 잘 돼요. 다만 크롬이 '저장공간 유지'를 아직 허락하지 않았어요. " +
-      '홈 화면에 설치(5번)한 뒤 다시 눌러 보세요. 끝까지 안 되면 백업 안내를 더 눈에 띄게 만들겠습니다.';
+    verdict = "기기 안 저장은 잘 돼요. 크롬이 '저장공간 유지'를 거절했는데, 홈 화면에 설치하기 전에는 보통 그렇습니다(고장 아님). " +
+      '5번에서 홈 화면에 설치한 뒤 [저장공간 시험하기]를 한 번 더 눌러 주세요. 그래도 안 되면 백업 안내를 더 눈에 띄게 만들겠습니다.';
   }
   setResult('storage', status, verdict, facts);
 }
@@ -1399,6 +1596,33 @@ function detectFonts() {
   return FONT_NAMES.filter((n) => bases.some((b, i) => Math.abs(widthOf(`"${n}", ${b}`) - baseW[i]) > 0.5));
 }
 
+// Which face the Latin letters and digits of a font list take (canvas text widths): one of the named
+// fonts, 'serif' (old-fashioned; the v2 list on the Galaxy Tab), the default sans-serif, or another face.
+function latinFace(stack) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return '모름';
+  const sample = 'Habitat mm AaWwIi (A4 · 300dpi) NotAllowedError 0123456789';
+  const widthOf = (f) => { ctx.font = `40px ${f}`; return ctx.measureText(sample).width; };
+  const same = (a, b) => Math.abs(a - b) < 0.5;
+  const bases = ['monospace', 'serif', 'sans-serif'];
+  const present = (n) => bases.some((b) => !same(widthOf(`"${n}", ${b}`), widthOf(b)));
+  const got = widthOf(stack);
+  for (const n of ['Malgun Gothic', 'Apple SD Gothic Neo', 'Roboto', 'Noto Sans KR', 'Noto Sans CJK KR']) {
+    if (present(n) && same(widthOf(`"${n}", sans-serif`), got)) return n;
+  }
+  if (same(widthOf('serif'), got) && !same(widthOf('sans-serif'), got)) return 'serif(명조 — 옛날 글꼴처럼 보임)';
+  if (same(widthOf('sans-serif'), got)) return '기본 sans-serif';
+  return '다른 글꼴';
+}
+
+function fontPresent(name) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return null;
+  const sample = 'Habitat mm AaWwIi 0123456789';
+  const widthOf = (f) => { ctx.font = `40px ${f}`; return ctx.measureText(sample).width; };
+  return ['monospace', 'serif', 'sans-serif'].some((b) => Math.abs(widthOf(`"${name}", ${b}`) - widthOf(b)) > 0.5);
+}
+
 function mq(q) {
   return !!(window.matchMedia && window.matchMedia(q).matches);
 }
@@ -1424,6 +1648,10 @@ async function setupDevice() {
     ['CPU 코어', navigator.hardwareConcurrency ? String(navigator.hardwareConcurrency) : '모름'],
     ['언어', navigator.language || '모름'],
     ['쓸 수 있는 한글 글꼴', live.fonts.length ? live.fonts.join(', ') : '목록의 글꼴 없음(기본 글꼴 사용)'],
+    // v3: the Latin letters came out in a serif face on the Galaxy Tab with the v2 list.
+    ['Roboto 글꼴', { true: '있음', false: '없음' }[String(fontPresent('Roboto'))] || '모름'],
+    ['영문·숫자 글꼴(앱 글꼴 목록)', latinFace(FONT_STACK)],
+    ['영문·숫자 글꼴(v2 목록, 참고)', latinFace(FONT_STACK_V2)],
   ];
   live.device = facts;
   setResult('device', 'ok', '기기 정보를 모았어요.', facts);

@@ -43,15 +43,17 @@
     <div class="status" data-status="pending"></div>
     <p>S펜이 화면에 <b>닿기 전에</b> 크롬이 알아채는지 봅니다. 아래 흰 칸에서 차례로 해 보세요.</p>
     <ol>
-      <li><b>S펜을 화면 가까이 대 보세요</b> — 화면에 닿지 않게 1cm쯤 띄우고 움직입니다. (‘떠 있음’ 숫자가 올라가는지 보세요)</li>
+      <li><b>S펜을 화면 가까이 대 보세요</b> — 화면에 닿지 않게 1cm쯤 띄우고 움직입니다. (‘떠 있음’ 숫자가 올라가는지 보세요) 그다음 <b>2초쯤 움직이지 말고</b> 떠 있는 채로 가만히 들고 있어 보세요.</li>
       <li><b>S펜으로 그려 보세요</b> — 몇 번 그었다 뗐다 해 주세요.</li>
       <li><b>S펜을 든 채로 손바닥을 화면에 대 보세요</b> — 글씨 쓸 때처럼 손을 흰 칸에 올립니다.</li>
-      <li>마지막으로 펜을 멀리 치우고, <b>두 손가락</b>을 동시에 흰 칸에 대 보세요.</li>
+      <li>펜을 멀리 치우고, <b>두 손가락</b>을 동시에 흰 칸에 대 보세요.</li>
+      <li><b>S펜 옆 버튼을 누른 채 흰 칸을 문질러 보세요</b> — 두 가지로 해 봅니다. ① 옆 버튼을 먼저 누른 채 펜을 화면에 대고 긋기 ② 펜을 화면에 대자마자(움직이기 전에) 옆 버튼을 누르고 긋기. 주황색 선이 나오면 앱에서 지우개로 쓸 수 있습니다. (메뉴가 뜨면 닫고 한 번 더 해 주세요)</li>
+      <li><b>펜을 화면에서 멀리(10cm 이상) 치운 뒤 손가락 하나로 칸을 눌러 보세요</b> — 1초쯤 기다렸다가 누릅니다. 파란 점이 찍히면 앱에서도 손가락으로 알아봅니다.</li>
     </ol>
     <div class="pad-wrap" id="penPad">
       <canvas id="penInk"></canvas>
       <canvas id="penOverlay"></canvas>
-      <span class="pad-hint">검정 = S펜, 파랑 = 손가락, 빨강 = 펜이 가까이 있을 때의 손 터치(앱에서는 무시할 것)</span>
+      <span class="pad-hint">검정 = S펜, 주황 = 옆 버튼을 누른 S펜(지우개), 파랑 = 손가락, 빨강 = 앱에서 손바닥으로 보고 무시할 손 터치(펜이 가까이 있을 때, 손바닥이 닿아 있는 동안)</span>
     </div>
     <div class="live" id="penLive"></div>
     <div class="row">
@@ -90,10 +92,12 @@
   <section class="test" id="t-file">
     <h2>3. 파일 불러오기</h2>
     <div class="status" data-status="pending"></div>
-    <p>2번에서 드라이브에 저장한 파일을 다시 불러올 수 있는지 봅니다. 아래 버튼 → 파일 선택 창 왼쪽 메뉴(≡)에서 <b>“드라이브”</b> → 시험 파일을 고르세요.
-      파일이 회색으로 막혀서 고를 수 없으면 알려 주세요.</p>
+    <p>2번에서 드라이브에 저장한 파일을 다시 불러올 수 있는지 봅니다. 아래 버튼 → 파일 선택 창 왼쪽 메뉴(≡)에서 <b>“드라이브”</b> → 시험 파일(.txt)을 고르세요.
+      카메라·녹음만 나오는 창이 뜨거나, 파일이 회색으로 막혀서 고를 수 없으면 알려 주세요.</p>
     <div class="row">
-      <label class="filebtn">파일 고르기<input type="file" id="fileInput"></label>
+      <!-- Same file types as the app's [불러오기] (js/io/fileio.js IMPORT_ACCEPT): without them Android
+           Chrome offered only 카메라 / 캠코더 / 음성 녹음 / 사진 (v2 test, 2026-10-22). -->
+      <label class="filebtn">파일 고르기<input type="file" id="fileInput" accept=".json,.txt,application/json,text/plain,application/octet-stream"></label>
     </div>
     <p class="intro">PC에서는 파일을 이 칸에 끌어다 놓아도 됩니다.</p>
     <ul class="facts"></ul>
@@ -104,6 +108,7 @@
     <h2>4. 저장공간</h2>
     <div class="status" data-status="pending"></div>
     <p>도면이 기기 안에 안전하게 저장되는지 봅니다. 버튼을 누르면 크롬에 “이 앱 저장공간 유지”를 요청하고, 시험 기록을 저장했다가 다시 읽어 봅니다.</p>
+    <p><b>홈 화면에 설치하기 전에는</b> 크롬이 “저장공간 유지”를 <b>거절하는 것이 보통</b>입니다(고장이 아닙니다). 5번에서 홈 화면에 설치한 뒤 이 버튼을 <b>한 번 더</b> 눌러 주세요.</p>
     <div class="row">
       <button id="storageBtn" class="primary" type="button">저장공간 시험하기</button>
     </div>

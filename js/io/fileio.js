@@ -8,10 +8,17 @@
 // type 'text/plain'; canShare() is only used to see whether file sharing exists at all. On a PC
 // (Windows/macOS/ChromeOS) the file is downloaded as '.json' into the Downloads folder, as the plan
 // describes.
-// Import: the file picker has no type filter (Drive greys out files otherwise), and the content decides
-// whether a file is ours — the extension does not matter.
+// Import: the content decides whether a file is ours — the extension does not matter. The file picker
+// gets IMPORT_ACCEPT: with NO filter, Chrome on the Galaxy Tab S9 FE (Android 14, field test 2026-10-22)
+// opened the '작업 선택' chooser with 카메라 / 캠코더 / 음성 녹음 / 사진 및 동영상 and no files or Drive. Text
+// types make it open the document picker (files, Drive). The list keeps .txt shared by the app
+// (text/plain), .json from a PC (application/json) and files a storage app reports without a type
+// (application/octet-stream) selectable.
 
 import { FILE_FORMAT_VERSION, FILE_FORMAT_ID } from '../version.js';
+
+// `accept` of every project-file input (세대 목록 [불러오기]; the device test page has the same list).
+export const IMPORT_ACCEPT = '.json,.txt,application/json,text/plain,application/octet-stream';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -230,12 +237,14 @@ export async function readProjectFile(file) {
   return { ok: true, project: result.project || obj, error: null, code: null, warnings: (result.errors || []).map(String) };
 }
 
-// Opens the system file picker without a type filter (appendix B: Drive greys out filtered files).
-// Must be called from a click handler. Resolves with the chosen File, or null if the user cancelled.
+// Opens the system file picker with IMPORT_ACCEPT (with no filter Android Chrome offered only the camera
+// chooser, field test 2026-10-22; the content still decides). Must be called from a click handler.
+// Resolves with the chosen File, or null if the user cancelled.
 export function pickFile() {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
+    input.accept = IMPORT_ACCEPT;
     input.style.display = 'none';
     let done = false;
     const finish = (file) => {

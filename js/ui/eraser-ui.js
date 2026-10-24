@@ -9,6 +9,8 @@
 // ink), thin lines close by on the floor, and a rub keeps to what it is rubbing while it wobbles a few px
 // off it. Two fingers still pan / zoom and a palm under the S Pen is ignored (input.js cancels the
 // gesture: nothing is erased). A merged-name question after the erase stays in its undo step (main.js).
+// The S Pen side button (0.6.3): in EVERY tool a pen gesture with the button held comes here too (tools.js
+// g.erase), with the same preview, toast and undo step; the current tool stays.
 //
 // ctx = { store(), view, command(fn, label, opts) → bool, toast(msg, opts), requestRender() }
 import {

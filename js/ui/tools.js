@@ -15,6 +15,8 @@
 //   eraser  (지우개)   rub or tap what should go: a touched wall as its whole straight wall, each touched
 //                      window / door / fixture / memo stroke / 구역 나누기 line; red preview while rubbing,
 //                      one undo step (eraser-ui.js EraserTool, gets every gesture; no panels, no names)
+// In EVERY tool a gesture with the S Pen side button held (g.erase, input.js) is the 지우개's rub (the
+// EraserTool gets it; the tool stays as it was).
 // In every tool except 설비, 메모 and 지우개 a tap opens the panel of what is under it: a room NAME (the room
 // panel with its name field open), a window/door, a fixture, a wall (length panel) or a room (room
 // panel), in that order. A window/door counts only on its symbol in the wall band (OpeningTool
@@ -38,8 +40,11 @@ import { straightenStroke } from '../core/sketch.js';
 
 export const TOOL_NAMES = ['wall', 'select', 'room', 'divider', 'window', 'door', 'fixture', 'memo', 'eraser'];
 
+// Said in the 벽 and 지우개 hints: the S Pen side button rubs out in every tool (input.js g.erase).
+export const PEN_ERASE_HINT = 'S펜 옆 버튼을 누른 채 문지르면 어느 도구에서든 지워집니다.';
+
 export const TOOL_HINTS = {
-  wall: '벽: 손가락이나 S펜으로 벽을 그으세요. 비스듬히 그으면 사선 벽이 됩니다.',
+  wall: `벽: 손가락이나 S펜으로 벽을 그으세요. 비스듬히 그으면 사선 벽이 됩니다. ${PEN_ERASE_HINT}`,
   // Kept short (two lines at most on a tablet): the hint floats over the top of the plan.
   select: '선택: 벽·실·창·문·설비를 누르세요(실 이름을 누르면 이름을 바꿀 수 있습니다). 끌면 옮겨지고, 글자도 끌어 옮기며 길게 누르면 되돌립니다.',
   room: '실 추가: 직사각형을 끌어서 그리면 가로×세로를 물어봅니다.',
@@ -48,7 +53,7 @@ export const TOOL_HINTS = {
   door: '문: 벽 위로 끌어다 놓으세요. 실 안쪽으로 열리게 놓이고, [열림 방향]으로 바꿀 수 있습니다.',
   fixture: FIXTURE_HINT,
   memo: MEMO_HINT,
-  eraser: ERASER_HINT,
+  eraser: `${ERASER_HINT} ${PEN_ERASE_HINT}`,
 };
 
 const DRAG_SLOP_PX = 8;
@@ -163,6 +168,13 @@ export class ToolController {
       // A new gesture while the size panel is open abandons the drawn rectangle.
       this.ctx.panel.close();
       this.overlay = null;
+    }
+    if (g.erase && this.ctx.eraserTool) {
+      // S Pen side button (or eraser end) held: the 지우개's rub in any tool (red preview, erased on lift,
+      // one undo step, its toast); the current tool stays.
+      this.active = { kind: 'delegate', to: this.ctx.eraserTool, erase: true };
+      this.ctx.eraserTool.onGestureStart(g);
+      return undefined;
     }
     const d = this._delegate();
     if (d) {

@@ -2,10 +2,14 @@
 // Keep every colour, size and preset list here so that the look can be tuned in one place.
 
 // Font stack used in CSS and in canvas `ctx.font`: each device's own plain Korean gothic (user
-// 2026-10-18 "기본 글꼴로, 너무 고전적인 느낌 말고"; the tablets have no NanumBarunGothic). PC: 맑은 고딕;
-// Galaxy Tab: the system sans-serif (Noto Sans CJK / Samsung's Korean font). No font files are bundled.
+// 2026-10-18 "기본 글꼴로, 너무 고전적인 느낌 말고"; the tablets have no NanumBarunGothic). PC: 맑은 고딕
+// (Latin letters too; this PC has no Roboto, so its outputs did not change). Galaxy Tab: Roboto (on every
+// Android) for the Latin letters and digits, then the system Korean font for Hangul. Without Roboto in
+// the list the Galaxy Tab S9 FE drew the Latin letters ('(A4 · 300dpi)', 'mm', 'NotAllowedError') in a
+// serif face (field test 2026-10-22, 0.6.3). No font files are bundled. Copies: css/app.css --font,
+// devtest/devtest.css --font, devtest/devtest.js FONT_STACK (tests/pen-input.html checks them).
 export const FONT_STACK =
-  '"Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif';
+  '"Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", Roboto, "Noto Sans KR", "Noto Sans CJK KR", sans-serif';
 
 // Colours (dark-on-light theme).
 export const COLORS = {

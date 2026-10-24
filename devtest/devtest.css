@@ -1,7 +1,8 @@
 /* Stage-0 device test page. Big touch targets, plain layout, light theme (tablet in the field). */
 
 :root {
-  --font: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
+  /* Same list as FONT_STACK in ../js/ui/theme.js (Roboto: Latin letters in a sans face on Android). */
+  --font: "Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", Roboto, "Noto Sans KR", "Noto Sans CJK KR", sans-serif;
   --bg: #f3f5f8;
   --card: #ffffff;
   --text: #1b1f24;

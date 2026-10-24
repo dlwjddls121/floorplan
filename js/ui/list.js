@@ -3,7 +3,7 @@
 import { el, openDialog } from './panel.js';
 import { createProject } from '../core/model.js';
 import * as storage from '../io/storage.js';
-import { readProjectFile, compareProjects } from '../io/fileio.js';
+import { readProjectFile, compareProjects, IMPORT_ACCEPT } from '../io/fileio.js';
 import { openSettings } from './settings.js';
 
 export class ListScreen {
@@ -41,8 +41,12 @@ export class ListScreen {
   // ---- layout -------------------------------------------------------------------------------
 
   _build() {
-    this.fileInput = el('input', { type: 'file', class: 'visually-hidden', multiple: true, 'aria-hidden': 'true', tabindex: '-1' });
-    // No `accept` filter: Android pickers grey out files with unknown types (plan appendix B).
+    // `accept` with the text types: without it Android Chrome offered only the camera / recorder / photos
+    // (field test 2026-10-22); with it the document picker (files, Drive) opens. The content still
+    // decides (readProjectFile), whatever the extension; drag-and-drop on a PC takes any file.
+    this.fileInput = el('input', {
+      type: 'file', class: 'visually-hidden', multiple: true, accept: IMPORT_ACCEPT, 'aria-hidden': 'true', tabindex: '-1',
+    });
     this.fileInput.addEventListener('change', () => {
       const files = [...this.fileInput.files];
       this.fileInput.value = '';
