@@ -1249,9 +1249,12 @@ function newProject() {
   if (storageOk) editor.saveNow();
 }
 
-function openProject(project) {
+// opts.unsaved: the household is not stored on this device (an import whose save failed): the autosave tries
+// again at once, so the top bar says '저장 안 됨' instead of '저장됨' while it is only on the screen.
+function openProject(project, opts = {}) {
   try {
     editor.open(project);
+    if (opts && opts.unsaved && storageOk) editor.scheduleSave();
     history.pushState({ screen: 'editor' }, '');
   } catch (err) {
     console.error(err);

@@ -108,16 +108,25 @@ export function poleOfInaccessibility(points, precision = 10, holes = null) {
   const GRID = 12;
   let cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   let hw = Math.max((maxX - minX) / 2, EPS), hh = Math.max((maxY - minY) / 2, EPS);
-  for (let iter = 0; iter < 12; iter++) {
-    const stepX = (2 * hw) / GRID, stepY = (2 * hh) / GRID;
-    for (let i = 0; i <= GRID; i++) {
-      for (let j = 0; j <= GRID; j++) {
+  const scan = (n) => {
+    const stepX = (2 * hw) / n, stepY = (2 * hh) / n;
+    for (let i = 0; i <= n; i++) {
+      for (let j = 0; j <= n; j++) {
         const p = { x: cx - hw + i * stepX, y: cy - hh + j * stepY };
         if (!inside(p)) continue;
         const d = clearance(p);
         if (d > bestD) { bestD = d; best = p; }
       }
     }
+    return { stepX, stepY };
+  };
+  for (let iter = 0; iter < 12; iter++) {
+    let { stepX, stepY } = scan(GRID);
+    // A narrow shape whose every part lies between the first grid's lines (an L of 700 mm wide strips
+    // around a 12 m plan) had no grid point inside, and its centroid, outside the L, was taken: the
+    // name was drawn in the next room, and a household opened from its file matched the room by that
+    // point to the next room's face (round-trip check 2026-10-24). Finer grids first.
+    for (let n = GRID * 4; iter === 0 && !best && n <= GRID * 16; n *= 4) ({ stepX, stepY } = scan(n));
     if (Math.max(stepX, stepY) < precision || !best) break;
     // Zoom into the neighbourhood of the best point found so far.
     cx = best.x; cy = best.y;

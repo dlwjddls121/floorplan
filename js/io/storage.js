@@ -411,15 +411,48 @@ export async function deleteProject(id) {
   return withStores(['projects', 'trash'], 'readwrite', 'delete', async (s) => {
     const project = await promisifyRequest(s.projects.get(id));
     if (!project) return false;
-    const older = await promisifyRequest(s.trash.get(id));
-    if (older) {
-      let key = `${id}@${older.deletedAt || 'unknown'}`;
-      for (let k = 2; await promisifyRequest(s.trash.get(key)); k++) key = `${id}@${older.deletedAt || 'unknown'}#${k}`;
-      await promisifyRequest(s.trash.put(Object.assign({}, older, { id: key, projectId: id })));
-    }
-    await promisifyRequest(s.trash.put({ id, projectId: id, deletedAt: new Date().toISOString(), project }));
+    await putInTrash(s, project);
     await promisifyRequest(s.projects.delete(id));
     return true;
+  });
+}
+
+// The trash part of deleteProject (inside its transaction): `project` becomes the trash entry keyed by its
+// id; an older entry of the same household is kept under '<id>@<deletedAt>'.
+async function putInTrash(s, project) {
+  const id = project.id;
+  const older = await promisifyRequest(s.trash.get(id));
+  if (older) {
+    let key = `${id}@${older.deletedAt || 'unknown'}`;
+    for (let k = 2; await promisifyRequest(s.trash.get(key)); k++) key = `${id}@${older.deletedAt || 'unknown'}#${k}`;
+    await promisifyRequest(s.trash.put(Object.assign({}, older, { id: key, projectId: id })));
+  }
+  await promisifyRequest(s.trash.put({ id, projectId: id, deletedAt: new Date().toISOString(), project }));
+}
+
+// [파일로 바꾸기] (세대 목록 [불러오기], the same household already on this device): the stored copy is
+// replaced by the file's household, and the copy it replaces goes to the trash first (30 days, as with
+// [지우기]), in one transaction. Households are never merged, and the file may be the OLDER one (the
+// dialog says which is newer, but [파일로 바꾸기] is the button people usually press): before, the work
+// done on this device since was gone for good (round-trip check 2026-10-24). Nothing goes to the trash
+// when the stored copy was modified at the same moment as the file's (the same household). exportedAt as
+// in saveProject. → { record (as stored), trashed: bool }
+export async function replaceProject(project) {
+  checkSavable(project);
+  return withStores(['projects', 'trash'], 'readwrite', 'save', async (s) => {
+    const existing = await promisifyRequest(s.projects.get(project.id));
+    let record = project;
+    let trashed = false;
+    if (existing) {
+      const exportedAt = laterIso(existing.exportedAt, project.exportedAt);
+      if (exportedAt !== (project.exportedAt || null)) record = Object.assign({}, project, { exportedAt });
+      if (timeOf(existing.modifiedAt) === null || timeOf(existing.modifiedAt) !== timeOf(project.modifiedAt)) {
+        await putInTrash(s, existing);
+        trashed = true;
+      }
+    }
+    await promisifyRequest(s.projects.put(record));
+    return { record, trashed };
   });
 }
 

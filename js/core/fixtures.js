@@ -1435,6 +1435,16 @@ function nodeIdsOf(project) {
 
 const PIN_KEEP = ['lo', 'hi', 'in', 'c'];
 
+// A fixture standing against a wall keeps its place by `along`; the anchor it had while it stood free no
+// longer belongs to it, and a file drops it (normalizeFixture). The commands that leave a fixture on a wall
+// drop it too, so the household opened from its file is the household as stored (round-trip check
+// 2026-10-24). → the fixture (the same object when there is nothing to drop)
+function withoutWallPin(f) {
+  if (!f || !f.wall || !('pin' in f)) return f;
+  const { pin: _pin, ...rest } = f;
+  return rest;
+}
+
 // A fixture's anchor from a file or a record, checked. → pin | null
 function cleanFixturePin(p) {
   if (!p || typeof p !== 'object') return null;
@@ -1826,7 +1836,7 @@ export function installFixtures(DocStore) {
       // The drop place (dropShare) only stands while the length is unmeasured and still nearly fills
       // its side (a shorter type has room: `along` says where it is from now on).
       if (nf.dropShare != null && !keepsDropShare(p, this.derived, nf)) nf = { ...nf, dropShare: undefined };
-      const out = { ...p.fixtures[i], ...nf, id };
+      const out = withoutWallPin({ ...p.fixtures[i], ...nf, id });
       if (JSON.stringify(normalizeFixture(out)) === JSON.stringify(normalizeFixture(p.fixtures[i]))) return null;
       const fixtures = p.fixtures.slice();
       fixtures[i] = out;
@@ -1850,6 +1860,7 @@ export function installFixtures(DocStore) {
       if (keepsInRoom(cur)) Object.assign(fixtures[i], { d: placed.d, measured: placed.measured, fullD: placed.fullD ?? null });
       // A stair moved to the opposite wall keeps pointing the same way on the plan.
       if (isStair(cur)) fixtures[i] = keepStairWay(cur, fixtures[i]);
+      fixtures[i] = withoutWallPin(fixtures[i]);
       return { ...p, fixtures };
     }, { rederive: false, detail: { fixtureId: id } });
   };
@@ -1872,7 +1883,7 @@ export function installFixtures(DocStore) {
         nf = { ...p.fixtures[i], ...nf, measured: { w: cur.measured.d, d: cur.measured.w }, fullW: null, fullD: null, dropShare: undefined };
         nf = nf.wall ? fitFixtureOnSide(p, this.derived, nf) : keepColumnInRoom(p, this.derived, nf);
         const fixtures = p.fixtures.slice();
-        fixtures[i] = nf;
+        fixtures[i] = withoutWallPin(nf);
         return { ...p, fixtures };
       }
       const nextRot = normalizeRot(rot == null ? cur.rot + 90 : rot);
@@ -1893,7 +1904,7 @@ export function installFixtures(DocStore) {
           ? fitFixtureOnSide(p, this.derived, { ...turned, x: s.x, y: s.y, wall: s.wall })
           : keepColumnInRoom(p, this.derived, turned, prev);
         const fixtures = p.fixtures.slice();
-        fixtures[i] = nf;
+        fixtures[i] = withoutWallPin(nf);
         return { ...p, fixtures };
       }
       let placed = { x: cur.x, y: cur.y, rot: nextRot, wall: null };
@@ -1910,7 +1921,7 @@ export function installFixtures(DocStore) {
       if (nf.wall) nf = fitFixtureOnSide(p, this.derived, nf);
       else nf = keepColumnInRoom(p, this.derived, nf, { project: p, derived: this.derived, fixture: p.fixtures[i] });
       const fixtures = p.fixtures.slice();
-      fixtures[i] = nf;
+      fixtures[i] = withoutWallPin(nf);
       return { ...p, fixtures };
     }, { rederive: false, detail: { fixtureId: id } });
   };
@@ -1923,7 +1934,7 @@ export function installFixtures(DocStore) {
       const nf = resizeFixtureBox(p, this.derived, p.fixtures[i], box);
       if (JSON.stringify(normalizeFixture(nf)) === JSON.stringify(normalizeFixture(p.fixtures[i]))) return null;
       const fixtures = p.fixtures.slice();
-      fixtures[i] = { ...nf, id };
+      fixtures[i] = withoutWallPin({ ...nf, id });
       return { ...p, fixtures };
     }, { rederive: false, detail: { fixtureId: id } });
   };

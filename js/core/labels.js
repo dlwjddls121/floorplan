@@ -267,6 +267,15 @@ export function fixtureObstacles(project) {
 }
 
 // Weighted overlap of a box with obstacle boxes; a column (solid black) counts 100 times.
+// Weighted overlaps (world mm²) within this are the same: a label right at a wall face, a value or another
+// label touches it by construction (0 or a sliver), and spots placed symmetrically about an opening cover
+// the same wall area; the solve's rounding (some 1e-4 mm; a household solved again when it is opened, here
+// or on another device, rounds differently) decided between them, and a door label jumped by a quarter of
+// its door's width between the device it was drawn on and every device that opened its file (round-trip
+// check 2026-10-24). The earlier spot in the order of preference wins a tie. 1 mm² is a 1000 mm label
+// edge 0.001 mm deep.
+const LABEL_COST_EPS = 1;
+
 function obstacleCost(box, obstacles, pad = 0) {
   let s = 0;
   for (const ob of obstacles) {
@@ -294,8 +303,8 @@ export function findFreeSpot(poly, w, h, start, obstacles, opts = {}) {
     if (!inside(c)) return false;
     const cost = costAt(c);
     const d = Math.hypot(c.x - start.x, c.y - start.y);
-    if (!best || cost < best.cost - 1e-9 || (Math.abs(cost - best.cost) <= 1e-9 && d < best.d)) best = { x: c.x, y: c.y, cost, d };
-    return cost === 0;
+    if (!best || cost < best.cost - LABEL_COST_EPS || (Math.abs(cost - best.cost) <= LABEL_COST_EPS && d < best.d)) best = { x: c.x, y: c.y, cost, d };
+    return cost <= LABEL_COST_EPS;
   };
   if (consider(start)) return { x: start.x, y: start.y, cost: 0 };
   for (let r = 1; r <= maxRing; r++) {
@@ -856,8 +865,8 @@ export function placeLabels(project, derived, opts = {}) {
       const bw = box0.maxX - box0.minX, bh = box0.maxY - box0.minY;
       const spot = findFreeSpot(poly, bw, bh, p, obst, { margin, step: Math.max(bh / 3, 0.5 * wppm) });
       if (!boxInPolygon(poly, spot, bw, bh, margin)) continue;
-      if (spot.cost === 0) return { at: { x: spot.x, y: spot.y }, lines: ls };
-      if (!best || spot.cost < best.cost) best = { at: { x: spot.x, y: spot.y }, lines: ls, cost: spot.cost };
+      if (spot.cost <= LABEL_COST_EPS) return { at: { x: spot.x, y: spot.y }, lines: ls };
+      if (!best || spot.cost < best.cost - LABEL_COST_EPS) best = { at: { x: spot.x, y: spot.y }, lines: ls, cost: spot.cost };
     }
     return best;
   }
@@ -1035,9 +1044,9 @@ export function placeLabels(project, derived, opts = {}) {
         const box = aabb(c.x, c.y, c.b.w, c.b.h, c.rot);
         if (misleads(box)) { if (!misled) misled = c; continue; }
         const cost = costOf(box, 0.5 * wppm);
-        if (cost === 0) { place(c); return; }
-        if (!nearOk && reach === 'near' && inside && costOf(box, 0.15 * wppm) === 0) nearOk = c;
-        if (!best || cost < best.cost) best = { cost, c };
+        if (cost <= LABEL_COST_EPS) { place(c); return; }
+        if (!nearOk && reach === 'near' && inside && costOf(box, 0.15 * wppm) <= LABEL_COST_EPS) nearOk = c;
+        if (!best || cost < best.cost - LABEL_COST_EPS) best = { cost, c };
       }
     }
     if (nearOk) { place(nearOk); return; }

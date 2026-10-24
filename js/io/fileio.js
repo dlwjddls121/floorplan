@@ -196,7 +196,36 @@ export function basicCheck(obj) {
   return null;
 }
 
-// Reads a picked or dropped file (.json, .txt or anything else — the content decides).
+// The text of a file's bytes, whatever re-saved it (round-trip test 2026-10-24). Our files are UTF-8, but
+// a copy opened and saved again on a PC may come back as
+//   - UTF-8 with a BOM (Notepad 'UTF-8 (BOM)'), UTF-16 LE / BE with a BOM (Notepad '유니코드' /
+//     'Unicode big endian'): the BOM says it;
+//   - UTF-16 without a BOM (some editors): a JSON file starts with '{' or blank, so a zero byte in the
+//     first two says it (UTF-8 text never holds a zero byte);
+//   - code page 949 / EUC-KR (Notepad 'ANSI' on a Korean Windows): not valid UTF-8, but valid EUC-KR. Read
+//     as UTF-8 every Korean text came out as '�' and the household opened with its names lost.
+// Anything else is read as UTF-8 with '�' for broken bytes, as before.
+export function decodeFileText(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const dec = (label, fatal = false) => new TextDecoder(label, { fatal }).decode(b);
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) return dec('utf-8');
+  if (b.length >= 2 && b[0] === 0xFF && b[1] === 0xFE) return dec('utf-16le');
+  if (b.length >= 2 && b[0] === 0xFE && b[1] === 0xFF) return dec('utf-16be');
+  if (b.length >= 2 && b[0] !== 0 && b[1] === 0) return dec('utf-16le');
+  if (b.length >= 2 && b[0] === 0 && b[1] !== 0) return dec('utf-16be');
+  for (const label of ['utf-8', 'euc-kr']) {
+    try { return dec(label, true); } catch (_) { /* not this one */ }
+  }
+  return dec('utf-8');
+}
+
+async function fileText(file) {
+  if (typeof file.arrayBuffer === 'function') return decodeFileText(new Uint8Array(await file.arrayBuffer()));
+  return file.text();
+}
+
+// Reads a picked or dropped file (.json, .txt or anything else — the content decides; any of the
+// encodings decodeFileText knows).
 // → { ok: true, project, error: null, code: null, warnings: [] }
 //   | { ok: false, project: null, error: '<Korean message>', code, detail }
 //   code: 'no-file' | 'empty' | 'too-big' | 'unreadable' | 'not-ours' | 'too-new' | 'invalid'
@@ -205,7 +234,7 @@ export async function readProjectFile(file) {
   if (typeof file.size === 'number' && file.size > MAX_FILE_BYTES) return fail('too-big', MSG.tooBig);
   let text;
   try {
-    text = await file.text();
+    text = await fileText(file);
   } catch (err) {
     return fail('unreadable', MSG.unreadable, String(err));
   }

@@ -7,7 +7,7 @@ import { readProjectFile, compareProjects, IMPORT_ACCEPT } from '../io/fileio.js
 import { openSettings } from './settings.js';
 
 export class ListScreen {
-  // ctx: { toast(msg, opts), openProject(project), newProject(), storageReady() -> bool,
+  // ctx: { toast(msg, opts), openProject(project, { unsaved }?), newProject(), storageReady() -> bool,
   //        editorSettings() (optional) → { store(), command(fn, label), onChange() } | null:
   //          what the 설정 screen needs to offer [지금 연 세대에도 적용] when it is opened from the
   //          editor's [설정] button (#btnSettings, bound here so both entries open the same screen) }
@@ -88,29 +88,42 @@ export class ListScreen {
     this.root.replaceChildren(header, this.toolbar, this.listHost, this.statusLine, footer, this.dropHint, this.fileInput);
   }
 
+  // Files dragged from Explorer onto the app (a PC). The whole window takes them, not only the list
+  // column: a file dropped beside it (the list is at most 1100 px wide) or on the editor made Chrome open
+  // the file itself in place of the app (round-trip check 2026-10-24). On the editor a dropped file is not
+  // imported (the household open there might be the one in the file); a toast says where to drop it.
   _bindDrop() {
+    const doc = this.root.ownerDocument || (typeof document !== 'undefined' ? document : null);
+    if (!doc) return;
     let depth = 0;
     const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
-    this.root.addEventListener('dragenter', (e) => {
+    const listShown = () => !this.root.hidden;
+    doc.addEventListener('dragenter', (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
+      if (!listShown()) return;
       depth++;
       this.dropHint.hidden = false;
     });
-    this.root.addEventListener('dragover', (e) => {
+    doc.addEventListener('dragover', (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
     });
-    this.root.addEventListener('dragleave', () => {
+    doc.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
       depth = Math.max(0, depth - 1);
       if (!depth) this.dropHint.hidden = true;
     });
-    this.root.addEventListener('drop', (e) => {
+    doc.addEventListener('drop', (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
       depth = 0;
       this.dropHint.hidden = true;
+      if (!listShown()) {
+        this.ctx.toast('파일은 세대 목록 화면에서 불러옵니다. [≡ 목록]을 누른 뒤 다시 끌어다 놓아 주세요.', { type: 'warn', ms: 5000 });
+        return;
+      }
       this.importFiles([...e.dataTransfer.files]);
     });
   }
@@ -280,11 +293,14 @@ export class ListScreen {
     this.refresh();
   }
 
-  // Import one or more project files. Opens the project when exactly one file was imported.
+  // Import one or more project files. Opens the household when exactly one file gave one (stored, or in
+  // memory only when this device cannot store it). Several files: a toast counts the stored ones, and
+  // another the ones this device could not store (before, those were counted as '불러왔습니다' too,
+  // although they were neither stored nor opened; round-trip check 2026-10-24).
   async importFiles(files) {
     if (!files || !files.length) return;
-    let lastProject = null;
-    let count = 0;
+    const stored = [], unsaved = [];
+    let movedToTrash = 0;
     for (const file of files) {
       let res;
       try {
@@ -296,20 +312,33 @@ export class ListScreen {
         this.ctx.toast(`열 수 없는 파일: "${file.name}". ${res && res.error ? res.error : '평면도 파일이 아닙니다.'}`, { type: 'error' });
         continue;
       }
-      const saved = await this._storeImported(res.project);
-      if (saved) {
-        lastProject = saved;
-        count++;
-      }
+      const r = await this._storeImported(res.project);
+      if (!r) continue;
+      (r.stored ? stored : unsaved).push(r);
+      if (r.trashed) movedToTrash++;
     }
     await this.refresh();
-    if (count === 1 && lastProject) this.ctx.openProject(lastProject);
-    else if (count > 1) this.ctx.toast(`${count}개 세대를 불러왔습니다.`, { type: 'ok' });
+    const all = stored.concat(unsaved);
+    if (all.length === 1) {
+      const r = all[0];
+      if (r.failed) this.ctx.toast('이 기기에 저장하지 못했습니다. 화면에서는 열어 둡니다.', { type: 'error' });
+      else if (r.trashed) this.ctx.toast('바꾸기 전의 것은 휴지통에 30일 동안 보관됩니다.', { type: 'ok', ms: 4000 });
+      this.ctx.openProject(r.project, r.failed ? { unsaved: true } : undefined);
+      return;
+    }
+    if (stored.length) {
+      const trash = movedToTrash ? ` 바꾸기 전의 것 ${movedToTrash}개는 휴지통에 30일 동안 보관됩니다.` : '';
+      this.ctx.toast(`${stored.length}개 세대를 불러왔습니다.${trash}`, { type: 'ok' });
+    }
+    if (unsaved.length) {
+      this.ctx.toast(`${unsaved.length}개 세대는 이 기기에 저장하지 못했습니다. 파일을 하나씩 불러오면 화면에서는 열어 둡니다.`, { type: 'error', ms: 6000 });
+    }
   }
 
   // Same household already on this device -> ask (plan §3 "같은 세대 파일을 불러올 때").
+  // → null (cancelled) | { project, stored: bool, failed: bool (a save that failed), trashed: bool }
   async _storeImported(project) {
-    if (!this.ctx.storageReady()) return project;   // open it in memory only
+    if (!this.ctx.storageReady()) return { project, stored: false, failed: false, trashed: false };   // in memory only
     let existing = null;
     try {
       existing = await storage.loadProject(project.id);
@@ -317,6 +346,7 @@ export class ListScreen {
       existing = null;
     }
     let toSave = project;
+    let replace = false;
     if (existing) {
       const which = compareProjects(existing, project).message;
       const res = await openDialog({
@@ -329,15 +359,17 @@ export class ListScreen {
         ],
       });
       if (res.button === 'both') toSave = makeCopy(project);
-      else if (res.button !== 'replace') return null;
+      else if (res.button === 'replace') replace = true;
+      else return null;
     }
     try {
-      await storage.saveProject(toSave);
+      // [파일로 바꾸기]: the copy it replaces goes to the trash (storage.replaceProject).
+      const r = replace ? await storage.replaceProject(toSave) : { trashed: false, record: await storage.saveProject(toSave) };
+      return { project: toSave, stored: true, failed: false, trashed: !!r.trashed };
     } catch (err) {
       console.error(err);
-      this.ctx.toast('이 기기에 저장하지 못했습니다. 화면에서는 열어 둡니다.', { type: 'error' });
+      return { project: toSave, stored: false, failed: true, trashed: false };
     }
-    return toSave;
   }
 }
 

@@ -148,7 +148,10 @@ const DOOR_ROOM_MIN_MM = 600;
 
 const isNum = (v) => typeof v === 'number' && isFinite(v);
 const num = (v) => (isNum(v) ? v : null);
-const plain = (v) => (isNum(v) ? String(Math.round(v)) : '');
+// mm as the messages write them. Rounded to 0.01 mm first: a residual of exactly 25.5 mm (two values 51 mm
+// apart, split evenly) came out 25.49999 on one device and 25.50001 on the one that opened its file, and the
+// item said '25mm' there and '26mm' here (round-trip check 2026-10-24).
+const plain = (v) => (isNum(v) ? String(Math.round(Math.round(v * 100) / 100)) : '');
 const sideKeyOf = (m) => [m.from, m.to].sort().join('-');
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
