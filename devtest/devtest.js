@@ -10,7 +10,9 @@ import { A4, mmToPx, canvasToBlob, buildRasterPdf } from '../js/io/export.js';
 
 // 2: section 9 (update). 3 (2026-10-24, after the Galaxy Tab S9 FE test): 1-5 S Pen side button, 1-6 finger
 // after the pen went away (the app's new pen-near rule), Roboto in the font list, 3 with the file types,
-// 4 says a refusal before installing is normal.
+// 4 says a refusal before installing is normal. Still 3 (same day, the app's [갤러리에 저장]): step 6 asks whether
+// the downloaded PNG shows in the Gallery's Download album and the PDF in 내 파일 → 다운로드 (mem.print.galleryPng /
+// filesPdf, and from which display mode each download was started); earlier answers stay (same STORE_KEY).
 const DEVTEST_VERSION = '3';
 
 // Same string as FONT_STACK in js/ui/theme.js (kept local so that this page does not depend on the UI package).
@@ -80,7 +82,12 @@ function defaultMem() {
     file: null,
     storage: null,
     install: { offlineOpened: null, standaloneOpened: null, installOutcome: null, homeIcon: null, wasInstalled: null },
-    print: { pdf: null, png: null, error: null, limit: null, measSquare: null, measWall: null, korean: null },
+    // galleryPng / filesPdf: the answers after [PNG 내려받기] / [PDF 내려받기]; pngDownloaded / pdfDownloaded:
+    // { at, mode } of the last press (mode: displayMode(), 'standalone' = the installed app).
+    print: {
+      pdf: null, png: null, error: null, limit: null, measSquare: null, measWall: null, korean: null,
+      galleryPng: null, filesPdf: null, pngDownloaded: null, pdfDownloaded: null,
+    },
     door: { choice: null, note: '' },
     update: { firstVersion: null, firstAt: null, laterVersion: null, laterAt: null, banner: null, kept: null },
     errors: [],
@@ -1517,9 +1524,26 @@ function setupPrint() {
   $('#pdfMake').addEventListener('click', makePdf);
   $('#pngMake').addEventListener('click', makePng);
   $('#pdfShare').addEventListener('click', () => print.pdfBlob && shareOrDownload(print.pdfBlob, print.pdfName, 'application/pdf'));
-  $('#pdfDownload').addEventListener('click', () => print.pdfBlob && downloadBlob(print.pdfBlob, print.pdfName));
+  // A download is where the app's [갤러리에 저장] / [태블릿에 저장] puts the file (Chrome on Android: Download).
+  const downloaded = (kind, blob, name) => {
+    if (!blob) return;
+    downloadBlob(blob, name);
+    mem.print[kind === 'png' ? 'pngDownloaded' : 'pdfDownloaded'] = { at: new Date().toISOString(), mode: displayMode() };
+    $('#printMsg').textContent = kind === 'png'
+      ? `내려받기를 시작했어요: ${name}. 갤러리(사진) 앱 → Download 앨범에 보이는지 아래에서 답해 주세요.`
+      : `내려받기를 시작했어요: ${name}. 내 파일 → 다운로드에 보이는지 아래에서 답해 주세요.`;
+    save();
+    updatePrint();
+  };
+  $('#pdfDownload').addEventListener('click', () => downloaded('pdf', print.pdfBlob, print.pdfName));
   $('#pngShare').addEventListener('click', () => print.pngBlob && shareOrDownload(print.pngBlob, print.pngName, 'image/png'));
-  $('#pngDownload').addEventListener('click', () => print.pngBlob && downloadBlob(print.pngBlob, print.pngName));
+  $('#pngDownload').addEventListener('click', () => downloaded('png', print.pngBlob, print.pngName));
+  for (const btn of $$('[data-gallery-png]')) {
+    btn.addEventListener('click', () => { mem.print.galleryPng = btn.dataset.galleryPng === 'yes'; save(); updatePrint(); });
+  }
+  for (const btn of $$('[data-files-pdf]')) {
+    btn.addEventListener('click', () => { mem.print.filesPdf = btn.dataset.filesPdf === 'yes'; save(); updatePrint(); });
+  }
   const sq = $('#measSquare');
   const wall = $('#measWall');
   if (mem.print.measSquare != null) sq.value = mem.print.measSquare;
@@ -1557,6 +1581,15 @@ function updatePrint() {
   if (errSq != null) facts.push(['잰 사각형 한 변', `${p.measSquare}mm (오차 ${errSq.toFixed(1)}%)`]);
   if (errWall != null) facts.push(['잰 3,000mm 벽(1:60)', `${p.measWall}mm (오차 ${errWall.toFixed(1)}%)`]);
   facts.push(['한글 인쇄 상태', p.korean === true ? '잘 나옴' : p.korean === false ? '깨짐' : '모름']);
+  // The app's [갤러리에 저장] / [태블릿에 저장] is this download.
+  const dlText = (d) => (d ? `${fmtTime(d.at)}, ${d.mode === 'browser' ? '크롬 탭' : `설치한 앱(${d.mode})`}에서` : '안 누름');
+  const seen = (v) => (v === true ? '보임' : v === false ? '안 보임' : '모름');
+  facts.push(['PNG 내려받기', dlText(p.pngDownloaded)]);
+  facts.push(['갤러리(사진) 앱 Download 앨범에 PNG', seen(p.galleryPng)]);
+  facts.push(['PDF 내려받기', dlText(p.pdfDownloaded)]);
+  facts.push(['내 파일 → 다운로드에 PDF', seen(p.filesPdf)]);
+  for (const btn of $$('[data-gallery-png]')) btn.classList.toggle('chosen', p.galleryPng === (btn.dataset.galleryPng === 'yes'));
+  for (const btn of $$('[data-files-pdf]')) btn.classList.toggle('chosen', p.filesPdf === (btn.dataset.filesPdf === 'yes'));
 
   const within = (e) => e != null && Math.abs(e) <= 1.0001;
   let status;
@@ -1579,6 +1612,14 @@ function updatePrint() {
   } else {
     status = 'pending';
     verdict = '아직 시험하지 않았어요. [시험 PDF 만들기]를 눌러 주세요.';
+  }
+  // The device save: a file that does not show up is a failure of the app's [갤러리에 저장] too.
+  if (p.galleryPng === false || p.filesPdf === false) {
+    status = 'fail';
+    const what = [p.galleryPng === false ? 'PNG가 갤러리에' : null, p.filesPdf === false ? 'PDF가 내 파일에' : null].filter(Boolean).join(', ');
+    verdict = `내려받은 ${what} 안 보인다고 하셨어요. 크롬 ⋮ → 다운로드 목록에 있는지 봐 주세요. ${verdict}`;
+  } else if (p.galleryPng === true && p.filesPdf === true && status === 'ok') {
+    verdict += ' 내려받은 PNG·PDF도 갤러리와 내 파일에 보여요.';
   }
   setResult('print', status, verdict, facts);
 }

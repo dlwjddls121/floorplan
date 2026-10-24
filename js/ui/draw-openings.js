@@ -221,7 +221,30 @@ function drawWindow(ctx, pl, thick, P, opts, color, lw) {
   }
 }
 
+// The swing of a hinged door exactly as drawSwing draws it (world mm), for its label (core/labels.js,
+// through labelHooks.openingAnchor in ui/wiring.js): the unit normal of the side it opens into, the
+// hinge's distance along the wall from the opening's centre (pl.c: −w/2 at the 'start' end, +w/2 at
+// the 'end' end), the arc's radius (the drawn width) and the hinge's offset from the wall's centre
+// line toward that side (half the frame band). → { normal, hinge, radius, offset } | null (windows,
+// sliding doors)
+export function doorSwing(o, pl) {
+  if (!o || o.kind !== 'door' || slidingLeaves(o) || !pl || !pl.frame) return null;
+  const fr = pl.frame;
+  const thick = fr.thick > 0 ? fr.thick : OPENING_STYLE.nominalWallMM;
+  const swing = o.swing || { side: 'left', hinge: 'start' };
+  const sgn = swing.side === 'right' ? -1 : 1;
+  const sh = swing.hinge === 'end' ? pl.s1 : pl.s0;
+  const so = swing.hinge === 'end' ? pl.s0 : pl.s1;
+  return {
+    normal: { x: fr.left.x * sgn, y: fr.left.y * sgn },
+    hinge: sh - pl.c,
+    radius: Math.abs(so - sh),
+    offset: thick * OPENING_STYLE.bandRatio / 2,
+  };
+}
+
 // Swing door: frame band with end squares, leaf line at the hinge and a quarter arc (plan §1-2).
+// (doorSwing above gives the same hinge, radius and side to the labels.)
 function drawSwing(ctx, o, pl, thick, P, opts, frameColor, leafColor, frameW, leafW) {
   const hb = thick * OPENING_STYLE.bandRatio / 2;
   bandRect(ctx, pl, hb, P, opts, frameColor, frameW);

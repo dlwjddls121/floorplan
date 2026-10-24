@@ -11,13 +11,13 @@ import { DocStore } from '../core/model.js';
 import { installChecks, carryResolvedChecks, runChecks, notesForPrint } from '../core/checks-full.js';
 import { scaleLabelOffsets, rotationOf } from '../core/rotate.js';
 import { computePrintLayout } from '../core/printlayout.js';
-import { labelOf, displayName, placeOpening, nominalWidth } from '../core/openings.js';
+import { labelOf, displayName, placeOpening, nominalWidth, slidingLeaves } from '../core/openings.js';
 // A namespace import: fixtureGlyphBoxes (the sink basin, removed by the 2026-10-17 request) and
 // fixtureWallCutouts (벽 속에 넣기) may or may not exist in the fixtures package; a missing named
 // import would stop the whole app from loading.
 import * as FX from '../core/fixtures.js';
 import { labelHooks, installLabelCommands, followMovedLabels, turnMovedRoomLabels } from '../core/labels.js';
-import { drawOpenings } from './draw-openings.js';
+import { drawOpenings, doorSwing } from './draw-openings.js';
 import { drawFixtures, drawNotRoomSpaces } from './draw-fixtures.js';
 import { drawMemo } from './memo-ui.js';
 import { registerPaperDrawers, notesForChoices, DEFAULT_CHOICES } from './output.js';
@@ -56,11 +56,19 @@ export function wirePackages() {
   installLabelCommands(DocStore);
   labelHooks.labelOf = (o) => labelOf(o);
   labelHooks.fixtureLabel = (f) => FX.fixtureLabel(FX.normalizeFixture(f));
-  // The real position of an opening (anchored openings sit flush with a wall end, not at t).
+  // The real position of an opening (anchored openings sit flush with a wall end, not at t), whether
+  // it is a sliding door, and the swing of a hinged door as draw-openings.js draws it: its label sits
+  // just beyond the arc on the side the door opens into, right at the wall face everywhere else
+  // (core/labels.js, user 2026-10-24).
   labelHooks.openingAnchor = (o, project, derived) => {
     const pl = placeOpening(project, derived, o);
     if (!pl) return null;
-    return { point: pl.center, dir: pl.frame.dir, edgeId: o.edge, width: pl.w, isDoor: o.kind === 'door' };
+    const isDoor = o.kind === 'door';
+    const sliding = isDoor && slidingLeaves(o) > 0;
+    return {
+      point: pl.center, dir: pl.frame.dir, edgeId: o.edge, width: pl.w, isDoor, sliding,
+      swing: isDoor && !sliding ? doorSwing(o, pl) : null,
+    };
   };
   // Fixtures store their centre (x, y) and a rotation; the label box is their axis-aligned extent,
   // minus the symbols drawn inside (the sink basin), which the label keeps clear of.

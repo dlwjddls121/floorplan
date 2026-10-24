@@ -2,9 +2,10 @@
 //
 //   renderPaper(ctx, project, derived, layout, options)  draws EVERYTHING in paper mode
 //   produceOutput(project, derived, choices, deps)        → Promise<{ blob, fileName, layout }> (300 dpi)
-//   deliverFile(blob, fileName)                           → Promise<{ method: 'share'|'download'|'cancelled' }>
+//   deliverFile(blob, fileName, { target })               → Promise<{ method: 'download'|'share'|'cancelled'|'ready'|'failed' }>
+//   saveMode(nav) / saveButtons(mode, format)             which save buttons the dialog shows (PC / tablet)
 //   outputFileName(project, { drawingOnly, format })      → '<세대명>_평면도_<YYYY-MM-DD>[_그림만].png|jpg|pdf'
-//   class OutputDialog(host, ctx)                         the dialog (choices, live preview, [저장])
+//   class OutputDialog(host, ctx)                         the dialog (choices, live preview, save buttons)
 //   paperDrawers / registerPaperDrawers({...})            draw functions of the other packages
 //   installOutput(DocStore)                               store commands (= core/dims.js installDims)
 //
@@ -24,6 +25,20 @@
 // room, ui/render.js drawPaperPlanText), 그림만 (choices.drawingOnly: no text at all). All three use the
 // same layout (scale and position), so they overlay exactly.
 // [↻ 도면 회전] in the dialog turns the plan itself a quarter turn (ctx.rotate; core/rotate.js).
+//
+// Saving (user 2026-10-24: "저장은 갤러리에 할수도 있어야되고 구글드라이브에 할수도 있어야돼"). Until 0.6.3 [저장]
+// on a tablet only opened the share sheet, so nothing was kept on the tablet and the Gallery never showed
+// the picture. Now a tablet / phone has two buttons:
+//   [갤러리에 저장] ([태블릿에 저장] for a PDF; primary): a download — Chrome on Android writes it to the
+//     Download folder, which Samsung Gallery shows as its 'Download' album (PNG / JPG; a PDF is in 내 파일 →
+//     다운로드). If a download cannot start, the share sheet opens instead.
+//   [드라이브에 저장] + the hint '공유 창에서 「드라이브」를 고르세요': the share sheet (Android lists the last
+//     used target first, so from the second time Drive is one tap). The sheet needs the tap's user
+//     activation, which a slow 300 dpi page may outlast: then the made file is kept and a toast button
+//     (or the same button again) opens the sheet at once. A share that fails otherwise downloads the file.
+//   Without file sharing (no navigator.canShare with files) the Drive button is left out and the dialog
+//   says how to upload the saved file from the Drive app.
+// A PC has one [저장] (a download into the Downloads folder; a desktop share sheet does not reach Drive).
 
 import { wallPolygons, finishPolygons, installDims, buildDimensions, SPLIT_COMPUTED_NOTE } from '../core/dims.js';
 import { computePrintLayout, SCALES } from '../core/printlayout.js';
@@ -281,24 +296,138 @@ export async function produceOutput(project, derived, choices = {}, deps = {}) {
 
 const MIME = { png: 'image/png', jpg: 'image/jpeg', pdf: 'application/pdf' };
 
-// Tablets/phones: the share sheet (images and PDF are accepted by Android Chrome). PCs: download.
-export async function deliverFile(blob, fileName) {
-  const nav = typeof navigator !== 'undefined' ? navigator : null;
+// ---- saving: on the tablet (Gallery / Download) or to Drive (the share sheet) --------------------------
+
+export const SAVE_TEXT = Object.freeze({
+  pc: '저장',
+  gallery: '갤러리에 저장',          // PNG / JPG on a tablet / phone
+  device: '태블릿에 저장',           // PDF on a tablet / phone (내 파일 → 다운로드)
+  drive: '드라이브에 저장',
+  driveHint: '공유 창에서 「드라이브」를 고르세요',
+  busy: '만드는 중…',
+  noShare: '이 기기에서는 드라이브로 바로 보낼 수 없습니다. 저장한 파일은 드라이브 앱에서 [+] → [업로드] → 다운로드 폴더에서 골라 올려 주세요.',
+});
+
+// Toasts after a save (r: the deliverFile result).
+export const SAVE_MSG = Object.freeze({
+  pc: (name) => `저장했습니다: ${name} (다운로드 폴더)`,
+  gallery: (name) => `갤러리에 저장했습니다: ${name} (갤러리 앱 → Download 앨범)`,
+  device: (name) => `태블릿에 저장했습니다: ${name} (내 파일 → 다운로드)`,
+  drive: '공유 창으로 보냈습니다. 드라이브를 골랐다면 구글 드라이브에 저장됩니다.',
+  driveReady: '파일이 준비됐습니다. [드라이브로 보내기]를 누르면 공유 창이 열립니다.',
+  driveAction: '드라이브로 보내기',
+  driveFellBack: (here) => `공유 창을 열지 못했습니다. ${here}. 드라이브에는 드라이브 앱의 [+] → [업로드]로 올려 주세요.`,
+  deviceFellBack: '기기에 바로 저장할 수 없어 공유 창으로 보냈습니다. 고른 곳(내 파일, 드라이브 …)에 저장됩니다.',
+  failed: '이 기기에서는 파일을 저장하지 못했습니다. [드라이브에 저장]으로 보내거나 PC에서 출력해 주세요.',
+});
+
+// True when this browser can share files (Web Share Level 2). Chrome's canShare ignores the file type.
+function canShareFiles(nav, file) {
+  try {
+    const f = file || new File([''], 'share-test.png', { type: 'image/png' });
+    return !!(nav && typeof nav.share === 'function' && typeof nav.canShare === 'function' && nav.canShare({ files: [f] }));
+  } catch (_) { return false; }
+}
+
+// The share sheet needs the tap's transient user activation (about 5 s in Chrome). Browsers without
+// navigator.userActivation are assumed to still have it (share() then tells).
+function activationActive(nav) {
+  const ua = nav && nav.userActivation;
+  return !ua || typeof ua.isActive !== 'boolean' ? true : ua.isActive;
+}
+
+function downloadSupported() {
+  try { return typeof document === 'undefined' || 'download' in document.createElement('a'); } catch (_) { return true; }
+}
+
+// Which save buttons the dialog shows. → 'pc' | 'tablet' | 'tablet-noshare'
+export function saveMode(nav = typeof navigator !== 'undefined' ? navigator : null) {
+  if (!nav || isDesktopPlatform(nav)) return 'pc';
+  return canShareFiles(nav) ? 'tablet' : 'tablet-noshare';
+}
+
+// Button labels for a mode and format. → { primary, drive (null: no Drive button), note (null or text) }
+export function saveButtons(mode, format) {
+  if (mode === 'pc') return { primary: SAVE_TEXT.pc, drive: null, note: null };
+  return {
+    primary: format === 'pdf' ? SAVE_TEXT.device : SAVE_TEXT.gallery,
+    drive: mode === 'tablet' ? SAVE_TEXT.drive : null,
+    note: mode === 'tablet' ? null : SAVE_TEXT.noShare,
+  };
+}
+
+// The toast for a deliverFile result. mode: saveMode(); format: 'png' | 'jpg' | 'pdf'.
+// → { msg, type, action: 'drive' | null } or null (nothing to say: a cancelled share sheet)
+export function saveToast(r, mode, format) {
+  if (!r || r.method === 'cancelled') return null;
+  const here = mode === 'pc' ? SAVE_MSG.pc(r.fileName)
+    : format === 'pdf' ? SAVE_MSG.device(r.fileName) : SAVE_MSG.gallery(r.fileName);
+  if (r.method === 'ready') return { msg: SAVE_MSG.driveReady, type: 'info', action: 'drive' };
+  if (r.method === 'failed') return { msg: SAVE_MSG.failed, type: 'error', action: null };
+  if (r.method === 'download') {
+    return r.fallback ? { msg: SAVE_MSG.driveFellBack(here), type: 'warn', action: null } : { msg: here, type: 'ok', action: null };
+  }
+  // 'share'
+  return r.fallback ? { msg: SAVE_MSG.deviceFellBack, type: 'warn', action: null } : { msg: SAVE_MSG.drive, type: 'ok', action: null };
+}
+
+// Delivers a made file.
+//   target 'device': a download through a temporary <a download> in the document, its object URL revoked
+//     a minute later, no new window — in a Chrome tab and in the installed app (standalone) alike. Chrome
+//     on Android writes it to Download (the Gallery's 'Download' album for PNG / JPG); a PC to Downloads.
+//     If it cannot start (no download attribute, an error), the share sheet opens instead (fallback).
+//   target 'drive': the share sheet (Drive, KakaoTalk …). Without file sharing: a download (fallback).
+//     'ready' when the tap's user activation ran out while the file was made (nothing was opened; a new
+//     tap may call again with { retry: true }); a later failure other than a cancel downloads (fallback).
+//   target 'auto': 'device' on a PC, 'drive' on a tablet / phone (the 0.6.3 behaviour).
+// opts.nav / opts.download (tests): the navigator and the download function (false = could not start).
+// Call it from the tap: nothing is awaited before share().
+// → { method: 'download' | 'share' | 'cancelled' | 'ready' | 'failed', target, fileName, fallback, error }
+export async function deliverFile(blob, fileName, opts = {}) {
+  const nav = 'nav' in opts ? opts.nav : (typeof navigator !== 'undefined' ? navigator : null);
+  const download = typeof opts.download === 'function' ? opts.download : downloadBlob;
+  const retry = !!opts.retry;
+  const target = opts.target === 'device' || opts.target === 'drive' ? opts.target
+    : (!nav || isDesktopPlatform(nav) ? 'device' : 'drive');
   const ext = fileName.split('.').pop();
   const file = new File([blob], fileName, { type: blob.type || MIME[ext] || 'application/octet-stream' });
-  let canShare = false;
-  try { canShare = !!(nav && !isDesktopPlatform(nav) && nav.share && nav.canShare && nav.canShare({ files: [file] })); } catch (_) { canShare = false; }
-  if (canShare) {
+  const result = (method, extra = {}) => ({ method, target, fileName, fallback: false, error: null, ...extra });
+  const tryDownload = () => {
+    try {
+      if (!downloadSupported()) return false;
+      return download(blob, fileName) !== false;
+    } catch (err) {
+      console.warn('[output] download could not start', err);
+      return false;
+    }
+  };
+  const shareable = canShareFiles(nav, file);
+  if (target === 'device') {
+    if (tryDownload()) return result('download');
+    if (!shareable || !activationActive(nav)) return result('failed');
     try {
       await nav.share({ files: [file], title: fileName });
-      return { method: 'share', fileName };
+      return result('share', { fallback: true });
     } catch (err) {
-      if (err && err.name === 'AbortError') return { method: 'cancelled', fileName };
-      console.warn('[output] share failed, downloading instead', err);
+      if (err && err.name === 'AbortError') return result('cancelled', { fallback: true });
+      console.warn('[output] share failed too', err);
+      return result('failed', { error: String((err && err.name) || err) });
     }
   }
-  downloadBlob(blob, fileName);
-  return { method: 'download', fileName };
+  // 'drive'
+  if (!shareable) return tryDownload() ? result('download', { fallback: true }) : result('failed');
+  if (!retry && !activationActive(nav)) return result('ready');
+  try {
+    await nav.share({ files: [file], title: fileName });
+    return result('share');
+  } catch (err) {
+    const name = (err && err.name) || String(err);
+    if (name === 'AbortError') return result('cancelled');
+    // NotAllowedError: most likely the activation ran out just now; a new tap shares at once.
+    if (name === 'NotAllowedError' && !retry) return result('ready', { error: name });
+    console.warn('[output] share failed, downloading instead', err);
+    return tryDownload() ? result('download', { fallback: true, error: name }) : result('failed', { error: name });
+  }
 }
 
 // ---- dialog --------------------------------------------------------------------------------------
@@ -321,9 +450,9 @@ export class OutputDialog {
   // host: element the dialog is appended to (default document.body)
   // ctx: {
   //   store()                       -> current DocStore
-  //   toast(msg, { type })          -> short message
+  //   toast(msg, { type, ms, action: { label, run } }) -> short message (Toaster.show)
   //   notesFor(project, derived)    -> [string] ※ notes from CHECKS (optional, stage D)
-  //   onSaved({ method, fileName }) -> optional, after a file was shared or downloaded
+  //   onSaved({ method, fileName, target }) -> optional, after a file was shared or downloaded
   //   rotate()                      -> optional: [↻ 도면 회전] turns the plan a quarter turn
   //                                    clockwise (one undo step); the preview follows
   // }
@@ -368,6 +497,7 @@ export class OutputDialog {
     document.removeEventListener('keydown', this._onKey, true);
     this.root.remove();
     this.root = null;
+    this._made = null;
   }
 
   _segmented(label, name, options) {
@@ -421,7 +551,27 @@ export class OutputDialog {
         el('div', { class: 'out-label' }, '방향'),
         el('div', { class: 'out-rotate-row' }, this.rotateBtn, this.rotateHint))
       : null;
-    this.saveBtn = el('button', { type: 'button', class: 'btn btn-primary out-save', onclick: () => this.save() }, '저장');
+    // Save buttons (see the top): PC [저장]; tablet [갤러리에 저장] / [태블릿에 저장] (PDF) + [드라이브에 저장].
+    this.saveMode = saveMode();
+    const labels = saveButtons(this.saveMode, this.choices.format);
+    this.saveBtn = el('button', {
+      type: 'button', class: 'btn btn-primary out-save out-save-device', dataset: { target: 'device' },
+      onclick: () => this.save('device'),
+    }, labels.primary);
+    this.driveBtn = null;
+    let drive = null;
+    if (labels.drive) {
+      const hintId = `outDriveHint${++OutputDialog._ids}`;
+      this.driveBtn = el('button', {
+        type: 'button', class: 'btn out-save out-save-drive', dataset: { target: 'drive' }, 'aria-describedby': hintId,
+        onclick: () => this.save('drive'),
+      }, labels.drive);
+      // The hint wraps after '공유 창에서' only (not inside '「드라이브」를').
+      const cut = SAVE_TEXT.driveHint.indexOf('「');
+      drive = el('div', { class: 'out-drive' }, this.driveBtn, el('span', { class: 'out-drive-hint', id: hintId },
+        SAVE_TEXT.driveHint.slice(0, cut), el('span', { class: 'out-nowrap' }, SAVE_TEXT.driveHint.slice(cut))));
+    }
+    const saveNote = labels.note ? el('p', { class: 'out-save-note' }, labels.note) : null;
     const checks = el('div', { class: 'out-group' },
       el('div', { class: 'out-label' }, '선택'),
       el('div', { class: 'out-checks' },
@@ -442,8 +592,10 @@ export class OutputDialog {
           rotateRow,
           this.pdfNote,
           this.warn)),
-      el('div', { class: 'dialog-buttons' },
-        el('button', { type: 'button', class: 'btn', onclick: () => this.close() }, '닫기'),
+      el('div', { class: `dialog-buttons out-buttons out-mode-${this.saveMode}` },
+        saveNote,
+        el('button', { type: 'button', class: 'btn out-close', onclick: () => this.close() }, '닫기'),
+        drive,
         this.saveBtn));
     this.root = el('div', { class: 'dialog-backdrop out-backdrop' }, dialog);
     this.root.addEventListener('pointerdown', (e) => { if (e.target === this.root && !this.busy) this.close(); });
@@ -503,6 +655,8 @@ export class OutputDialog {
     sel.value = c.scale === 'auto' ? 'auto' : String(c.scale);
     this.scaleInfo.textContent = `A4 ${layout.orientation === 'landscape' ? '가로' : '세로'} · 축척 1:${layout.scale}`;
     this.pdfNote.hidden = c.format !== 'pdf';
+    // [갤러리에 저장] reads [태블릿에 저장] for a PDF (it goes to 내 파일 → 다운로드, not to the Gallery).
+    if (!this.busy) this.saveBtn.textContent = saveButtons(this.saveMode, c.format).primary;
     let warn = '';
     if (layout.empty) warn = '그린 벽이 없습니다. 벽을 그린 뒤에 출력하세요.';
     else if (layout.overflow) warn = `1:${layout.scale}로는 도면이 A4에 다 들어가지 않습니다. 잘리는 부분이 있을 수 있습니다.`;
@@ -534,30 +688,65 @@ export class OutputDialog {
     });
   }
 
-  async save() {
+  // The file for the current choices, made once: [드라이브에 저장] after [갤러리에 저장] (or again after
+  // 'ready') delivers the same file at once, inside the new tap's user activation.
+  async _madeFile() {
+    const { project, derived } = this._source();
+    const c = this.choices;
+    const key = JSON.stringify([c.drawingOnly, c.noDims, c.format, c.extensionLines, c.includeTitle && this.hasTitle,
+      c.bothValues, c.showMemo, c.scale, this._baseNotes(project, derived)]);
+    const m = this._made;
+    if (m && m.project === project && m.derived === derived && m.key === key) return m.out;
+    const out = await this.produce();
+    this._made = { project, derived, key, out };
+    return out;
+  }
+
+  // target: 'device' ([갤러리에 저장] / [태블릿에 저장] / PC [저장]) | 'drive' ([드라이브에 저장]).
+  async save(target = 'device') {
     if (this.busy || !this.root) return;
     const { project } = this._source();
     if (!project) return;
+    const tgt = target === 'drive' && this.driveBtn ? 'drive' : 'device';
+    const btn = tgt === 'drive' ? this.driveBtn : this.saveBtn;
+    const label = btn.textContent;
+    const buttons = [this.saveBtn, this.driveBtn].filter(Boolean);
     this.busy = true;
-    this.saveBtn.disabled = true;
-    this.saveBtn.textContent = '만드는 중…';
+    for (const b of buttons) b.disabled = true;
+    btn.textContent = SAVE_TEXT.busy;
     savePrefs(this.choices);
+    const format = this.choices.format;
     try {
-      const out = await this.produce();
-      const r = await deliverFile(out.blob, out.fileName);
-      if (r.method === 'download') this._toast(`저장했습니다: ${r.fileName}`, 'ok');
-      else if (r.method === 'share') this._toast('공유 창으로 보냈습니다.', 'ok');
-      if (r.method !== 'cancelled' && this.ctx.onSaved) this.ctx.onSaved(r);
+      const out = await this._madeFile();
+      const r = await deliverFile(out.blob, out.fileName, { target: tgt });
+      this._report(r, out, format);
     } catch (err) {
       console.error('[output] save failed', err);
       this._toast('출력 파일을 만들지 못했습니다. 잠시 후 다시 해 보세요.', 'error');
     } finally {
       this.busy = false;
-      if (this.saveBtn) { this.saveBtn.disabled = false; this.saveBtn.textContent = '저장'; }
+      for (const b of buttons) b.disabled = false;
+      btn.textContent = label;
+      if (this.root) this.saveBtn.textContent = saveButtons(this.saveMode, this.choices.format).primary;
     }
   }
 
-  _toast(msg, type) {
-    if (typeof this.ctx.toast === 'function') this.ctx.toast(msg, { type });
+  // Toast for a deliverFile result; 'ready' offers [드라이브로 보내기], which shares the made file at once.
+  _report(r, out, format) {
+    const t = saveToast(r, this.saveMode, format);
+    if (t) {
+      const action = t.action === 'drive' ? {
+        label: SAVE_MSG.driveAction,
+        run: () => { deliverFile(out.blob, out.fileName, { target: 'drive', retry: true }).then((r2) => this._report(r2, out, format)); },
+      } : null;
+      this._toast(t.msg, t.type, action ? { action, ms: 15000 } : { ms: t.type === 'ok' ? 4500 : 7000 });
+    }
+    if ((r.method === 'download' || r.method === 'share') && this.ctx.onSaved) this.ctx.onSaved(r);
+  }
+
+  _toast(msg, type, extra = {}) {
+    if (typeof this.ctx.toast === 'function') this.ctx.toast(msg, { type, ...extra });
   }
 }
+
+OutputDialog._ids = 0;

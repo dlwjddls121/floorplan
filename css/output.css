@@ -1,12 +1,24 @@
 /* [출력] dialog (stage C, js/ui/output.js). Builds on .dialog-backdrop / .dialog / .btn from app.css. */
 
+/* The body scrolls when the screen is short (tablet landscape with the PDF note); the title and the
+   save buttons stay in view. */
 .out-dialog {
   width: min(820px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .out-body {
   display: flex;
   gap: 20px;
   align-items: flex-start;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* room for the focus outlines of the buttons at the edges */
+  margin: -4px;
+  padding: 4px;
 }
 .out-preview {
   flex: 0 0 auto;
@@ -134,9 +146,53 @@
 .out-select:disabled { opacity: 0.45; }
 .out-note[hidden], .out-warn[hidden], .out-kind-note[hidden] { display: none; }
 
+/* Save buttons. PC: [닫기] [저장]. Tablet / phone: [닫기] [드라이브에 저장] [갤러리에 저장] (primary), the
+   Drive hint under its button; without file sharing a note on the left says how to upload. */
+.out-buttons {
+  flex: 0 0 auto;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line, #DDE1E6);
+}
+.out-buttons .btn { min-height: 52px; font-size: 17px; }
+.out-mode-tablet .out-save,
+.out-mode-tablet-noshare .out-save { min-width: 156px; padding: 0 18px; }
+.out-drive {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: min-content;   /* as wide as its button: the hint wraps under it */
+}
+.out-drive-hint {
+  font-size: 14px;
+  line-height: 1.3;
+  color: var(--muted, #5F6670);
+  text-align: center;
+  word-break: keep-all;
+}
+.out-nowrap { white-space: nowrap; }
+.out-save-note {
+  flex: 1 1 260px;
+  margin: 0;
+  align-self: center;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--muted, #5F6670);
+  word-break: keep-all;
+}
+
 /* Narrow or short screens (tablet portrait, phones): preview above the options. */
 @media (max-width: 700px) {
   .out-body { flex-direction: column; align-items: stretch; }
   .out-preview-canvas { width: 220px !important; height: 311px !important; }
   .out-preview-canvas.out-landscape { width: 300px !important; height: 212px !important; }
+}
+/* Phones: the save buttons one under the other, the primary first. */
+@media (max-width: 520px) {
+  .out-buttons { flex-direction: column; align-items: stretch; }
+  .out-buttons .out-save-device { order: -2; }
+  .out-buttons .out-drive { order: -1; width: auto; }
+  .out-save-note { flex: 0 0 auto; }
 }

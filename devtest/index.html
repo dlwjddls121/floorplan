@@ -148,6 +148,9 @@
       <li>[시험 PDF 만들기] → [PDF 보내기]로 드라이브에 저장하거나 [PDF 내려받기]를 누릅니다.</li>
       <li>인쇄할 때 크기를 <b>“실제 크기”</b>(또는 배율 100%)로 고릅니다. <b>“페이지에 맞춤”은 끄세요.</b></li>
       <li>인쇄한 종이를 자로 재서 아래 칸에 적어 주세요.</li>
+      <li><b>기기에 저장되는지:</b> [고해상도 PNG 만들기] → [PNG 내려받기]를 누른 뒤 <b>갤러리(사진) 앱</b>의 <b>Download</b> 앨범을 열어 보세요.
+        [PDF 내려받기]를 누른 뒤에는 <b>내 파일</b> 앱 → <b>다운로드</b>를 열어 보세요. 보이는지 아래에서 답해 주세요.
+        (앱에서 [출력] → [갤러리에 저장]을 누르면 같은 곳에 저장됩니다. 홈 화면에 설치한 앱에서도 한 번 해 보세요.)</li>
     </ol>
     <div class="row">
       <button id="pdfMake" class="primary" type="button">시험 PDF 만들기</button>
@@ -160,6 +163,17 @@
       <button id="pngDownload" type="button" disabled>PNG 내려받기</button>
     </div>
     <p id="printMsg" class="msg" role="status"></p>
+    <!-- v3 (2026-10-24): does a download reach the Gallery / 내 파일? (the app's [갤러리에 저장] is the same download) -->
+    <div class="row" id="galleryConfirm">
+      <span>갤러리(사진) 앱의 Download 앨범에 방금 PNG가 보이나요?</span>
+      <button class="small" type="button" data-gallery-png="yes">보여요</button>
+      <button class="small" type="button" data-gallery-png="no">안 보여요</button>
+    </div>
+    <div class="row" id="filesConfirm">
+      <span>내 파일 → 다운로드에 방금 PDF가 보이나요?</span>
+      <button class="small" type="button" data-files-pdf="yes">보여요</button>
+      <button class="small" type="button" data-files-pdf="no">안 보여요</button>
+    </div>
     <div class="preview" id="printPreview"></div>
     <h3>인쇄해서 잰 값</h3>
     <div class="row">

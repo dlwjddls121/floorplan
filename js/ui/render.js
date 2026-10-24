@@ -624,7 +624,11 @@ function drawSideLabels(ctx, view, project, derived, geo, font, o) {
 // its name where the whole block lies inside its inner faces (slantedNameCands).
 
 const TEXT_GAP_PX = 2;
-const SIDE_VALUE_BAND_PX = [20, 38];   // window/door spots beyond the per-side values (h / v walls)
+// Window/door spots beyond the per-side values (screen px / paper pt from the wall face): every depth
+// from just past a horizontal wall's value (20) to past a wide value on a vertical wall (44); the first
+// one with a value really between it and the wall is taken (valueBehind), so a stacked label sits
+// right beyond that value. (Before 2026-10-24: [20, 38] for any wall, with or without a value.)
+export const SIDE_VALUE_BAND_PX = [20, 26, 32, 38, 44];
 const SCREEN_LABEL_PX = { opening: 12, fixture: 12 };
 const MIN_LABEL_SCALE = 0.02;          // px per mm below which labels and H are left out
 const FIXTURE_TEXT = '#111111';
@@ -1091,8 +1095,12 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
       const opening = l.kind === 'opening';
       // Zoomed far out, a label pushed away from its window / door (or fixture) would read as
       // someone else's: only spots near it count; otherwise it waits for a closer zoom.
+      // Window / door spots attached to their opening (core/labels.js openingLabelFit: right at the
+      // wall face, or just beyond a door's swing on the side it opens into) are near at every zoom;
+      // the spots beyond the per-side values only within 48 px.
       const near = (c) => {
         if (l.moved || paper) return true;
+        if (opening && c.attached) return true;
         if (opening) return distToBox(l.base, c.box) <= (l.span || 0) / 2 + W(48);
         const own = fixtures.find((f) => f.id === l.refId);
         return !own || boxGap(own, c.box) <= W(24);
@@ -1103,15 +1111,77 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
       // window / door the label waits for a closer zoom instead of being written over the fixture
       // (plan §2-7 / 0.4.0 (f), (j)). A label placed by hand stays where it was put.
       const others = opening ? soft : soft.filter((f) => f.id !== l.refId);
+      // Window / door labels keep off the other doors' swings where a spot allows it (l.avoid).
+      const swings = opening && !l.moved && Array.isArray(l.avoid) ? l.avoid : [];
+      // When every spot overlaps something (paper; the text being dragged), the least overlapping
+      // ATTACHED one is taken, never one beyond the per-side values, and one that reads as another
+      // opening's label (core/labels.js misleading) only when there is no other.
+      const attached = opening ? cands.filter((c) => c.attached !== false) : null;
+      const clean = attached ? attached.filter((c) => !c.misleading) : null;
+      // A stacked spot (beyond the per-side values) only where a value of that wall was really
+      // written between it and the wall (checker 2026-10-24: without one, e.g. beyond a 옷장 or outside
+      // an exterior wall, the label floated 8–15 paper mm from its opening, as the user's complaint).
+      // (Checked lazily, in groupsOf, only when no attached spot is free; with no attached spot at all
+      // the whole list is filtered at once.)
+      const stackOk = (chosen) => { const vals = valueBoxes(chosen); return (c) => !c.stack || valueBehind(c, l, vals); };
+      const pick = attached && !attached.length && cands.some((c) => c.stack) ? (chosen) => cands.filter(stackOk(chosen)) : cands;
       add({
-        id: l.key, kind: l.kind, key: l.key, refId: l.refId, base: l.base, cands, halo: !!l.halo,
+        id: l.key, kind: l.kind, key: l.key, refId: l.refId, base: l.base, cands: pick, halo: !!l.halo,
         // A label placed by hand is wanted where it is: it goes before the values.
         prio: l.moved ? P.moved : (opening ? P.opening : P.fixture), sub: 0,
         mustShow: paper || o.forceShow === l.key,
-        hard: (opening ? columns.concat(wallBoxes, extra) : columns.concat(extra)).concat(l.moved ? [] : others),
-        soft: l.moved ? others : [],
+        // A label moved by hand shows where it was put, as on paper, also over a wall (checker
+        // 2026-10-24: one dragged partly onto a wall vanished from the screen but still printed).
+        hard: (opening && !l.moved ? columns.concat(wallBoxes, extra) : columns.concat(extra)).concat(l.moved ? [] : others),
+        soft: (l.moved ? others.concat(opening ? wallBoxes : []) : []).concat(swings),
+        fallback: clean && clean.length ? clean : attached && attached.length ? attached : null,
+        // Tried in this order in each pass: the attached spots; the stacked spots (only beyond a
+        // value, see pick); the spots that read as another opening's label. When no attached spot
+        // is free because ONE per-side value takes it, that value moves along its wall instead
+        // (resolveText displaceValue), before any stacked spot.
+        groupsOf: opening && !l.moved
+          ? (cs, chosen) => [
+            cs.filter((c) => c.attached !== false && !c.misleading),
+            () => cs.filter((c) => c.attached === false).filter(stackOk(chosen)),
+            () => cs.filter((c) => c.attached !== false && c.misleading),
+          ]
+          : null,
+        displace: opening && !l.moved,
+        stillValid: opening ? (c, chosen) => !c.stack || valueBehind(c, l, valueBoxes(chosen)) : null,
       });
     }
+  }
+
+  // The boxes of the per-side values placed so far (items 'v:…', and span totals 't:…').
+  function valueBoxes(chosen) {
+    const out = [];
+    for (const [id, v] of chosen) if (v && v.box && /^[vt]:/.test(id)) out.push(v.box);
+    return out;
+  }
+
+  // True when one of the value boxes `vals` lies between the wall and the stacked spot c of window /
+  // door label l (c.stack: its side n, the wall face and its near edge, mm from the wall's centre
+  // line), under c along the wall.
+  function valueBehind(c, l, vals) {
+    const P = l.base, d = l.dir, n = c.stack && c.stack.n;
+    if (!P || !d || !n || !c.box) return false;
+    const proj = (b) => {
+      let a0 = Infinity, a1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+      for (const [x, y] of [[b.minX, b.minY], [b.maxX, b.minY], [b.maxX, b.maxY], [b.minX, b.maxY]]) {
+        const a = (x - P.x) * d.x + (y - P.y) * d.y, q = (x - P.x) * n.x + (y - P.y) * n.y;
+        if (a < a0) a0 = a;
+        if (a > a1) a1 = a;
+        if (q < c0) c0 = q;
+        if (q > c1) c1 = q;
+      }
+      return { a0, a1, c0, c1 };
+    };
+    const L = proj(c.box), eps = W(2);
+    for (const vb of vals) {
+      const V = proj(vb);
+      if (V.c0 >= c.stack.face - eps && V.c1 <= L.c0 + eps && V.a0 < L.a1 && V.a1 > L.a0) return true;
+    }
+    return false;
   }
 }
 
@@ -1148,11 +1218,16 @@ function keepInside(poly, p, w, h, margin) {
 // A candidate may carry `shape` (a text turned along a diagonal side: its turned rectangles, with
 // `parts`, small boxes along them, for overlap areas) and an obstacle a `poly` (a diagonal wall's
 // outline): then those decide, after the bounding boxes.
+// it.groupsOf(cands, chosen) (window / door labels): the candidates in groups (arrays, or functions
+// giving one when first reached) tried in order within each pass (attached spots, stacked spots,
+// misleading spots). it.displace: after the first group of pass 0, a
+// per-side value that alone takes the label's spot may move to another of its own spots (displaceValue).
 function resolveText(items) {
   items.sort((a, b) => a.prio - b.prio || a.sub - b.sub || a.order - b.order);
   const placed = [];
   const shown = [];
   const chosen = new Map();
+  const itemOf = new Map();
   for (const it of items) {
     const cands = typeof it.cands === 'function' ? it.cands(chosen) : it.cands;
     if (!cands || !cands.length) continue;
@@ -1161,28 +1236,81 @@ function resolveText(items) {
     const partsOf = it.boxOf ? () => null : (c) => c.parts || null;
     let pick = null;
     const ignore = it.ignore || null;
-    for (const pass of [0, 1]) {
-      for (const c of cands) {
-        const b = boxOf(c);
-        if (!b) continue;
-        const sh = shapeOf(c);
-        if (placed.some((p) => p.id !== ignore && pairHit(b, sh, p.box, p.shape, it.gap))) continue;
-        if (it.hard.some((h) => obstacleHit(b, sh, h))) continue;
-        if (pass === 0 && it.soft.some((o) => obstacleHit(b, sh, o))) continue;
-        pick = c;
-        break;
+    // A group may be a function: its candidates are worked out when it is first reached.
+    const groups = typeof it.groupsOf === 'function' ? it.groupsOf(cands, chosen) : [cands];
+    const groupAt = (g) => (typeof groups[g] === 'function' ? (groups[g] = groups[g]()) : groups[g]);
+    search: for (const pass of [0, 1]) {
+      for (let g = 0; g < groups.length; g++) {
+        for (const c of groupAt(g)) {
+          const b = boxOf(c);
+          if (!b) continue;
+          const sh = shapeOf(c);
+          if (placed.some((p) => p.id !== ignore && pairHit(b, sh, p.box, p.shape, it.gap))) continue;
+          if (it.hard.some((h) => obstacleHit(b, sh, h))) continue;
+          if (pass === 0 && it.soft.some((o) => obstacleHit(b, sh, o))) continue;
+          pick = c;
+          break search;
+        }
+        if (pass === 0 && g === 0 && it.displace) {
+          pick = displaceValue(it, groupAt(0), placed, chosen, shown, itemOf);
+          if (pick) break search;
+        }
       }
-      if (pick) break;
     }
     // Nothing free: the spot that overlaps least (columns count four times), not simply the first
     // (review 0.5.0: on paper, where everything is shown, crowded rooms piled texts on one spot).
-    if (!pick && it.mustShow) pick = leastOverlap(cands, boxOf, placed, it, partsOf);
+    // it.fallback: the candidates this choice may take (window / door labels: the attached ones).
+    if (!pick && it.mustShow) pick = leastOverlap(it.fallback || cands, boxOf, placed, it, partsOf);
     if (!pick) continue;
     chosen.set(it.id, pick);
+    itemOf.set(it.id, it);
     placed.push({ id: it.id, box: boxOf(pick), shape: shapeOf(pick), parts: partsOf(pick) });
     shown.push({ it, c: pick });
   }
   return shown;
+}
+
+// A window / door label (it) none of whose own spots (cands, in order) is free: the first spot that is
+// clear of everything but ONE per-side value already placed, when that value has another spot of its
+// own (at least 85 % of its size, along its wall) clear of everything, the label's box included, and
+// moving it leaves every stacked label placed before with a value between it and its wall
+// (it.stillValid). The value is moved (placed / chosen / shown updated) and that label spot returned.
+// (Checker 2026-10-24: in 치수선 없이 a wall's value sat at its middle, exactly where the label of a
+// window in the middle of that wall belongs; the label then went beyond the value or onto it.)
+function displaceValue(it, cands, placed, chosen, shown, itemOf) {
+  for (const c of cands) {
+    const b = c.box;
+    if (!b || c.shape) continue;
+    if (it.hard.some((h) => obstacleHit(b, null, h)) || it.soft.some((o) => obstacleHit(b, null, o))) continue;
+    const blockers = placed.filter((p) => p.id !== it.ignore && pairHit(b, null, p.box, p.shape, it.gap));
+    if (blockers.length !== 1) continue;
+    const p = blockers[0];
+    const vi = itemOf.get(p.id);
+    if (!vi || vi.kind !== 'value' || !Array.isArray(vi.cands) || (vi.v && vi.v.active)) continue;
+    const cur = chosen.get(p.id);
+    const maxPx = vi.cands[0] && vi.cands[0].px;
+    const gap = Math.max(vi.gap || 0, it.gap || 0);
+    for (const vc of vi.cands) {
+      if (vc === cur || !vc.box) continue;
+      if (maxPx && vc.px < 0.84 * maxPx) continue;
+      const vs = vc.shape || null;
+      if (pairHit(vc.box, vs, b, null, gap)) continue;
+      if (placed.some((q) => q.id !== p.id && pairHit(vc.box, vs, q.box, q.shape, vi.gap))) continue;
+      if (vi.hard.some((h) => obstacleHit(vc.box, vs, h)) || vi.soft.some((o) => obstacleHit(vc.box, vs, o))) continue;
+      chosen.set(p.id, vc);
+      if (!shown.every((s) => typeof s.it.stillValid !== 'function' || s.it.stillValid(s.c, chosen))) {
+        chosen.set(p.id, cur);
+        continue;
+      }
+      p.box = vc.box;
+      p.shape = vs;
+      p.parts = vc.parts || null;
+      const sv = shown.find((s) => s.it.id === p.id);
+      if (sv) sv.c = vc;
+      return c;
+    }
+  }
+  return null;
 }
 
 // Two placed texts: their boxes, then (a turned text) their turned rectangles.
