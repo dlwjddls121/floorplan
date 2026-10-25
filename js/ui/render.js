@@ -22,8 +22,9 @@ import {
   convexOverlap, polygonBoxArea, exteriorJointOutlines, runInsideFrom,
 } from '../core/dims.js';
 import {
-  placeLabels, fixtureObstacles, findFreeSpot, roomBasePoint, scanExtent, wrapName, boxesHit, boxInPolygon,
-  roomInnerPolygon,
+  placeLabels, fixtureObstacles, findFreeSpot, roomBasePoint, roomNamePoint, roomOpenPart, nameSpotClear, openingLabelSpots,
+  labelSpotGroups, nameTakesLabelSpots, doorSwingShapes, scanExtent, wrapName, boxesHit, boxInPolygon, roomInnerPolygon,
+  LABEL_GAP_MM, NAME_SPOT_TIE_PAPER_MM, NAME_SWING_MIN_PAPER_MM2,
 } from '../core/labels.js';
 import { PAPER_STYLE, PT_MM } from '../core/printlayout.js';
 import { pointInPolygon } from '../core/geom.js';
@@ -467,7 +468,8 @@ function drawRoomLabels(ctx, view, derived, font, screen, roomLabel, notRoomLabe
     if (!r.labelPoint || !r.room) continue;
     // A named 실 아님 space (예시 세대 A 옷장) is labelled like a fixture by drawNotRoomSpaces.
     if (r.room.notRoom && r.room.name && !notRoomLabels) continue;
-    const p = view.toScreen(r.labelPoint);
+    // The middle of the room's largest open part (core/labels.js roomNamePoint), as on the screen.
+    const p = view.toScreen(roomNamePoint(r, derived) || r.labelPoint);
     const name = r.room.name || '';
     const hasHeight = r.room.height != null && r.room.height !== '';
     const nameY = hasHeight ? p.y - font.height * 0.6 : p.y;
@@ -799,6 +801,8 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
     } catch (_) { nameWalls = wallBoxes; }
   }
   const extra = Array.isArray(o.textObstacles) ? o.textObstacles.filter(Boolean) : [];
+  let nameZones = null;   // nameAvoidOf: the window / door labels' first spots and the door swings
+  let swingObs = null;    // swingObstacles
   const items = [];
   let order = 0;
   const add = (it) => { it.order = order++; it.gap = W(TEXT_GAP_PX); items.push(it); };
@@ -828,7 +832,13 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
       if (notRoom && named && !o.notRoomLabels) continue;
       // Paper: no gray '이름 없음' placeholders.
       if (paper && !named) continue;
+      // base: the point a name moved by hand is measured from (the label point); start: where the name
+      // starts out, the middle of the room's largest open part (core/labels.js roomNamePoint; user
+      // 2026-10-25: '베란다1' sat against the end wall of its long strip, on paper and here).
       const base = roomBasePoint(r) || r.labelPoint;
+      const key = `room:${r.roomId}`;
+      const off = offsets[key];
+      const start = off && named ? base : (roomNamePoint(r, derived) || base);
       let text = room.name;
       if (!named) text = notRoom ? '실 아님' : ((typeof o.roomLabel === 'function' && o.roomLabel(r.roomId)) || '이름 없음');
       // Paper: room names in the print's normal weight (draw-labels.js).
@@ -837,7 +847,7 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         : { px: Math.round(font.name * 0.8), weight: 'normal', color: COLORS.roomNameEmpty };
       const hasH = !notRoom && room.height != null && room.height !== '' && isFinite(Number(room.height));
       const hText = hasH ? `H: ${formatPlain(Number(room.height))}` : '';
-      const scan = (axis) => scanExtent(r.face.points, base, axis) || scanExtent(r.face.points, { x: base.x + 0.37, y: base.y + 0.37 }, axis);
+      const scan = (axis) => scanExtent(r.face.points, start, axis) || scanExtent(r.face.points, { x: start.x + 0.37, y: start.y + 0.37 }, axis);
       const ex = scan('x'), ey = scan('y');
       const freeW = ex ? (ex[1] - ex[0]) * k - 10 : Infinity;
       const freeH = ey ? (ey[1] - ey[0]) * k - 10 : Infinity;
@@ -854,28 +864,75 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
           scale = Math.max(0.7, Math.min(1, avail / wMax));
         }
       }
-      const key = `room:${r.roomId}`;
       const mk = (s, at) => roomCand(at, texts, style, s, rot, hText);
       let cands;
-      const off = offsets[key];
       if (off && named) {
         cands = [mk(scale, { x: base.x + (Number(off.dx) || 0) * wppm, y: base.y + (Number(off.dy) || 0) * wppm })];
       } else {
-        const c0 = mk(scale, base);
+        const c0 = mk(scale, start);
         const bw = c0.box.maxX - c0.box.minX, bh = c0.box.maxY - c0.box.minY;
-        // Keep the whole name inside the room (the label point of a long narrow room can lie near
-        // one end, and the screen text is large next to a small room).
-        let spot = keepInside(r.face.points, base, bw, bh, W(4) + 80);
+        // Keep the whole name inside the room (the screen text is large next to a small room).
+        let spot = keepInside(r.face.points, start, bw, bh, W(4) + 80);
         if (fixtures.some((f) => boxesHit(boxAt(spot.x, spot.y, bw, bh), f))) {
           spot = findFreeSpot(r.face.points, bw, bh, spot, fixtures, { margin: W(4), step: Math.max(bh / 3, W(4)) });
         }
-        cands = [mk(scale, spot)];
+        // On every spot of one of this room's window / door labels over its opening, or on a door's swing:
+        // the nearest spot of the same size that leaves one of them free, moved across the room's largest
+        // open part first (a strip's name keeps the middle of its length; core/labels.js nameSpotClear, as
+        // on paper). None: it stays (paper: the smaller sizes below). A wider gap from the label spots
+        // first (a name right above a window label reads as one block with it). Inside the room's inner
+        // faces: 4 px from them (paper: 0.8 mm, then 0.2 mm, as the print's names).
+        const avoid = nameAvoidOf(r, W(TEXT_GAP_PX));
+        const smaller = [];
+        if (nameTakesLabelSpots(boxAt(spot.x, spot.y, bw, bh), avoid)) {
+          let poly = null;
+          try { poly = roomInnerPolygon(r, project, derived); } catch (_) { poly = null; }
+          const keep = fixtures.concat(extra, avoid.obstacles);
+          const gw = paper ? o.paperText.gapWorldPerPaperMM : 0;
+          const wide = nameAvoidOf(r, paper ? LABEL_GAP_MM * gw : W(3 * TEXT_GAP_PX)).groups, near = avoid.groups;
+          const ms = poly ? (paper ? [0.8 * gw, 0.2 * gw] : [W(4)]) : [W(4) + 80];
+          // Then along, no further than a quarter of the open part from its middle and not closer to a
+          // wall than the first margin (the name is not squeezed against an end wall again).
+          const at = (moves, margins, w = bw, h = bh, sets = [wide, near], reach = 0.25) => nameSpotClear(poly || r.face.points, spot, w, h, keep, {
+            part: roomOpenPart(r, derived), moves, alongReach: reach, tie: paper ? NAME_SPOT_TIE_PAPER_MM * gw : W(2),
+            tries: sets.flatMap((groups) => margins.map((margin) => ({ groups, margin }))),
+          });
+          let clear = at(['across'], ms) || at(['along'], ms.slice(0, 1));
+          // Paper (nothing is left out): smaller (85 %, 70 %) across, before the full size on the label's
+          // spots (as the print's names, core/labels.js placeRoom).
+          if (!clear && paper) {
+            for (const s of [scale * 0.85, scale * 0.7]) {
+              const cs = mk(s, spot);
+              const c = at(['across'], ms, cs.box.maxX - cs.box.minX, cs.box.maxY - cs.box.minY, [near]);
+              if (c) { smaller.push(mk(s, c)); break; }
+            }
+          }
+          // Still on a door's swing: off it first, along the room as far as it takes and then anywhere in
+          // it, leaving a label spot free where it can, else not (as core/labels.js placeRoom; checker
+          // 2026-10-25: a narrow 다용도실's name on the swing of its door).
+          const sb = boxAt(spot.x, spot.y, bw, bh);
+          const wp = paper ? gw : wppm;
+          if (!clear && !smaller.length && avoid.obstacles.reduce((s, sw) => s + polygonBoxArea(sw.points, sb), 0) > NAME_SWING_MIN_PAPER_MM2 * wp * wp) {
+            clear = at(['along', 'grid'], ms, bw, bh, [near], Infinity) || at(['along', 'grid'], ms, bw, bh, [[]], Infinity);
+          }
+          if (clear) spot = clear;
+        }
+        cands = smaller.concat(mk(scale, spot));
+        // Paper (values first): a spot of the same size a little off the middle (within 15 % of the open
+        // part's width / height, leaving the label spots free) before a smaller name in the middle
+        // (centred, '화장실1' touched the '1470' at the wall beside it and was written at 85 %).
+        const part = paper ? roomOpenPart(r, derived) : null;
+        if (part) {
+          const dx = 0.15 * (part.x1 - part.x0), dy = 0.15 * (part.y1 - part.y0);
+          cands.push(...paperNameSpots(r.face.points, spot, scale, mk, null, [scale])
+            .filter((c) => Math.abs(c.x - spot.x) <= dx && Math.abs(c.y - spot.y) <= dy && !nameTakesLabelSpots(c.box, avoid)));
+        }
         if (scale * 0.85 >= 0.6) cands.push(mk(scale * 0.85, spot));
         // A room with a diagonal side (a triangle, a cut corner): spots where the whole block lies
         // inside the room, off the slanted walls, at this size and smaller (request 2026-10-19).
         const slanted = (r.sides || []).some((sd) => sd.orient === 'd');
         if (slanted) {
-          const inner = slantedNameCands(r, base, scale, mk);
+          const inner = slantedNameCands(r, start, scale, mk);
           if (inner.length) cands = inner;
         }
         // Paper: nothing may be left out, so a crowded room tries other spots and smaller sizes
@@ -902,8 +959,12 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         // Paper: a name placed by hand goes with the other texts placed by hand, before the values,
         // and its H right after it (review 0.5.0: the H came first, found no name and was lost).
         prio: named ? (paper && moved ? P.moved : P.name) : P.placeholder, sub: -(r.area || 0),
-        // Paper: a name is never written onto a wall (the walls are hard; a name moved by hand stays put).
+        // Paper: a name is never written onto a wall (the walls are hard; a name moved by hand stays put),
+        // and keeps off the doors' swings where it can, before the fixtures' rule gives way (softer;
+        // checker 2026-10-25: two places as near, above and below the middle of a 다용도실, and the one on
+        // its door's swing taken).
         mustShow: paper || o.forceShow === key, hard: paper && !moved ? columns.concat(extra, nameWalls) : columns.concat(extra), soft,
+        softer: paper && !moved ? swingObstacles() : null,
         // Paper, no free spot: the least overlap among the spots off the walls (a name over a number
         // still reads; half of it in the black wall does not), and only when there is none, anywhere.
         fallback: paper && !moved ? (all) => all.filter((c) => c.box && !nameWalls.some((h) => obstacleHit(c.box, null, h))) : null,
@@ -918,6 +979,43 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         });
       }
     }
+  }
+
+  // What a room's name leaves free where it can, when the window / door labels are written: one spot at
+  // least of each label written inside this room (core/labels.js openingLabelSpots, at this layout's
+  // sizes, grown by `pad`), and the doors' swings (by their outline). → { obstacles, groups }
+  function nameAvoidOf(r, pad) {
+    if (!o.openingLabels || tiny) return { obstacles: [], groups: [] };
+    if (!nameZones) {
+      try {
+        const spots = openingLabelSpots(project, derived, {
+          fonts: { opening: LP.opening }, worldPerUnit: 1 / k, worldPerPaperMM: paper ? o.paperText.gapWorldPerPaperMM : 60,
+          measure: (text, size, weight) => measure(text, size, weight),
+        });
+        nameZones = { spots, swings: doorSwingShapes(project, derived) };
+      } catch (err) {
+        console.error('[render] label spots', err);
+        nameZones = { spots: [], swings: [] };
+      }
+    }
+    return { obstacles: nameZones.swings, groups: labelSpotGroups(nameZones.spots, r.roomId, pad) };
+  }
+
+  // The doors' swings by their outline (a quarter disc), for the paper names to keep off (softer: more
+  // than NAME_SWING_MIN_PAPER_MM2 of one, minArea).
+  function swingObstacles() {
+    if (!swingObs) {
+      try {
+        const g = paper ? o.paperText.gapWorldPerPaperMM : wppm;
+        swingObs = doorSwingShapes(project, derived).map((s) => ({
+          minX: s.minX, minY: s.minY, maxX: s.maxX, maxY: s.maxY, poly: s.points, minArea: NAME_SWING_MIN_PAPER_MM2 * g * g,
+        }));
+      } catch (err) {
+        console.error('[render] door swings', err);
+        swingObs = [];
+      }
+    }
+    return swingObs;
   }
 
   // The name block of a room centred at `at`: name line(s), then H (world mm).
@@ -942,8 +1040,9 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
     };
   }
 
-  // A room with a diagonal side: for each size (this, 0.85, 0.7 of it) the spot nearest the label
-  // point where the name block lies inside the room, clear of its walls and the fixtures. → [cand]
+  // A room with a diagonal side: for each size (this, 0.85, 0.7 of it) the spot nearest `base` (where
+  // the name starts out) where the name block lies inside the room, clear of its walls and the fixtures.
+  // → [cand]
   function slantedNameCands(r, base, scale, mk) {
     // The room inside its walls (each side's own wall and finish), 4 px in from them.
     let poly = null;
@@ -964,11 +1063,11 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
   // Paper: more candidate spots for a room's name block — a grid over the room at the given scale,
   // then smaller (0.85, 0.7, 0.55), nearest to `spot` first; each kept inside the room (a room with a
   // diagonal side: only spots whose whole block lies inside its inner faces, inner, when there are such).
-  function paperNameSpots(poly, spot, scale, mk, inner = null) {
+  function paperNameSpots(poly, spot, scale, mk, inner = null, sizes = null) {
     const xs = poly.map((q) => q.x), ys = poly.map((q) => q.y);
     const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
     const out = [];
-    for (const s of [scale, scale * 0.85, scale * 0.7, Math.min(scale * 0.7, 0.55)]) {
+    for (const s of sizes || [scale, scale * 0.85, scale * 0.7, Math.min(scale * 0.7, 0.55)]) {
       const c0 = mk(s, spot);
       const bw = c0.box.maxX - c0.box.minX, bh = c0.box.maxY - c0.box.minY;
       let spots = [];
@@ -983,7 +1082,15 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         const inside = spots.filter((at) => boxInPolygon(inner, at, bw, bh, W(1)));
         if (inside.length) spots = inside;
       }
-      spots.sort((a, b) => Math.hypot(a.x - spot.x, a.y - spot.y) - Math.hypot(b.x - spot.x, b.y - spot.y));
+      // Nearest first; spots within NAME_SPOT_TIE_PAPER_MM of each other in distance are as near and keep
+      // the grid's order (two spots mirrored about the middle: the solve's rounding chose between them,
+      // and a value typed in another room moved the name from one to the other, checker 2026-10-25).
+      const tie = NAME_SPOT_TIE_PAPER_MM * (paper ? o.paperText.gapWorldPerPaperMM : 60);
+      const dist = new Map(spots.map((at, i) => [at, { d: Math.hypot(at.x - spot.x, at.y - spot.y), i }]));
+      spots.sort((a, b) => {
+        const p = dist.get(a), q = dist.get(b);
+        return Math.abs(p.d - q.d) <= tie ? p.i - q.i : p.d - q.d;
+      });
       if (s !== scale) out.push(mk(s, spot));
       for (const at of spots) out.push(mk(s, at));
     }
@@ -1370,7 +1477,11 @@ function resolveText(items) {
     // A group may be a function: its candidates are worked out when it is first reached.
     const groups = typeof it.groupsOf === 'function' ? it.groupsOf(cands, chosen) : [cands];
     const groupAt = (g) => (typeof groups[g] === 'function' ? (groups[g] = groups[g]()) : groups[g]);
-    search: for (const pass of [0, 1]) {
+    // Pass 0 keeps off the soft obstacles (fixtures) and the softer ones (it.softer: the doors' swings for
+    // a paper name), pass 1 (only with softer ones) off the soft ones alone, the last pass off neither:
+    // a name moved off a swing onto a fixture is no better (checker 2026-10-25).
+    const softer = Array.isArray(it.softer) && it.softer.length ? it.softer : null;
+    search: for (const pass of softer ? [0, 1, 2] : [0, 2]) {
       for (let g = 0; g < groups.length; g++) {
         for (const c of groupAt(g)) {
           const b = boxOf(c);
@@ -1378,7 +1489,8 @@ function resolveText(items) {
           const sh = shapeOf(c);
           if (placed.some((p) => p.id !== ignore && pairHit(b, sh, p.box, p.shape, it.gap))) continue;
           if (it.hard.some((h) => obstacleHit(b, sh, h))) continue;
-          if (pass === 0 && it.soft.some((o) => obstacleHit(b, sh, o))) continue;
+          if (pass < 2 && it.soft.some((o) => obstacleHit(b, sh, o))) continue;
+          if (pass === 0 && softer && softer.some((o) => obstacleHit(b, sh, o) && !(shapeOverlap(b, partsOf(c), o) <= (o.minArea || 0)))) continue;
           pick = c;
           break search;
         }
@@ -1490,6 +1602,7 @@ function leastOverlap(cands, boxOf, placed, it, partsOf = () => null) {
     for (const p of placed) if (p.id !== it.ignore) cost += shapeOverlap(b, parts, p.box, p.parts);
     for (const h of it.hard) cost += 4 * shapeOverlap(b, parts, h);
     for (const s of it.soft) cost += 0.25 * shapeOverlap(b, parts, s);
+    for (const s of it.softer || []) cost += 0.25 * shapeOverlap(b, parts, s);
     if (cost < bestCost - 1e-9) { bestCost = cost; best = c; }
   }
   return best;

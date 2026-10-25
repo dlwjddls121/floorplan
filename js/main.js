@@ -3,7 +3,7 @@
 // - opens IndexedDB storage, shows the household list
 // - runs the editor: canvas (high-DPI), toolbar, top bar, bottom panel, keyboard shortcuts, autosave
 // - [↻ 회전]: the plan turned a quarter turn (core/rotate.js; not an undo step), also from the [출력] dialog
-// - [외벽 보기]: the exterior walls in red (core/exterior.js; remembered on this device like 치수선 보기)
+// - [외벽 보기]: the walls marked 외벽 by hand in red (core/exterior.js; remembered on this device like 치수선 보기)
 import { APP_VERSION } from './version.js';
 import { DocStore, createProject } from './core/model.js';
 import { drawCheckMarkers, notesForPrint } from './core/checks.js';
@@ -875,8 +875,8 @@ class Editor {
   }
 
   // ---- 외벽 보기 ---------------------------------------------------------------------------------
-  // The exterior walls (core/exterior.js: the house's outline by itself, each wall as set with the length
-  // panel's [외벽]) in red, as [출력] 종류 '외벽 표시' prints them. opts.quiet: no toast (the panel says it).
+  // The walls marked 외벽 by hand with the length panel's [외벽] (core/exterior.js; nothing is 외벽 by
+  // itself) in red, as [출력] 종류 '외벽 표시' prints them. opts.quiet: no toast (the panel says it).
 
   setExteriorView(on, { quiet = false } = {}) {
     this.exteriorView = !!on;
@@ -888,8 +888,8 @@ class Editor {
     let n = 0;
     try { n = this.store ? exteriorIds(this.store.project, this.store.derived).size : 0; } catch (_) { n = 0; }
     toast(n
-      ? '외벽 보기: 외벽을 빨간색으로 보여 줍니다. 잘못 칠해진 벽이나 빠진 벽은 눌러서 [외벽]으로 고치세요.'
-      : '외벽 보기: 아직 외벽이 없습니다. 벽으로 둘러싸인 실이 생기면 바깥쪽 벽이 빨간색으로 보입니다.', { ms: 4000 });
+      ? '외벽 보기: [외벽]으로 표시한 벽을 빨간색으로 보여 줍니다. 벽을 누르고 아래 창의 [외벽]을 누르면 표시를 넣거나 뺄 수 있습니다.'
+      : '외벽 보기: 아직 외벽으로 표시한 벽이 없습니다. 벽을 누르고 아래 창의 [외벽]을 누르면 외벽으로 표시됩니다.', { ms: 4000 });
   }
 
   _updateExteriorButton() {

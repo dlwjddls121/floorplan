@@ -22,8 +22,8 @@
 // into a wall (벽 속에 넣기), cleared white in every kind of output (also 그림만).
 //
 // 종류 (choices): 전체 도면 (dimension chains + labels), 외벽 표시 (choices.exterior, user 2026-10-25: "치수선
-// 표시 되면서 외벽 표시 된거랑. 치수선 표시되고 외벽 표시 안된거": 전체 도면 with the exterior walls in
-// COLORS.exterior and a small legend, core/exterior.js), 치수선 없이 (choices.noDims, user 2026-10-18:
+// 표시 되면서 외벽 표시 된거랑. 치수선 표시되고 외벽 표시 안된거": 전체 도면 with the walls marked 외벽 by
+// hand in COLORS.exterior and a small legend, core/exterior.js; none marked: 전체 도면 exactly), 치수선 없이 (choices.noDims, user 2026-10-18:
 // the plan as the editor shows it without 치수선 보기 — each side's measured value written inside the
 // room, ui/render.js drawPaperPlanText), 그림만 (choices.drawingOnly: no text at all). All four use the
 // same layout (scale and position), so they overlay exactly; 전체 도면 is 외벽 표시 without the red and the
@@ -78,8 +78,9 @@ export const BOTH_VALUES_NOTE = '괄호 안은 반대쪽 실에서 잰 값입니
 export const PDF_NOTE = '인쇄할 때 "실제 크기(100%)"로 인쇄해야 축척이 맞습니다.';
 
 export const NO_DIMS_NOTE = '치수선 대신, 실마다 잰 안쪽 길이를 실 안의 벽 옆에 적습니다 (치수선 보기를 끈 화면과 같습니다).';
-export const EXTERIOR_NOTE = '전체 도면에 외벽을 빨간색으로 표시합니다 (흑백으로 인쇄하면 진한 회색). 외벽이 아닌 벽이 칠해졌거나 외벽이 빠졌으면, 도면에서 그 벽을 눌러 [외벽]으로 고칠 수 있습니다.';
-export const EXTERIOR_NONE_NOTE = '외벽으로 표시할 벽이 아직 없습니다. 벽으로 둘러싸인 실이 생기면 바깥쪽 벽이 외벽이 됩니다.';
+// 외벽 is marked by hand only (core/exterior.js, user 2026-10-25): the notes say how to mark it.
+export const EXTERIOR_NOTE = '[외벽]으로 표시한 벽을 전체 도면에 빨간색으로 그립니다 (흑백으로 인쇄하면 진한 회색). 표시를 넣거나 빼려면 도면에서 벽을 누르고 아래 창의 [외벽]을 누르세요.';
+export const EXTERIOR_NONE_NOTE = '아직 외벽으로 표시한 벽이 없어 전체 도면과 같게 나옵니다. 도면에서 벽을 누르고 아래 창의 [외벽]을 누르면 외벽으로 표시됩니다.';
 
 export const DEFAULT_CHOICES = Object.freeze({
   drawingOnly: false,      // 종류: false = 전체 도면, true = 그림만

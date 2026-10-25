@@ -1,7 +1,7 @@
 // Bottom panels of the editor (dev/DESIGN.md §5, plan §2-4, §4):
 //   - length panel + numpad for a tapped wall ("방1 쪽 [ 2,900 ] / 거실 쪽 [      ]")
 //   - wall-thickness entry (the [두께] button)
-//   - the [외벽] switch of a wall (core/exterior.js: automatic, or set by hand for this wall)
+//   - the [외벽] switch of a wall (core/exterior.js: on / off for this wall piece, marked by hand only)
 //   - room panel (the current name with [이름 바꾸기] (on-screen keyboard), name presets with
 //     auto-numbering, H with the numpad, [실 아님(설비)]); a tap on a room's name on the plan opens it
 //     with the name field already open
@@ -678,9 +678,8 @@ export class PanelController {
     }
   }
 
-  // [외벽]: this wall shown the other way (one undo step). A choice equal to what the app decides by itself
-  // is not kept, so a second tap gives the automatic state back. 외벽 보기 is turned on (with the toast), so
-  // the result shows on the plan.
+  // [외벽]: this wall piece marked 외벽 or not (one undo step each). 외벽 보기 is turned on (with the toast),
+  // so the result shows on the plan.
   _toggleExterior() {
     const s = this.state;
     const store = this.ctx.store();
@@ -692,13 +691,7 @@ export class PanelController {
     if (!after || after.on === before.on) { this.refresh(); return; }
     const wasOff = typeof this.ctx.exteriorView === 'function' && !this.ctx.exteriorView();
     if (wasOff && typeof this.ctx.showExterior === 'function') this.ctx.showExterior();
-    let msg;
-    if (after.override == null) {
-      msg = after.on ? '이 벽을 다시 외벽으로 표시했습니다 (자동).' : '이 벽을 외벽에서 뺐습니다 (자동).';
-    } else {
-      msg = after.on ? '이 벽을 외벽으로 표시했습니다.' : '이 벽을 외벽에서 뺐습니다.';
-      msg += ` 한 번 더 누르면 자동(${after.auto ? '외벽' : '외벽 아님'})으로 돌아갑니다.`;
-    }
+    let msg = after.on ? '이 벽을 외벽으로 표시했습니다.' : '이 벽을 외벽에서 뺐습니다.';
     if (wasOff) msg += ' [외벽 보기]를 켰습니다.';
     this.ctx.toast(msg, { type: 'ok', ms: 4000 });
     this.refresh();
@@ -1133,17 +1126,16 @@ export class PanelController {
     const f = s.fields[s.active];
     const m = f && this._measure(store, f.roomId, f.sideKey);
     const checkOn = f ? !!(m && m.check) : (store.project.wallChecks || []).some((w) => w.edge === s.edgeId);
-    // [외벽 ✓ · 자동] / [외벽 · 직접]: what is shown and printed for this wall, and whether the app decided it.
+    // [외벽] / [외벽 ✓] (red-tinted when on): this wall piece marked 외벽 or not (walls only).
     let ext = null;
     try { ext = isDivider || typeof store.toggleWallExterior !== 'function' ? null : exteriorInfo(store.project, store.derived, s.edgeId); } catch (_) { ext = null; }
     const actions = el('div', { class: 'panel-actions' },
       el('button', { type: 'button', class: `btn ${checkOn ? 'btn-on' : ''}`, 'aria-pressed': checkOn ? 'true' : 'false', onclick: () => this._toggleCheck() }, '확인필요'),
       ext ? el('button', {
         type: 'button', class: `btn btn-ext ${ext.on ? 'btn-ext-on' : ''}`, 'aria-pressed': ext.on ? 'true' : 'false',
-        'data-auto': ext.override == null ? '1' : '0',
-        title: '누르면 이 벽을 외벽으로 표시하거나 뺍니다. 자동: 앱이 바깥쪽 벽으로 판단한 것',
+        title: ext.on ? '누르면 이 벽을 외벽에서 뺍니다' : '누르면 이 벽을 외벽으로 표시합니다',
         onclick: () => this._toggleExterior(),
-      }, ext.on ? '외벽 ✓' : '외벽', el('span', { class: 'btn-note' }, ext.override == null ? '자동' : '직접')) : null,
+      }, ext.on ? '외벽 ✓' : '외벽') : null,
       isDivider ? null : el('button', { type: 'button', class: 'btn', onclick: () => this._openThickness() }, '두께'),
       el('button', { type: 'button', class: 'btn btn-danger', onclick: () => this.deleteWall() }, isDivider ? '선 지우기' : '벽 지우기'),
       this._closeButton());
@@ -1181,7 +1173,7 @@ export class PanelController {
           el('button', { type: 'button', class: 'btn', onclick: () => this._resetThickness() }, '자동으로 되돌리기'),
           el('button', { type: 'button', class: 'btn', onclick: () => this._backToLength() }, '◀ 길이 입력으로'),
           this._closeButton()),
-        el('p', { class: 'panel-hint' }, '두께를 잰 벽만 넣으세요. 넣지 않으면 바깥벽(한쪽에만 실이 있는 벽) 150, 안쪽 벽 100으로 가정하고, 잰 길이에 맞게 자동으로 조정됩니다. [외벽] 표시는 두께를 바꾸지 않습니다.')),
+        el('p', { class: 'panel-hint' }, '두께를 잰 벽만 넣으세요. 넣지 않으면 바깥벽(한쪽에만 실이 있는 벽) 150, 안쪽 벽 100으로 가정하고, 잰 길이에 맞게 자동으로 조정됩니다. 길이 창의 [외벽]으로 표시해도 두께는 바뀌지 않습니다.')),
       this.numpad.element);
   }
 

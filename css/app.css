@@ -95,8 +95,6 @@ button, input { font: inherit; color: inherit; }
 .btn-on { background: #FFF1E0; border-color: var(--warn); color: #9A4A00; }
 /* The length panel's [외벽] switch (core/exterior.js): on = the wall is drawn and printed red as 외벽. */
 .btn-ext-on { background: #FDECEA; border-color: #D32F2F; color: #B71C1C; }
-.btn-note { font-size: 12px; font-weight: 500; color: var(--muted); }
-.btn-ext-on .btn-note { color: #B71C1C; }
 .btn-big { min-height: 64px; font-size: 20px; padding: 0 28px; }
 .btn-small { min-height: var(--touch); padding: 0 12px; font-size: 15px; font-weight: 500; }
 .btn-soon, .btn-soon:active { color: var(--soon); border-style: dashed; background: transparent; cursor: default; }

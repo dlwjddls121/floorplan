@@ -19,7 +19,7 @@ import { installMemo, validMemo } from './memo.js';
 import { installDims } from './dims.js';
 import { installRotate } from './rotate.js';
 import { installErase, carryMerged } from './erase.js';
-import { installExterior } from './exterior.js';
+import { installExterior, withExteriorMarksOnly } from './exterior.js';
 
 export const DEFAULT_SETTINGS = Object.freeze({ extWall: 150, intWall: 100, twoSideTolerance: 300, closureTolerance: 300 });
 export const UNDO_LIMIT = 100;
@@ -187,8 +187,8 @@ export function validateProject(obj) {
       orient, sketch,
       thickness: isNum(e.thickness) && e.thickness >= 0 ? e.thickness : null,
     };
-    // 외벽 chosen by hand (core/exterior.js): walls only; absent = automatic.
-    if (edge.kind === 'wall' && typeof e.exterior === 'boolean') edge.exterior = e.exterior;
+    // 외벽 marked by hand (core/exterior.js): true on a wall, else absent (a 0.6.7 false means 'not').
+    if (edge.kind === 'wall' && e.exterior === true) edge.exterior = true;
     p.edges.push(edge);
   }
   if (badEdges) errors.push(`연결이 잘못된 벽 ${badEdges}개를 정리했습니다.`);
@@ -2146,7 +2146,7 @@ function runDeriveHooks(prevProject, nextProject, nextDerived, prevDerived = nul
 //   dims.js      setDimOverride, setLabelOffset, resetOutputLayout
 //   rotate.js    rotatePlan (도면 돌리기; NOT an undo step: it turns the history with the plan)
 //   erase.js     eraseItems (지우개: walls, windows / doors, fixtures, memo in one undo step), lastErased
-//   exterior.js  setWallExterior, toggleWallExterior (외벽 chosen by hand for one wall)
+//   exterior.js  setWallExterior, toggleWallExterior (외벽 marked by hand on one wall)
 // The 확인 완료 commands (checks-full.js installChecks) are installed by main.js, because
 // checks-full.js imports this module.
 installOpenings(DocStore);
@@ -2169,7 +2169,10 @@ function applyRoomPatch(room, patch) {
 
 // Recordings of the removed 현장 원본 feature (0.3.0–0.4.1; validateProject drops them from files):
 // a household opened from this device's storage leaves them behind too, and the next save drops them.
+// The same for a 외벽 mark that is not true (0.6.7 kept false for an automatic wall switched off; 외벽 is
+// marked by hand only since 2026-10-25, core/exterior.js).
 function withoutRemovedFields(p) {
+  p = withExteriorMarksOnly(p);
   if (!p || (!('fieldOriginal' in p) && !('fieldSketch' in p))) return p;
   const { fieldOriginal: _fo, fieldSketch: _fs, ...rest } = p;
   return rest;

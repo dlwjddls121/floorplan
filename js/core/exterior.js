@@ -1,116 +1,60 @@
 // 외벽 (exterior walls) — user 2026-10-25: "외벽을 따로 표시할 수 있으면 좋겠어. 어느 부분이 외벽인지. 그리고
-// 그렇게 외벽 표시한것만 따로 볼수 있으면 좋겠어 치수선 껏다키는것처럼."
+// 그렇게 외벽 표시한것만 따로 볼수 있으면 좋겠어 치수선 껏다키는것처럼." Then, the same day: "자동으로 외벽 되는
+// 기능은 없애줘. 우리가 원할때 원하는 벽만 외벽처리 할거야."
 //
-//   autoExteriorIds(project, derived)      → Set of wall ids the app takes for exterior walls by itself
-//   exteriorIds(project, derived)          → Set: the same with every wall's own choice (edge.exterior) applied
-//   exteriorInfo(project, derived, edgeId) → { auto, override: true | false | null, on } | null (no such wall,
-//                                            or a 구역 나누기 선)
-//   hasExteriorOverride(edge)              → bool: the wall carries its own choice
-//   installExterior(DocStore)              adds store.setWallExterior(edgeId, value) and
+//   exteriorIds(project, derived)          → Set of the wall ids marked 외벽 (derived is not needed; kept so
+//                                            the callers stay as they are)
+//   exteriorInfo(project, derived, edgeId) → { on } | null (no such wall, or a 구역 나누기 선)
+//   isExteriorWall(edge)                   → bool: a wall (never a 구역 나누기 선) marked 외벽
+//   withExteriorMarksOnly(project)         → the project with edge.exterior kept only where it is true on a
+//                                            wall (the same object when there is nothing to drop)
+//   installExterior(DocStore)              adds store.setWallExterior(edgeId, on) and
 //                                          store.toggleWallExterior(edgeId) (one undo step each)
 //
-// Automatic rule: a WALL (never a 구역 나누기 선) with a room on ONE side only, the other side lying outside
-// every room: the house's outline. 실 아님 spaces (옷장, 보일러실 …) are rooms here, so the wall between a room
-// and its 옷장 is not an exterior wall; a 베란다 is a room, so ITS outer walls are exterior and the wall between
-// 거실 and 베란다 is not (the team marks it by hand where they count it as one). A room standing inside another
-// room (an island 창고 in a 거실) has the outer room on the other side of its walls, so those are not exterior
-// either. A wall with no room at all (a loose wall, a plan not closed yet) is not exterior.
+// Marked by hand only: a wall is 외벽 only when the user set it with the length panel's [외벽]. Nothing is
+// 외벽 by itself (0.6.7 also took every wall with a room on one side only for 외벽; removed at the user's
+// request above). edge.exterior = true: 외벽; absent: not. A false (a 0.6.7 file or household where an
+// automatic wall was switched off) means 'not' and is dropped (validateProject for files, the store for a
+// household opened from this device), so a 0.6.7 household whose walls were only red by themselves opens
+// with no 외벽. The mark is an ordinary edge field: a split wall gives it to both halves (graph.js copies
+// the edge), a merge keeps it when either piece has it (graph.js mergeThrough / mergeNodeInto, as the
+// thickness), [↻ 회전], ↶ / ↷ and the project file keep it.
 //
-// Each wall may carry its own choice: edge.exterior = true (외벽), false (not), absent (automatic). The length
-// panel's [외벽] switch flips what is shown and keeps a choice only where it differs from the automatic one,
-// so a wall set back to what the app would say follows the app again. The choice is an ordinary edge field:
-// validateProject keeps it (walls only), a split wall gives it to both halves (graph.js copies the edge),
-// a merge keeps the first piece's choice or else the second's (graph.js mergeThrough, as the thickness),
-// [↻ 회전], ↶ / ↷ and the project file keep it.
-//
-// Display only (2026-10-25): the solver's assumed thicknesses (바깥벽 150 / 안쪽 벽 100), the sides of the
-// dimension chains and the checks keep their own one-side rule and never read edge.exterior, so marking a
-// wall changes no length, no chain and no 예시 세대 A result.
+// Display only: the solver's assumed thicknesses (바깥벽 150 / 안쪽 벽 100), the sides of the dimension
+// chains and the checks keep their own one-side rule (a wall with a room on one side only) and never read
+// edge.exterior, so marking a wall changes no length, no chain and no 예시 세대 A result.
 
-import { pointInPolygon } from './geom.js';
-
-// Distance (world mm) beside a wall's centre line at which the side without a room is probed.
-const PROBE_MM = 1;
-
-const autoCache = new WeakMap(); // derived → { nodes, edges, set }
-
-export function hasExteriorOverride(edge) {
-  return !!edge && edge.kind !== 'divider' && typeof edge.exterior === 'boolean';
+export function isExteriorWall(edge) {
+  return !!edge && edge.kind !== 'divider' && edge.exterior === true;
 }
 
-// The automatic rule (see the top). → Set of edge ids
-export function autoExteriorIds(project, derived) {
-  if (!project || !derived) return new Set();
-  const hit = autoCache.get(derived);
-  if (hit && hit.nodes === project.nodes && hit.kinds === kindKey(project)) return hit.set;
-  const set = computeAuto(project, derived);
-  autoCache.set(derived, { nodes: project.nodes, kinds: kindKey(project), set });
-  return set;
+// The walls shown and printed as 외벽. → Set of edge ids
+export function exteriorIds(project, _derived = null) {
+  const out = new Set();
+  for (const e of (project && project.edges) || []) if (isExteriorWall(e)) out.add(e.id);
+  return out;
 }
 
-// The walls as they are shown and printed as exterior walls: the automatic rule with each wall's own choice.
-export function exteriorIds(project, derived) {
-  const auto = autoExteriorIds(project, derived);
-  let out = null;
-  for (const e of (project && project.edges) || []) {
-    if (!hasExteriorOverride(e)) continue;
-    if (e.exterior === auto.has(e.id)) continue;
-    out = out || new Set(auto);
-    if (e.exterior) out.add(e.id); else out.delete(e.id);
-  }
-  return out || auto;
-}
-
-// → { auto, override, on } | null
-export function exteriorInfo(project, derived, edgeId) {
+// → { on } | null
+export function exteriorInfo(project, _derived, edgeId) {
   const e = ((project && project.edges) || []).find((x) => x.id === edgeId);
   if (!e || e.kind === 'divider') return null;
-  const auto = autoExteriorIds(project, derived).has(e.id);
-  const override = hasExteriorOverride(e) ? e.exterior : null;
-  return { auto, override, on: override == null ? auto : override };
+  return { on: isExteriorWall(e) };
 }
 
-// Which walls are walls (a 구역 나누기 선 is never exterior): part of the cache key.
-function kindKey(project) {
-  let s = '';
-  for (const e of project.edges || []) if (e.kind === 'divider') s += e.id + ',';
-  return s;
-}
-
-function computeAuto(project, derived) {
-  const nodes = new Map((project.nodes || []).map((n) => [n.id, n]));
-  const edges = new Map((project.edges || []).map((e) => [e.id, e]));
-  const faces = ((derived && derived.rooms) || []).map((dr) => dr && dr.face).filter((f) => f && Array.isArray(f.points) && f.points.length >= 3);
-  // Which sides of each edge a room face lies on (faces run clockwise: a face lies on the RIGHT of the
-  // edge when its walk goes a → b; graph.js edgeFaces).
-  const sides = new Map(); // edgeId → { left, right }
-  for (const f of faces) {
-    for (let k = 0; k < (f.edgeIds || []).length; k++) {
-      const e = edges.get(f.edgeIds[k]);
-      if (!e) continue;
-      const s = sides.get(e.id) || { left: false, right: false };
-      if (f.nodeIds[k] === e.a) s.right = true; else s.left = true;
-      sides.set(e.id, s);
-    }
-  }
-  const out = new Set();
-  for (const [id, s] of sides) {
-    if (s.left === s.right) continue; // rooms on both sides (or a loose wall inside one room)
-    const e = edges.get(id);
-    if (!e || e.kind === 'divider') continue;
-    const A = nodes.get(e.a), B = nodes.get(e.b);
-    if (!A || !B) continue;
-    const L = Math.hypot(B.x - A.x, B.y - A.y);
-    if (!(L > 1e-6)) continue;
-    // The side without a room: just beside the middle of the wall. Inside another room's face (the walls
-    // of a room standing inside a room), the wall is not part of the house's outline.
-    const left = { x: (B.y - A.y) / L, y: -(B.x - A.x) / L };
-    const k = s.left ? -1 : 1; // probe the empty side
-    const P = { x: (A.x + B.x) / 2 + left.x * PROBE_MM * k, y: (A.y + B.y) / 2 + left.y * PROBE_MM * k };
-    if (faces.some((f) => pointInPolygon(P, f.points))) continue;
-    out.add(id);
-  }
-  return out;
+// A mark that is not a plain true on a wall (false from 0.6.7, a divider, a value edited in by hand) is
+// dropped. → project (the same object when every mark is kept)
+export function withExteriorMarksOnly(project) {
+  const edges = project && Array.isArray(project.edges) ? project.edges : null;
+  if (!edges || !edges.some((e) => e && 'exterior' in e && !isExteriorWall(e))) return project;
+  return {
+    ...project,
+    edges: edges.map((e) => {
+      if (!e || !('exterior' in e) || isExteriorWall(e)) return e;
+      const { exterior: _drop, ...rest } = e;
+      return rest;
+    }),
+  };
 }
 
 // ---- store commands --------------------------------------------------------------------------------
@@ -118,28 +62,26 @@ function computeAuto(project, derived) {
 export function installExterior(DocStore) {
   const proto = DocStore.prototype;
 
-  // value: true (외벽), false (not an exterior wall) or null (automatic). One undo step; a 구역 나누기 선, an
+  // on: true marks the wall 외벽, anything else takes the mark away. One undo step; a 구역 나누기 선, an
   // unknown wall or no change → false. Nothing the geometry depends on changes, so nothing is re-derived.
-  proto.setWallExterior = function setWallExterior(edgeId, value) {
-    const v = value === true || value === false ? value : null;
+  proto.setWallExterior = function setWallExterior(edgeId, on) {
+    const want = on === true;
     return this._commit('setWallExterior', (p) => {
       const i = (p.edges || []).findIndex((e) => e.id === edgeId);
       if (i < 0 || p.edges[i].kind === 'divider') return null;
-      const cur = hasExteriorOverride(p.edges[i]) ? p.edges[i].exterior : null;
-      if (cur === v) return null;
-      const { exterior: _old, ...rest } = p.edges[i];
+      const cur = p.edges[i];
+      if (isExteriorWall(cur) === want) return null;
+      const { exterior: _old, ...rest } = cur;
       const edges = p.edges.slice();
-      edges[i] = v == null ? rest : { ...rest, exterior: v };
+      edges[i] = want ? { ...rest, exterior: true } : rest;
       return { ...p, edges };
     }, { rederive: false, detail: { edgeId } });
   };
 
-  // The length panel's [외벽] switch: the wall shown the other way. A choice that equals the automatic
-  // one is not kept (the wall is automatic again). → bool
+  // The length panel's [외벽] switch: on ↔ off for this wall piece. → bool
   proto.toggleWallExterior = function toggleWallExterior(edgeId) {
     const info = exteriorInfo(this.project, this.derived, edgeId);
     if (!info) return false;
-    const on = !info.on;
-    return this.setWallExterior(edgeId, on === info.auto ? null : on);
+    return this.setWallExterior(edgeId, !info.on);
   };
 }

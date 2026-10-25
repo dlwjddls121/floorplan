@@ -24,8 +24,16 @@
 //   labelHooks.fixtureBox     = (fixture, project, derived) → { center, w, h } (optional; default below)
 //
 // Placement rules:
-//  - Room name (black) at the room's label point, 'H: 2280' (blue) below it. A name that does not fit the
-//    room's width shrinks down to 70 %, then wraps onto two lines ('화장실' / '2', as in the 예시 세대 A drawing).
+//  - Room name (black) in the middle of the room's largest open part (roomNamePoint: the centre of the
+//    largest rectangle inside the room; a strip's middle along and across it, not the engine's label point,
+//    which in a strip lies at one end: user 2026-10-25, 예시 세대 A 베란다1), 'H: 2280' (blue) below it. A name
+//    that does not fit the room's width shrinks down to 70 %, then wraps onto two lines ('화장실' / '2', as
+//    in the 예시 세대 A drawing). A name that would cover every spot of one of its room's window / door labels
+//    over their openings (openingLabelSpots), or lie on a door's swing, moves off them where it can:
+//    across its room's largest open part, then a little along it, then smaller (nameSpotClear); still on
+//    more than NAME_SWING_MIN_PAPER_MM2 of a swing, along the room as far as it takes, then anywhere in it.
+//    Places as near as each other are taken in a fixed order, so a value typed in another room never
+//    moves a name to another place (checker 2026-10-25, NAME_SPOT_TIE_PAPER_MM).
 //    Spaces marked 실 아님 use the smaller fixture size, no H, and turn vertical in tall narrow spaces.
 //    Unnamed rooms get no label on paper.
 //  - Opening labels (blue) are ATTACHED to their opening (user 2026-10-24: "바로 붙어 있어야 알아보잖아";
@@ -100,7 +108,7 @@
 //    `attached`; one that reads as another opening's label (see above) comes last, flagged misleading.
 //    The label carries dir (its wall's direction) next to base (its opening's centre).
 
-import { pointInPolygon } from './geom.js';
+import { pointInPolygon, polygonCentroid } from './geom.js';
 import { wallPolygons, planOuterBounds, wallThickness, boxOf, polygonBoxArea, innerCorners, finishBeside } from './dims.js';
 import { hasGrayFill, normalizeFixture, fixtureBounds, isColumn, isStair, isPlainBox } from './fixtures.js';
 
@@ -638,6 +646,372 @@ export function roomBasePoint(dr) {
   return { x: p.x, y: p.y };
 }
 
+// ---- where a room's name starts out ---------------------------------------------------------------
+//
+// The middle of a room's largest open part (world mm): where its name block (name + H) is placed when
+// it was not moved by hand, on paper (placeLabels) and on the screen and in 치수선 없이 (ui/render.js);
+// from there the usual fitting keeps it inside the room, off the walls and the fixtures.
+// The engine's label point (geom.js poleOfInaccessibility, the point deepest inside the room) is not
+// that point in a strip: every point of a strip's middle line is as deep, and the search keeps the first
+// one it meets, half the strip's width from one end wall. A long 베란다 had its name squeezed against its
+// end wall with the whole strip free beside it (user 2026-10-25, 예시 세대 A 베란다1 on the print and the screen;
+// the same end of a 거실's long body). The largest open part is the largest axis-parallel rectangle inside
+// the room's outline (its walls' centre lines; a room standing inside it and a wall reaching into it
+// cut it), among those at least OPEN_PART_DEPTH as deep as the deepest one: a narrow corridor or a
+// thin band across two parts never takes the name from a room's body. Its centre: the middle of a strip
+// along and across it, the centre of a rectangular room (its label point as before), the middle of an
+// L-shaped room's larger part. Turned 90° the same part is chosen (areas and depths do not change).
+// Equal parts: the deeper, the wider (the name is written across), the one nearer the room's centroid.
+// A room with a diagonal side whose largest rectangle holds under OPEN_PART_SHARE of its area (a
+// triangle: the rectangle is the half at its right angle) keeps the label point (the incentre).
+// The point a moved name is measured from stays the label point (roomBasePoint, labelBase), so names
+// moved by hand stay where they were put. 실 아님 spaces: roomBasePoint (the middle of their box).
+// derived (optional): for the rooms standing inside this one. → { x, y } | null
+const OPEN_PART_DEPTH = 0.5;
+const OPEN_PART_SHARE = 2 / 3;
+// nameSpotClear: places this close are equally near (world mm: 0.5 paper mm at 1:60). The callers pass
+// NAME_SPOT_TIE_PAPER_MM at their scale (the screen: 2 px).
+export const NAME_SPOT_TIE_PAPER_MM = 0.5;
+export const NAME_SPOT_TIE_MM = 30;
+// A name over more than this much of a door's swing (paper mm²) is moved off it where its room has a place
+// (placeLabels placeRoom, ui/render.js); a corner of the text box over the arc's edge is not worth a name
+// pushed into a corner of its room.
+export const NAME_SWING_MIN_PAPER_MM2 = 2;
+const namePoints = new WeakMap();
+const openParts = new WeakMap();
+export function roomNamePoint(dr, derived = null) {
+  const base = roomBasePoint(dr);
+  if (!base || !dr.face || !Array.isArray(dr.face.points) || dr.face.points.length < 3) return base;
+  let at = namePoints.get(dr);
+  if (at === undefined) {
+    let rect = null;
+    try {
+      const pts = dr.face.points;
+      const size = Math.abs(dr.area || 0);
+      // Rooms standing inside this one (as model.js nestedFaces): smaller, their label point inside.
+      const holes = derived && Array.isArray(derived.rooms)
+        ? derived.rooms.filter((r) => r !== dr && r.face && Array.isArray(r.face.points) && r.face.points.length >= 3 && r.labelPoint
+          && Math.abs(r.area || 0) < size && pointInPolygon(r.labelPoint, pts)).map((r) => r.face.points)
+        : [];
+      rect = largestOpenRect(pts, holes);
+      // A room with a diagonal side whose largest rectangle is not its body (under OPEN_PART_SHARE of
+      // it: a triangle, where it is the corner half): the deepest point (a triangle's incentre) is.
+      const slanted = pts.some((q, i) => {
+        const n = pts[(i + 1) % pts.length];
+        return Math.abs(n.x - q.x) > OPEN_MERGE_MM && Math.abs(n.y - q.y) > OPEN_MERGE_MM;
+      });
+      if (rect && slanted && (rect.x1 - rect.x0) * (rect.y1 - rect.y0) < OPEN_PART_SHARE * size) rect = null;
+    } catch (_) { rect = null; }
+    at = rect ? { x: (rect.x0 + rect.x1) / 2, y: (rect.y0 + rect.y1) / 2 } : null;
+    namePoints.set(dr, at);
+    openParts.set(dr, rect);
+  }
+  if (dr.room && dr.room.notRoom) return base;
+  return at ? { x: at.x, y: at.y } : base;
+}
+
+// The largest open part of a polygon (see roomNamePoint): the axis-parallel rectangle inside it (outside
+// the holes, not crossed by any of their edges, nor by an edge reaching into it) with the largest area
+// among those at least OPEN_PART_DEPTH as deep (shorter side) as the deepest one. Searched on the grid of
+// the outline's x and y values (exact for upright walls); a diagonal side adds OPEN_DIAG_STEPS values
+// along it and blocks the grid cells it crosses, so the rectangle keeps inside it. → { x0, y0, x1, y1 } | null
+const OPEN_DIAG_STEPS = 16;
+const OPEN_MERGE_MM = 0.5;
+// Areas (mm²) and lengths (mm) within these are the same: the solve's rounding never decides (a file opened
+// on another device, review 2026-10-24).
+const OPEN_AREA_TIE = 100;
+const OPEN_LEN_TIE = 1;
+export function largestOpenRect(points, holes = []) {
+  const rings = [points].concat((holes || []).filter((h) => Array.isArray(h) && h.length >= 3));
+  const xs0 = [], ys0 = [];
+  const diag = [], upright = [];
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      if (!isFinite(a.x) || !isFinite(a.y)) return null;
+      xs0.push(a.x); ys0.push(a.y);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      if (Math.abs(dx) > OPEN_MERGE_MM && Math.abs(dy) > OPEN_MERGE_MM) {
+        diag.push([a, b]);
+        for (let k = 1; k < OPEN_DIAG_STEPS; k++) { xs0.push(a.x + (dx * k) / OPEN_DIAG_STEPS); ys0.push(a.y + (dy * k) / OPEN_DIAG_STEPS); }
+      } else if (Math.abs(dx) > OPEN_MERGE_MM || Math.abs(dy) > OPEN_MERGE_MM) upright.push([a, b]);
+    }
+  }
+  const merged = (vals) => {
+    vals.sort((u, v) => u - v);
+    const out = [];
+    for (const v of vals) if (!out.length || v - out[out.length - 1] > OPEN_MERGE_MM) out.push(v);
+    return out;
+  };
+  const xs = merged(xs0), ys = merged(ys0);
+  const nx = xs.length - 1, ny = ys.length - 1;
+  if (nx < 1 || ny < 1) return null;
+  const hs = rings.slice(1);
+  // Open cells: inside the outline, outside the holes, not crossed by a diagonal side.
+  const open = new Uint8Array(nx * ny);
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const c = { x: (xs[i] + xs[i + 1]) / 2, y: (ys[j] + ys[j + 1]) / 2 };
+      open[j * nx + i] = pointInPolygon(c, points) && !hs.some((h) => pointInPolygon(c, h)) ? 1 : 0;
+    }
+  }
+  for (const [a, b] of diag) {
+    for (let j = 0; j < ny; j++) {
+      if (Math.max(a.y, b.y) <= ys[j] || Math.min(a.y, b.y) >= ys[j + 1]) continue;
+      for (let i = 0; i < nx; i++) {
+        if (!open[j * nx + i] || Math.max(a.x, b.x) <= xs[i] || Math.min(a.x, b.x) >= xs[i + 1]) continue;
+        const box = { minX: xs[i] + 0.01, minY: ys[j] + 0.01, maxX: xs[i + 1] - 0.01, maxY: ys[j + 1] - 0.01 };
+        if (segmentLengthInBox(a, b, box) > 0.01) open[j * nx + i] = 0;
+      }
+    }
+  }
+  // Upright edges on a grid line between two open cells (a wall reaching into the room): the line is
+  // closed there. vBar[j * (nx + 1) + i]: the line x = xs[i] in row j; hBar[j * nx + i]: y = ys[j] in column i.
+  const vBar = new Uint8Array((nx + 1) * ny), hBar = new Uint8Array(nx * (ny + 1));
+  const indexOf = (vals, v) => {
+    for (let k = 0; k < vals.length; k++) if (Math.abs(vals[k] - v) <= OPEN_MERGE_MM + 1e-9) return k;
+    return -1;
+  };
+  for (const [a, b] of upright) {
+    if (Math.abs(b.x - a.x) <= OPEN_MERGE_MM) {
+      const i = indexOf(xs, (a.x + b.x) / 2);
+      const lo = Math.min(a.y, b.y) - OPEN_MERGE_MM, hi = Math.max(a.y, b.y) + OPEN_MERGE_MM;
+      if (i > 0 && i < nx) for (let j = 0; j < ny; j++) if (ys[j] >= lo && ys[j + 1] <= hi) vBar[j * (nx + 1) + i] = 1;
+    } else {
+      const j = indexOf(ys, (a.y + b.y) / 2);
+      const lo = Math.min(a.x, b.x) - OPEN_MERGE_MM, hi = Math.max(a.x, b.x) + OPEN_MERGE_MM;
+      if (j > 0 && j < ny) for (let i = 0; i < nx; i++) if (xs[i] >= lo && xs[i + 1] <= hi) hBar[j * nx + i] = 1;
+    }
+  }
+  // Every rectangle that cannot grow sideways: for each band of rows j0..j1, the runs of columns open over
+  // the whole band (no closed line inside it).
+  const rects = [];
+  const colOk = new Uint8Array(nx), lineOk = new Uint8Array(nx + 1);
+  for (let j0 = 0; j0 < ny; j0++) {
+    colOk.fill(1); lineOk.fill(1);
+    for (let j1 = j0; j1 < ny; j1++) {
+      let any = false;
+      for (let i = 0; i < nx; i++) {
+        if (!open[j1 * nx + i] || (j1 > j0 && hBar[j1 * nx + i])) colOk[i] = 0;
+        if (colOk[i]) any = true;
+      }
+      if (!any) break;
+      for (let i = 0; i <= nx; i++) if (vBar[j1 * (nx + 1) + i]) lineOk[i] = 0;
+      for (let i = 0; i < nx;) {
+        if (!colOk[i]) { i++; continue; }
+        const i0 = i;
+        while (i + 1 < nx && colOk[i + 1] && lineOk[i + 1]) i++;
+        rects.push({ x0: xs[i0], x1: xs[i + 1], y0: ys[j0], y1: ys[j1 + 1] });
+        i++;
+      }
+    }
+  }
+  if (!rects.length) return null;
+  const depthOf = (r) => Math.min(r.x1 - r.x0, r.y1 - r.y0);
+  const deepest = Math.max(...rects.map(depthOf));
+  const c = polygonCentroid(points);
+  const far = (r) => Math.hypot((r.x0 + r.x1) / 2 - c.x, (r.y0 + r.y1) / 2 - c.y);
+  let best = null;
+  for (const r of rects) {
+    if (depthOf(r) < OPEN_PART_DEPTH * deepest - OPEN_LEN_TIE) continue;
+    r.area = (r.x1 - r.x0) * (r.y1 - r.y0);
+    if (!best) { best = r; continue; }
+    const d = r.area - best.area;
+    if (d > OPEN_AREA_TIE) { best = r; continue; }
+    if (d < -OPEN_AREA_TIE) continue;
+    const dd = depthOf(r) - depthOf(best);
+    if (dd > OPEN_LEN_TIE) { best = r; continue; }
+    if (dd < -OPEN_LEN_TIE) continue;
+    const wide = (q) => (q.x1 - q.x0) >= (q.y1 - q.y0) - OPEN_LEN_TIE;
+    if (wide(r) !== wide(best)) { if (wide(r)) best = r; continue; }
+    if (far(r) < far(best) - OPEN_LEN_TIE) best = r;
+  }
+  return best ? { x0: best.x0, y0: best.y0, x1: best.x1, y1: best.y1 } : null;
+}
+
+// The room's largest open part (largestOpenRect of its outline, cached with roomNamePoint's). → rect | null
+export function roomOpenPart(dr, derived = null) {
+  if (!dr || !dr.face || !Array.isArray(dr.face.points) || dr.face.points.length < 3) return null;
+  if (!openParts.has(dr)) roomNamePoint(dr, derived);
+  return openParts.get(dr) || null;
+}
+
+// Where a room's name block (bw × bh world mm, as drawn) goes near `start` when it may not stay there:
+// the nearest spot inside `poly` (margin from its outline) clear of the obstacles (world boxes, grown by
+// pad; one with `points`, a door's swing, by that outline) and leaving each group free (groups: the spots
+// of one window / door label, openingLabelSpots; at least one of them clear of the name): moved first
+// straight across the room's largest open part (opts.part: the short way of a strip, so the name keeps
+// the middle of the strip's length), then along it, then the nearest grid spot (findFreeSpot). Along a
+// line the free places are intervals, ended by an obstacle, a label spot, the outline or a corner of it:
+// those ends are tried, nearest first.
+// opts.tries: [{ obstacles, groups, pad, margin }] tried in order at each of those three steps (a wider
+// gap from the labels first, so the name and a label do not read as one block, then the plain one);
+// default one try of (obstacles, opts.groups, opts.pad, opts.margin). opts.moves: which steps, in order
+// (default ['across', 'along', 'grid']); opts.alongReach: the farthest an 'along' move goes from start,
+// as a share of the open part's length. opts.tie (world mm, default NAME_SPOT_TIE_MM): two places whose
+// distances from start differ by less than this are as near, and the one with the smaller coordinate
+// (above / left) is tried first. A name centred over a window label had a place just above it and one
+// just below, equally near; the solve's rounding chose, so typing a value in another room moved the
+// '베란다' name from above its window label to below it and back (checker 2026-10-25, 치수선 없이).
+// → { x, y } | null (no clear spot)
+export function nameSpotClear(poly, start, bw, bh, obstacles, opts = {}) {
+  if (!poly || !start) return null;
+  const part = opts.part || null;
+  const tie = opts.tie > 0 ? opts.tie : NAME_SPOT_TIE_MM;
+  const tries = (Array.isArray(opts.tries) && opts.tries.length ? opts.tries : [{}]).map((t) => ({
+    obstacles: Array.isArray(t.obstacles) ? t.obstacles : obstacles || [],
+    groups: (Array.isArray(t.groups) ? t.groups : opts.groups || []).filter((g) => Array.isArray(g) && g.length),
+    pad: t.pad > 0 ? t.pad : (opts.pad > 0 ? opts.pad : 0),
+    margin: t.margin > 0 ? t.margin : (opts.margin > 0 ? opts.margin : 0),
+  }));
+  const fits = (c, t) => {
+    if (!boxInPolygon(poly, c, bw, bh, t.margin)) return false;
+    const box = { minX: c.x - bw / 2, minY: c.y - bh / 2, maxX: c.x + bw / 2, maxY: c.y + bh / 2 };
+    if (obstacleCost(box, t.obstacles, t.pad) > LABEL_COST_EPS) return false;
+    return t.groups.every((g) => g.some((s) => overlapArea(box, s, t.pad) <= LABEL_COST_EPS));
+  };
+  for (const t of tries) if (fits(start, t)) return { x: start.x, y: start.y };
+  const slide = (axis, t, reach = Infinity) => {
+    const other = axis === 'y' ? 'x' : 'y';
+    const half = (axis === 'y' ? bh : bw) / 2, halfO = (axis === 'y' ? bw : bh) / 2;
+    const [lo, hi] = axis === 'y' ? ['minY', 'maxY'] : ['minX', 'maxX'];
+    const [loO, hiO] = axis === 'y' ? ['minX', 'maxX'] : ['minY', 'maxY'];
+    const e = 0.01;
+    const vals = [];
+    for (const ob of t.obstacles.concat(...t.groups)) {
+      if (ob[hiO] + t.pad <= start[other] - halfO || ob[loO] - t.pad >= start[other] + halfO) continue;
+      vals.push(ob[lo] - t.pad - half - e, ob[hi] + t.pad + half + e);
+    }
+    for (const q of poly) vals.push(q[axis] - t.margin - half - e, q[axis] + t.margin + half + e);
+    vals.sort((a, b) => {
+      const d = Math.abs(a - start[axis]) - Math.abs(b - start[axis]);
+      return Math.abs(d) <= tie ? a - b : d;
+    });
+    for (const v of vals) {
+      if (Math.abs(v - start[axis]) > reach) break;
+      const c = axis === 'y' ? { x: start.x, y: v } : { x: v, y: start.y };
+      if (fits(c, t)) return c;
+    }
+    return null;
+  };
+  const acrossY = !part || part.x1 - part.x0 >= part.y1 - part.y0;
+  const moves = Array.isArray(opts.moves) ? opts.moves : ['across', 'along', 'grid'];
+  for (const move of moves) {
+    if (move === 'grid') {
+      for (const t of tries) {
+        // The grid knows plain obstacles: every label's spots count there (then the check above).
+        const g = findFreeSpot(poly, bw, bh, start, t.obstacles.concat(...t.groups), { margin: t.margin, pad: t.pad, step: opts.step, centre: true });
+        if (g.cost <= LABEL_COST_EPS && fits(g, t)) return { x: g.x, y: g.y };
+      }
+      continue;
+    }
+    const axis = (move === 'across') === acrossY ? 'y' : 'x';
+    // Along: no further from the middle than opts.alongReach of the open part's length (a name is not
+    // pushed to an end of its strip again).
+    const reach = move === 'along' && part && opts.alongReach > 0
+      ? opts.alongReach * (axis === 'x' ? part.x1 - part.x0 : part.y1 - part.y0) : Infinity;
+    for (const t of tries) {
+      const s = slide(axis, t, reach);
+      if (s) return s;
+    }
+  }
+  return null;
+}
+
+// Sides to try for an opening label, best room first, each with the room polygon and id (null = outside):
+// the room the opening is written into (anchor.roomId), else the larger real room.
+function normalOrder(anchor, derivedData) {
+  const n1 = { x: -anchor.dir.y, y: anchor.dir.x }, n2 = { x: anchor.dir.y, y: -anchor.dir.x };
+  const probe = 200;
+  const roomAt = (n) => {
+    const q = { x: anchor.point.x + n.x * probe, y: anchor.point.y + n.y * probe };
+    let best = null;
+    for (const dr of derivedData.rooms) {
+      if (dr.face && pointInPolygon(q, dr.face.points) && (!best || dr.area < best.area)) best = dr;
+    }
+    return best;
+  };
+  const sides = [{ ...n1, dr: roomAt(n1) }, { ...n2, dr: roomAt(n2) }];
+  const score = (s) => {
+    if (!s.dr) return -1;
+    if (anchor.roomId && s.dr.roomId === anchor.roomId) return 1e12;
+    return (s.dr.room && s.dr.room.notRoom ? 0 : 1e9) + (s.dr.area || 0) / 1e3;
+  };
+  sides.sort((p, q) => score(q) - score(p));
+  return sides.map((s) => ({ x: s.x, y: s.y, poly: s.dr ? s.dr.face.points : null, roomId: s.dr ? s.dr.roomId : null }));
+}
+
+// The spots over its opening of every window / door label written inside a room (placeLabels
+// placeOpening's first candidates: full size, on the side it is written first, centred over the opening,
+// then shifted by a quarter / half of its width; only those inside the room's inner faces), for that
+// room's name to leave at least one of them free where it can (user 2026-10-25: centred in its strip,
+// the '베란다1' name covered every spot of the 'AL단창 2520*1050' label, which went past the end of its
+// window). Labels moved by hand are left out. opts: as placeLabels (fonts.opening, worldPerUnit,
+// worldPerPaperMM, measure). → [{ id, roomId, spots: [{ minX, minY, maxX, maxY }] }] (world mm)
+export function openingLabelSpots(project, derived, opts = {}) {
+  const out = [];
+  if (!project || !derived || !Array.isArray(derived.rooms)) return out;
+  const size = (opts.fonts && opts.fonts.opening) || 8.8;
+  const wpu = opts.worldPerUnit > 0 ? opts.worldPerUnit : 1;
+  const wppm = opts.worldPerPaperMM > 0 ? opts.worldPerPaperMM : 60;
+  const measure = typeof opts.measure === 'function' ? opts.measure : estimateTextWidth;
+  const offsets = project.labelOffsets || {};
+  const gap = LABEL_GAP_MM * wppm;
+  const inner = new Map();   // roomId → its inner faces (roomInnerPolygon) or outline
+  for (const o of project.openings || []) {
+    if (!o || offsets[`opening:${o.id}`]) continue;
+    const text = String(safeCall(labelHooks.labelOf, o) || '').trim();
+    if (!text) continue;
+    const geo = openingLabelGeometry(o, project, derived);
+    if (!geo) continue;
+    const { anchor } = geo;
+    const n = normalOrder(anchor, derived)[0];
+    if (!n || !n.poly || !n.roomId) continue;
+    // As placeOpening: one line along a horizontal wall; turned on two lines along a vertical one.
+    const horizontal = Math.abs(anchor.dir.x) >= Math.abs(anchor.dir.y);
+    const parts = horizontal ? [text] : splitOpeningLabel(text);
+    const w = Math.max(...parts.map((t) => measure(t, size, 'normal'))) * wpu;
+    const h = parts.length * size * LINE_HEIGHT * wpu;
+    const bw = horizontal ? w : h, bh = horizontal ? h : w;
+    const acrossHalf = (Math.abs(n.x) * bw + Math.abs(n.y) * bh) / 2;
+    const alongHalf = (Math.abs(anchor.dir.x) * bw + Math.abs(anchor.dir.y) * bh) / 2;
+    if (!inner.has(n.roomId)) {
+      const dr = derived.rooms.find((r) => r.roomId === n.roomId);
+      let poly = null;
+      try { poly = dr ? roomInnerPolygon(dr, project, derived) : null; } catch (_) { poly = null; }
+      inner.set(n.roomId, poly || (dr && dr.face && dr.face.points) || null);
+    }
+    const poly = inner.get(n.roomId);
+    if (!poly) continue;
+    const W = anchor.width || 0;
+    const spots = [];
+    for (const s of [0, W / 4, -W / 4, W / 2, -W / 2]) {
+      if (s !== 0 && Math.abs(s) < 1) continue;
+      const d = geo.clearance(n, s - alongHalf, s + alongHalf) + gap + acrossHalf;
+      const c = { x: anchor.point.x + n.x * d + anchor.dir.x * s, y: anchor.point.y + n.y * d + anchor.dir.y * s };
+      // Only spots inside the room's inner faces: one across a wall is not where the label goes (the
+      // turned label of the 430 mm 베란다1 step window is longer than its wall).
+      if (boxInPolygon(poly, c, bw, bh, 0)) spots.push({ minX: c.x - bw / 2, minY: c.y - bh / 2, maxX: c.x + bw / 2, maxY: c.y + bh / 2 });
+    }
+    if (spots.length) out.push({ id: o.id, roomId: n.roomId, spots });
+  }
+  return out;
+}
+
+// The spots (openingLabelSpots) of the labels written inside room roomId, each grown by pad. → [[box]]
+export function labelSpotGroups(list, roomId, pad = 0) {
+  return (list || []).filter((l) => l.roomId === roomId)
+    .map((l) => l.spots.map((s) => ({ minX: s.minX - pad, minY: s.minY - pad, maxX: s.maxX + pad, maxY: s.maxY + pad })));
+}
+
+// Does a name box take every spot of some label (groups, labelSpotGroups) or lie on an obstacle (a door's
+// swing, by its outline)? → bool
+export function nameTakesLabelSpots(box, avoid) {
+  if (!avoid) return false;
+  if (obstacleCost(box, avoid.obstacles || []) > LABEL_COST_EPS) return true;
+  return (avoid.groups || []).some((g) => g.every((s) => overlapArea(box, s) > LABEL_COST_EPS));
+}
+
 // A project with one label moved (or reset), as the command stores it; also used for the live preview
 // of a drag. move = { key: 'room:<id>' | 'opening:<id>' | 'fixture:<id>' | 'dim:<key>' | null,
 //   offset: { dx, dy } (paper mm) | null (back to automatic) | undefined (unchanged),
@@ -832,6 +1206,9 @@ export function isLabelMoved(project, key, measureId = null) {
 // Paper mm a room's name block keeps from the room's inner faces when it has to be fitted (rooms with a
 // diagonal side always; other rooms when the block does not fit where it stands).
 const ROOM_NAME_WALL_CLEAR_MM = 0.8;
+// How far a room name moves along its room's largest open part (from its middle, as a share of the
+// part's length) to leave a window / door label a spot over its opening (placeRoom, nameSpotClear).
+const NAME_ALONG_REACH = 0.25;
 
 export function placeLabels(project, derived, opts = {}) {
   if (!project || !derived || !Array.isArray(derived.rooms)) return [];
@@ -880,6 +1257,7 @@ export function placeLabels(project, derived, opts = {}) {
   const depths = [0].concat((Array.isArray(opts.extraDepth) ? opts.extraDepth : [opts.extraDepth]).filter((v) => v > 0));
   const placed = [];
   const roomFits = new Map();
+  let spotList = null;   // openingLabelSpots, when a room name first needs them (nameAvoid)
   const width = (text, size, weight) => measure(text, size, weight) * wpu; // → world mm
   const block = (lines) => ({
     w: Math.max(0, ...lines.map((l) => width(l.text, l.size, l.weight))),
@@ -975,7 +1353,12 @@ export function placeLabels(project, derived, opts = {}) {
     const room = dr.room;
     if (!room || !room.name || !dr.labelPoint || !dr.face) return;
     const notRoom = !!room.notRoom;
-    const p = roomBasePoint(dr);
+    const key = `room:${dr.roomId}`;
+    // base: the point a name moved by hand is measured from (the label point); p: where the name starts
+    // out, the middle of the room's largest open part (roomNamePoint; user 2026-10-25: '베란다1' sat
+    // against the end wall of its long strip).
+    const base = roomBasePoint(dr);
+    const p = offsets[key] ? base : (roomNamePoint(dr, derived) || base);
     const margin = 2 * 80 + 1 * wppm; // inner wall faces plus about 1 paper mm
     // A scan exactly through a corner can miss; retry a hair off it.
     const scan = (axis) => scanExtent(dr.face.points, p, axis)
@@ -1014,15 +1397,23 @@ export function placeLabels(project, derived, opts = {}) {
       lines.push({ text: hText, size: hs, color: LABEL_COLORS.height, weight: 'normal' });
     }
     let b = block(lines);
-    const key = `room:${dr.roomId}`;
     // What makeRoomFor needs to place this name again (the lines before any fitting).
     roomFits.set(key, { dr, room, notRoom, rot, baseSize, color, lines0: lines.slice(), p });
     // On a fixture, column or stair: the nearest free spot inside the room (a moved name stays put).
     let at = p;
     const slanted = (dr.sides || []).some((sd) => sd.orient === 'd');
+    // The spots of this room's window / door labels over their openings and the doors' swings: the name
+    // leaves one spot of each label free, and the swings, where it finds a clear spot of the same size
+    // (nameAvoid).
+    const avoid = offsets[key] ? { obstacles: [], groups: [] } : nameAvoid(dr);
+    const avoiding = avoid.obstacles.length > 0 || avoid.groups.length > 0;
+    let cleared = false;   // moved off them (below): already inside the room off its walls
     if (slanted && !offsets[key]) {
-      // A room with a diagonal side: the whole block inside, off the walls (see the header).
-      const fit = fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p);
+      // A room with a diagonal side: the whole block inside, off the walls (see the header); at full size
+      // off the swings and each label's first spot first.
+      const extra = avoid.obstacles.concat(avoid.groups.map((g) => g[0]));
+      const fit = (avoiding && fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p, { extra, clearOnly: true, fullOnly: true }))
+        || fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p);
       if (fit) { at = fit.at; lines.splice(0, lines.length, ...fit.lines); b = block(lines); }
     } else if (!offsets[key] && fixtureBoxes.length) {
       const box0 = aabb(p.x, p.y, b.w, b.h, rot);
@@ -1031,11 +1422,60 @@ export function placeLabels(project, derived, opts = {}) {
         at = findFreeSpot(dr.face.points, bw, bh, p, fixtureBoxes, { margin: 80, step: Math.max(bh / 3, 0.5 * wppm) });
       }
     }
+    // A rectangular room's block that takes every spot of a label, or lies on a swing: the nearest spot
+    // that does not, inside the room's inner faces off the walls, clear of the fixtures. First the same
+    // size moved across the room's largest open part (in a strip the name keeps the middle of its length),
+    // LABEL_GAP_MM from the label spots where it can (a name 0.5 mm above a window label in a 950 베란다
+    // read as one block with it), then 0.5 mm, then 0.2 mm from the walls; then moved along it, no
+    // further than NAME_ALONG_REACH from the middle and never closer than 0.8 mm to a wall (the name is
+    // not squeezed against an end wall again); then smaller (85 %, 70 %, H at 85 % / 80 %) across, as a
+    // name making room for a label (makeRoomFor; 예시 세대 A at 1:75: '베란다1' at 70 % in the middle of its strip
+    // above 'AL단창 2520*1050', not squeezed against the 방1 wall). Still on a door's swing after all that:
+    // off the swing first, along the room as far as it takes and then anywhere in it (findFreeSpot),
+    // leaving a label spot free where it can, else not (the label finds another spot, as before): a name
+    // over a swing's arc reads worse than one off the middle (checker 2026-10-25: centred, a narrow
+    // 다용도실's name sat on the swing of its door, the label of its window taking the place above it).
+    // None: it stays (the labels find other spots, as before).
+    if (!slanted && avoiding) {
+      const box1 = aabb(at.x, at.y, b.w, b.h, rot);
+      if (nameTakesLabelSpots(box1, avoid)) {
+        const poly = roomInnerPolygon(dr, project, derived);
+        const keep = fixtureBoxes.concat(nameObstacles, avoid.obstacles);
+        const wide = nameAvoid(dr, LABEL_GAP_MM * wppm).groups, near = avoid.groups;
+        const m = ROOM_NAME_WALL_CLEAR_MM * wppm, m2 = 0.2 * wppm;
+        const part = roomOpenPart(dr, derived);
+        const tryAt = (ls, moves, tries, reach = NAME_ALONG_REACH) => {
+          const bb = block(ls);
+          const bx = aabb(at.x, at.y, bb.w, bb.h, rot);
+          const bw = bx.maxX - bx.minX, bh = bx.maxY - bx.minY;
+          return nameSpotClear(poly, at, bw, bh, keep, {
+            part, moves, alongReach: reach, tie: NAME_SPOT_TIE_PAPER_MM * wppm,
+            tries: tries.map(([groups, margin]) => ({ groups, margin })),
+          });
+        };
+        let c = poly && (tryAt(lines, ['across'], [[wide, m], [wide, m2], [near, m], [near, m2]])
+          || tryAt(lines, ['along'], [[wide, m], [near, m]]));
+        if (poly && !c && !notRoom) {
+          const hLine = lines.find((l) => l.color === LABEL_COLORS.height && /^H: /.test(l.text)) || null;
+          for (const k of [0.85, MIN_NAME_SCALE]) {
+            const ls = lines.filter((l) => l !== hLine).map((l) => ({ ...l, size: Math.min(l.size, baseSize * k) }));
+            if (hLine) ls.push({ ...hLine, size: Math.min(hLine.size, fonts.height * Math.max(0.8, k)) });
+            c = tryAt(ls, ['across'], [[near, m], [near, m2]]);
+            if (c) { lines.splice(0, lines.length, ...ls); b = block(lines); break; }
+          }
+        }
+        if (poly && !c && obstacleCost(aabb(at.x, at.y, b.w, b.h, rot), avoid.obstacles) > NAME_SWING_MIN_PAPER_MM2 * wppm * wppm) {
+          c = tryAt(lines, ['along', 'grid'], [[near, m], [near, m2]], Infinity)
+            || tryAt(lines, ['along', 'grid'], [[[], m], [[], m2]], Infinity);
+        }
+        if (c) { at = c; cleared = true; }
+      }
+    }
     // A rectangular room the block does not fit in where it stands (a narrow 베란다 / 다용도실 strip, or the
     // end of a long room where its label point lies): placed as a room with a diagonal side, inside its
     // inner faces off the walls, smaller or wrapped when needed (review 2026-10-25: on paper the 'ㅂ' of
     // '베란다1' stood on its wall at 1:75, a 1 m strip's 'H: 2300' on the wall below at 1:100).
-    if (!slanted && !offsets[key]) {
+    if (!slanted && !offsets[key] && !cleared) {
       const poly = roomInnerPolygon(dr, project, derived);
       const box1 = aabb(at.x, at.y, b.w, b.h, rot);
       const bw = box1.maxX - box1.minX, bh = box1.maxY - box1.minY;
@@ -1049,15 +1489,16 @@ export function placeLabels(project, derived, opts = {}) {
     }
     // 실 아님 spaces have a plain gray fill (draw-fixtures.js drawNotRoomSpaces; no diagonal any more):
     // the name stays in the middle and needs no halo.
-    finish({ key, kind: 'room', refId: dr.roomId, x: at.x, y: at.y, base: p, rot, lines, lineHeight: LINE_HEIGHT, w: b.w, h: b.h, halo: false });
+    finish({ key, kind: 'room', refId: dr.roomId, x: at.x, y: at.y, base, rot, lines, lineHeight: LINE_HEIGHT, w: b.w, h: b.h, halo: false });
   }
 
   // Name block (+ H) of a room with a diagonal side: the first size / wrap whose block fits inside the
-  // room clear of the walls, fixtures and nameObstacles, nearest the label point. → { at, lines, cost } |
+  // room clear of the walls, fixtures and nameObstacles, nearest p (where the name starts out:
+  // roomNamePoint, the middle of the room's largest open part). → { at, lines, cost } |
   // null. opt (rooms without a diagonal side, as a fallback): margin (paper mm from the faces), tight (H as
   // small as the name, down to 60 %), smallest (55 % / 50 %, H at 60 %: makeRoomFor only); extra: more
   // boxes to keep clear of (a window / door label the name makes room for, see placeOpening); clearOnly:
-  // null unless a size fits clear of everything.
+  // null unless a size fits clear of everything; fullOnly: the name at full size on one line only.
   // The search also tries each spot moved to the middle of the room's free width / height (findFreeSpot
   // opts.centre): in a strip the block only just fits across, the grid stepped over the one line where it
   // fits (recheck 2026-10-25: 예시 세대 A turned, the '베란다1' name went 2.8 m from its label point at the top
@@ -1074,7 +1515,8 @@ export function placeLabels(project, derived, opts = {}) {
     if (wrapped.length > 1) nameSets.push(wrapped);
     const variants = [];
     for (const names of nameSets) {
-      for (const k of opt.smallest ? [0.55, 0.5] : opt.tight ? [MIN_NAME_SCALE, 0.6] : [1, 0.85, MIN_NAME_SCALE]) {
+      if (opt.fullOnly && names !== nameSets[0]) continue;
+      for (const k of opt.smallest ? [0.55, 0.5] : opt.tight ? [MIN_NAME_SCALE, 0.6] : opt.fullOnly ? [1] : [1, 0.85, MIN_NAME_SCALE]) {
         const ls = names.map((text) => ({ text, size: baseSize * k, color, weight: 'normal' }));
         if (hLine) ls.push({ ...hLine, size: fonts.height * (opt.smallest ? 0.6 : opt.tight ? k : Math.max(0.8, k)) });
         variants.push(ls);
@@ -1091,6 +1533,16 @@ export function placeLabels(project, derived, opts = {}) {
       if (!best || spot.cost < best.cost - LABEL_COST_EPS) best = { at: { x: spot.x, y: spot.y }, lines: ls, cost: spot.cost };
     }
     return opt.clearOnly ? null : best;
+  }
+
+  // What a room's name leaves free where it can (placeRoom): one spot at least of each window / door
+  // label written inside this room (openingLabelSpots, grown by `pad`: at least the 0.5 paper mm a label
+  // keeps from a name), and the doors' swings (by their outline). Only when the window / door labels are
+  // written. → { obstacles: [swing], groups: [[box]] }
+  function nameAvoid(dr, pad = 0.5 * wppm) {
+    if (!include.openings) return { obstacles: [], groups: [] };
+    if (!spotList) spotList = openingLabelSpots(project, derived, { fonts, worldPerUnit: wpu, worldPerPaperMM: wppm, measure });
+    return { obstacles: swings, groups: labelSpotGroups(spotList, dr.roomId, pad) };
   }
 
   // A room name makes room for a window / door label (placeOpening, crowded spots): the block placed
@@ -1451,28 +1903,6 @@ export function placeLabels(project, derived, opts = {}) {
     if (misled) { fellBack(place(misled)); return; }
     const all = tryAt(1);
     if (all.length) fellBack(place(all[0]));
-  }
-
-  // Normals to try for an opening label, best room first, each with the room polygon (null = outside).
-  function normalOrder(anchor, derivedData) {
-    const n1 = { x: -anchor.dir.y, y: anchor.dir.x }, n2 = { x: anchor.dir.y, y: -anchor.dir.x };
-    const probe = 200;
-    const roomAt = (n) => {
-      const q = { x: anchor.point.x + n.x * probe, y: anchor.point.y + n.y * probe };
-      let best = null;
-      for (const dr of derivedData.rooms) {
-        if (dr.face && pointInPolygon(q, dr.face.points) && (!best || dr.area < best.area)) best = dr;
-      }
-      return best;
-    };
-    const sides = [{ ...n1, dr: roomAt(n1) }, { ...n2, dr: roomAt(n2) }];
-    const score = (s) => {
-      if (!s.dr) return -1;
-      if (anchor.roomId && s.dr.roomId === anchor.roomId) return 1e12;
-      return (s.dr.room && s.dr.room.notRoom ? 0 : 1e9) + (s.dr.area || 0) / 1e3;
-    };
-    sides.sort((p, q) => score(q) - score(p));
-    return sides.map((s) => ({ x: s.x, y: s.y, poly: s.dr ? s.dr.face.points : null }));
   }
 
   function placeFixture(f) {
