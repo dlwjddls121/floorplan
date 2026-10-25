@@ -51,11 +51,31 @@ function safeNamePart(s) {
   return cleaned.slice(0, 40).trim();
 }
 
-// '<householdName or 세대>_<YYYY-MM-DD_HHmm>' + ext, using local time.
-// e.g. projectFileName(p) → '홍길동_2026-10-17_0905.json'
+// The automatic name of a household nobody named ('세대 10-25 06:59', '세대 10-25 06:59 (2)', main.js
+// defaultHouseholdName): file names treat it as no name, so they read '세대_…' (not
+// '세대 10-25 06_59_2026-10-25_0659.json', review 2026-10-25). Shared with ui/output.js outputFileName.
+const DEFAULT_NAME_RE = /^세대 (\d\d)-(\d\d) (\d\d):(\d\d)(?: \((\d+)\))?$/;
+export function isDefaultHouseholdName(name) {
+  return DEFAULT_NAME_RE.test(String(name || '').trim());
+}
+
+// The file-name part of a household: its 세대명; for an automatic name the household's own date and time
+// ('세대 10-25 09:12' → '세대_1025-0912', '세대 10-25 09:12 (2)' → '세대_1025-0912-2'), so two unnamed
+// households exported or printed the same day still get different files (recheck 2026-10-25: both were
+// '세대_2026-10-25_1730.json' and '세대_평면도_2026-10-25.png'); '세대' without any name. Shared with
+// ui/output.js outputFileName.
+export function householdFilePart(name) {
+  const m = DEFAULT_NAME_RE.exec(String(name || '').trim());
+  if (m) return `세대_${m[1]}${m[2]}-${m[3]}${m[4]}${m[5] ? `-${m[5]}` : ''}`;
+  return safeNamePart(name) || '세대';
+}
+
+// '<householdName or 세대>_<YYYY-MM-DD_HHmm>' + ext, using local time (the export's); an automatic name
+// gives the household's own date and time instead of the name (householdFilePart).
+// e.g. projectFileName(p) → '홍길동_2026-10-17_0905.json'; '세대 10-25 09:12' → '세대_1025-0912_2026-10-25_1730.json'
 export function projectFileName(project, ext = '.json', date = new Date()) {
   const info = (project && project.info) || {};
-  const base = safeNamePart(info.householdName) || '세대';
+  const base = householdFilePart(info.householdName);
   const stamp = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}_${pad2(date.getHours())}${pad2(date.getMinutes())}`;
   const dotExt = ext ? (ext.startsWith('.') ? ext : `.${ext}`) : '';
   return `${base}_${stamp}${dotExt}`;

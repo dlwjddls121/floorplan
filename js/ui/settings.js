@@ -24,7 +24,7 @@ const LIST_SECTIONS = [
 ];
 
 const NUMBER_FIELDS = [
-  { key: 'extWall', label: '바깥벽 두께', range: LIMITS.wall, help: '두께를 재지 않은 바깥벽은 이 두께로 그립니다.' },
+  { key: 'extWall', label: '바깥벽 두께', range: LIMITS.wall, help: '두께를 재지 않은 바깥벽(한쪽에만 실이 있는 벽)은 이 두께로 그립니다. 벽마다 바꾸는 [외벽] 표시는 두께를 바꾸지 않습니다.' },
   { key: 'intWall', label: '안쪽 벽 두께', range: LIMITS.wall, help: '두께를 재지 않은 안쪽 벽(실과 실 사이)은 이 두께로 그립니다.' },
   { key: 'twoSideTolerance', label: '양쪽 값 차이', range: LIMITS.tolerance, help: '같은 벽을 양쪽 실에서 잰 값이 이만큼보다 더 다르면 \'확인필요\'로 알려 줍니다.' },
   { key: 'closureTolerance', label: '앞뒤 맞추기', range: LIMITS.tolerance, help: '잰 값끼리 서로 맞지 않아 앱이 벽 두께로 맞춘 양이, 또는 전체 치수와 구간 합계의 차이가 이만큼보다 크면 \'확인필요\'로 알려 줍니다.' },
@@ -154,7 +154,7 @@ export class SettingsScreen {
   async addItem(def) {
     const list = getPrefs()[def.key];
     if (list.length >= LIMITS.listItems) {
-      this.toast(`${def.title}는 ${LIMITS.listItems}개까지 넣을 수 있습니다.`, { type: 'warn' });
+      this.toast(`${def.title}은(는) ${LIMITS.listItems}개까지 넣을 수 있습니다.`, { type: 'warn' });
       return;
     }
     const res = await openDialog({

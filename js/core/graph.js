@@ -1,7 +1,7 @@
 // Planar wall graph (DESIGN.md §3.3). Pure functions: inputs are never mutated; each edit returns a new
 // doc object (arrays and touched items are copied; untouched fields are shared).
 //
-// doc: { nodes: [{ id, x, y }], edges: [{ id, a, b, kind, orient, sketch: {dx,dy}, thickness }] , ...rest }
+// doc: { nodes: [{ id, x, y }], edges: [{ id, a, b, kind, orient, sketch: {dx,dy}, thickness, exterior? }] , ...rest }
 
 import { EPS, dist, polygonArea, projectPointToSegment, segmentIntersection } from './geom.js';
 import { classifyDirection } from './sketch.js';
@@ -789,6 +789,8 @@ function mergeThrough(w, nid, e1, e2) {
     sketch: { dx: xn.dx + ny.dx, dy: xn.dy + ny.dy },
     thickness: e1.thickness != null ? e1.thickness : e2.thickness,
   };
+  // 외벽 chosen by hand (core/exterior.js): kept like the thickness.
+  if (typeof e1.exterior !== 'boolean' && typeof e2.exterior === 'boolean') merged.exterior = e2.exterior;
   const i1 = w.edges.indexOf(e1);
   w.edges[i1] = merged;
   w.edges = w.edges.filter((e) => e !== e2);
@@ -827,6 +829,8 @@ function mergeNodeInto(w, from, into) {
     const prev = seen.get(k);
     if (prev) {
       if (e.kind === 'wall') prev.kind = 'wall';
+      // 외벽 chosen by hand (core/exterior.js) on the wall that goes: kept, as mergeThrough keeps it.
+      if (prev.kind === 'wall' && typeof prev.exterior !== 'boolean' && typeof e.exterior === 'boolean') prev.exterior = e.exterior;
       continue;
     }
     seen.set(k, e);

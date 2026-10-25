@@ -24,6 +24,7 @@ import { edgeThickness } from './render.js';
 import { drawFixtures } from './draw-fixtures.js';
 import { memoLinePx } from './memo-ui.js';
 import { COLORS } from './theme.js';
+import { waitingValuesText } from './panel.js';
 
 export const ERASER_HINT = '지우개: 지울 것을 문지르세요. 닿은 벽은 한 줄 전체, 창·문·설비·메모·구역 나누기 선은 하나씩 지워집니다. 잘못 지우면 ↶.';
 
@@ -183,8 +184,10 @@ export function eraseToastText(plan, store) {
   let msg = `${parts.join(', ')}${particle} 지웠습니다.`;
   const dropped = ((store && store.lastDropped) || []).length;
   const waiting = ((store && store.lastDetached) || []).length;
-  if (dropped) msg += ` 지운 벽의 길이 값 ${dropped}개도 지웠습니다.`;
-  if (waiting) msg += ` 다른 벽의 길이 값 ${waiting}개는 그대로 두었다가, 벽을 다시 그려 방이 닫히면 다시 보입니다.`;
+  // Only 구역 나누기 lines erased: their values are a line's, not a wall's (review 2026-10-25).
+  const what = !c.walls && c.dividers ? '선' : '벽';
+  if (dropped) msg += ` 지운 ${what}의 길이 값 ${dropped}개도 지웠습니다.`;
+  if (waiting) msg += ` ${waitingValuesText(waiting, what)}`;
   return `${msg} 잘못 지웠으면 ↶를 누르세요.`;
 }
 

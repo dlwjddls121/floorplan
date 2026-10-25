@@ -19,8 +19,9 @@
 </head>
 <body>
   <div id="updateBanner" class="update-banner" role="status" hidden>
-    <span>새 버전이 있습니다. 저장된 도면은 그대로 남습니다.</span>
+    <span class="update-text">새 버전이 있습니다. 저장된 도면은 그대로 남습니다.</span>
     <button id="btnApplyUpdate" type="button" class="btn btn-primary">지금 적용</button>
+    <button id="btnUpdateLater" type="button" class="btn btn-ghost">나중에</button>
   </div>
 
   <!-- 세대 목록 (filled by js/ui/list.js) -->
@@ -91,6 +92,7 @@
         <div class="view-btns">
           <button id="btnRotate" type="button" class="btn" aria-label="도면 회전" title="누를 때마다 도면이 오른쪽으로 90° 회전합니다 (네 번 누르면 원래대로)">↻ 회전</button>
           <button id="btnDims" type="button" class="btn" aria-pressed="false" title="출력될 치수 줄 보기">치수선 보기</button>
+          <button id="btnExterior" type="button" class="btn" aria-pressed="false" title="외벽을 빨간색으로 보기">외벽 보기</button>
           <button id="btnFit" type="button" class="btn" title="도면 전체가 보이게">전체 보기</button>
         </div>
         <section id="panel" class="panel" aria-label="입력" hidden></section>

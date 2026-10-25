@@ -20,7 +20,7 @@ import { labelHooks, installLabelCommands, followMovedLabels, turnMovedRoomLabel
 import { drawOpenings, doorSwing } from './draw-openings.js';
 import { drawFixtures, drawNotRoomSpaces } from './draw-fixtures.js';
 import { drawMemo } from './memo-ui.js';
-import { registerPaperDrawers, notesForChoices, DEFAULT_CHOICES } from './output.js';
+import { registerPaperDrawers, notesForChoices, DEFAULT_CHOICES, printsMemo } from './output.js';
 
 // Where a window or door sits on its wall, for the checks (wider than its wall, overlapping): the
 // measured (or drawn) width around the opening's centre, in mm from the wall's node a, and the clear
@@ -134,7 +134,8 @@ export function autoPrintScale(state) {
     const items = runChecks(state.project, state.derived, CHECK_OPTIONS);
     const base = notesForPrint(items, { drawingOnly: false, bothValues: false });
     const notes = notesForChoices(state.project, state.derived, DEFAULT_CHOICES, base);
-    return computePrintLayout(state.project, state.derived, { scale: 'auto', dpi: 300, noteLines: notes.maxLines }).scale || 0;
+    // As [출력] prints by default (메모 포함 off: the memo takes no room, output.js printsMemo).
+    return computePrintLayout(state.project, state.derived, { scale: 'auto', dpi: 300, noteLines: notes.maxLines, memo: printsMemo(DEFAULT_CHOICES) }).scale || 0;
   } catch (err) {
     console.error('[wiring] print scale failed', err);
     return 0;

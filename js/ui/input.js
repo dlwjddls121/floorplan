@@ -28,7 +28,8 @@
 //   a primary touch (no other touch is really down), window blur and the page going to the background
 //   all drop stale gesture state.
 // - Mouse: the left button draws/taps, middle-drag or Space+drag pans, the wheel zooms around the cursor.
-// - DOM buttons and the numpad are outside the canvas and always accept touch.
+// - DOM buttons and the numpad are outside the canvas and accept touch, except on the bottom panel while
+//   the pen is in use (installPalmGuard below: the pen hand rests on the numpad, bottom right).
 // - The canvas never shows a context menu (a long press, or the S Pen side button).
 //
 // The controller does not know about tools. It reports single-pointer "gestures" to the handlers:
@@ -73,6 +74,7 @@ export class InputController {
     this.pinch = null;          // { ids: [a, b], lastMid, lastDist }
     this.spaceHeld = false;
     this.lastPenTime = -Infinity;   // performance.now() of the last pen event on the page
+    this.penDowns = 0;              // pen pointerdowns so far (installPalmGuard: did the tip come down meanwhile)
     this.penDown = new Set();       // pen pointerIds between pointerdown and pointerup (page-wide)
     this._lastPenType = '';         // type of the last pen event (pointerout of the page excluded)
     this._armed = null;             // { id }: the S Pen side button pressed while hovering over the canvas
@@ -149,7 +151,7 @@ export class InputController {
       this._reportPen();
       return;
     }
-    if (type === 'pointerdown') this.penDown.add(e.pointerId);
+    if (type === 'pointerdown') { this.penDown.add(e.pointerId); this.penDowns++; }
     else if (type === 'pointerup' || type === 'pointercancel') this.penDown.delete(e.pointerId);
     else if (type === 'pointermove' && e.buttons === 0) this.penDown.delete(e.pointerId); // hovering: nothing is down
     if (type !== 'pointerout') this._lastPenType = type;
@@ -531,4 +533,104 @@ export class InputController {
   _viewChanged() {
     if (this.h.onViewChange) this.h.onViewChange();
   }
+
+  // A pen pointer is down (its tip, or a side-button press, anywhere on the page) and still fresh.
+  get penIsDown() {
+    return this.penDown.size > 0 && this.penNear;
+  }
+}
+
+// ---- palm guard for the bottom panel (numpad and buttons) --------------------------------------------
+// A right hand writing with the S Pen rests its palm at the bottom right, where the numpad is (review
+// 2026-10-25: a palm typed '5' while the pen hovered, and pressed [확인 ▶] while the pen tip was on the plan,
+// storing a 5 mm wall). The numpad keys act on pointerdown, so on the panel:
+//   - while a pen pointer is down, a touch does nothing (not even its click);
+//   - while the pen is only near (hovering, or within TIMING.penNear of a pen event), a touch is held back
+//     and counts as a tap when it lifts, unless it was a palm: a contact larger than PALM_CONTACT_PX (its
+//     reported width / height), one that moved past the touch slop, or one during which the pen tip came
+//     down. A finger-sized contact (its size reported, as Android does) acts however slowly it is pressed
+//     (recheck 2026-10-25: a deliberate 0.9 s press did nothing, and a 50 px palm contact typed '5'), up to
+//     PANEL_PRESS_MS (a hand resting there); a contact of unknown size only within PANEL_TAP_MS. A numpad key
+//     then acts when the finger lifts (shown pressed meanwhile: .key-held), another button gets its click
+//     as usual. A resting palm never acts;
+//   - pen away: touches act at once, as before. Text fields are left alone (a finger may focus them).
+// The pen itself, the mouse and the keyboard are never held back.
+export const PANEL_TAP_MS = 700;
+export const PANEL_PRESS_MS = 3000;
+export const PALM_CONTACT_PX = 40;
+
+export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = PANEL_PRESS_MS, palmPx = PALM_CONTACT_PX } = {}) {
+  if (!host || !input) return () => {};
+  const held = new Map();    // pointerId → { t0, x, y, target, key, palm, sized }
+  let swallow = [];          // { x, y, until }: the click a held-back touch would still produce
+  const isField = (t) => !!(t && t.closest && t.closest('input, textarea, select'));
+  const block = (x, y) => { swallow.push({ x, y, until: performance.now() + 1000 }); };
+  // The contact's size in css px (Chrome reports 1 × 1 when the device does not tell).
+  const contact = (e) => Math.max(Number(e.width) || 0, Number(e.height) || 0);
+  const show = (h, on) => { if (h.key) h.key.classList.toggle('key-held', on && !h.palm); };
+  const onDown = (e) => {
+    if (e.pointerType !== 'touch' || isField(e.target)) return;
+    if (!input.penNear) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const size = contact(e);
+    const key = e.target && e.target.closest ? e.target.closest('.key') : null;
+    const h = { t0: performance.now(), pd: input.penDowns || 0, x: e.clientX, y: e.clientY, target: e.target, key: key && host.contains(key) ? key : null,
+      palm: input.penIsDown || size > palmPx, sized: size > 1.5 };
+    held.set(e.pointerId, h);
+    show(h, true);
+  };
+  const onMove = (e) => {
+    const h = held.get(e.pointerId);
+    if (!h) return;
+    e.stopPropagation();
+    if (Math.hypot(e.clientX - h.x, e.clientY - h.y) >= TAP_SLOP_PX.touch || contact(e) > palmPx || input.penIsDown) {
+      h.palm = true;
+      show(h, false);
+    }
+  };
+  const onUp = (e) => {
+    const h = held.get(e.pointerId);
+    if (!h) return;
+    held.delete(e.pointerId);
+    show(h, false);
+    e.stopPropagation();
+    const dt = performance.now() - h.t0;
+    const penCame = (input.penDowns || 0) !== h.pd;   // the pen tip came down while this touch was held
+    const tap = !h.palm && !penCame && !input.penIsDown && dt <= (h.sized ? pressMs : tapMs);
+    const key = h.key;
+    if (!tap || key) block(h.x, h.y);
+    // A finger tap while the pen hovers: the numpad key acts now (a script click: detail 0, which the
+    // Numpad takes like a keyboard activation); the touch's own click is swallowed.
+    if (tap && key && !key.disabled) key.click();
+  };
+  const onCancel = (e) => {
+    const h = held.get(e.pointerId);
+    if (!h) return;
+    held.delete(e.pointerId);
+    show(h, false);
+    block(h.x, h.y);
+  };
+  const onClick = (e) => {
+    if (e.detail === 0) return;   // a script or keyboard click (el.click(), Enter / Space)
+    const now = performance.now();
+    swallow = swallow.filter((s) => s.until > now);
+    const i = swallow.findIndex((s) => Math.hypot(e.clientX - s.x, e.clientY - s.y) <= 40);
+    if (i < 0) return;
+    swallow.splice(i, 1);
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  host.addEventListener('pointerdown', onDown, true);
+  host.addEventListener('pointermove', onMove, true);
+  host.addEventListener('pointerup', onUp, true);
+  host.addEventListener('pointercancel', onCancel, true);
+  host.addEventListener('click', onClick, true);
+  return () => {
+    host.removeEventListener('pointerdown', onDown, true);
+    host.removeEventListener('pointermove', onMove, true);
+    host.removeEventListener('pointerup', onUp, true);
+    host.removeEventListener('pointercancel', onCancel, true);
+    host.removeEventListener('click', onClick, true);
+  };
 }

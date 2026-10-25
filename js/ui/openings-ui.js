@@ -160,11 +160,16 @@ export class OpeningTool {
   // A tap in the other tools: only right on an opening's symbol (SYMBOL_TAP_PX) opens its panel, so a
   // tap inside the room next to it goes on to the wall. → bool (handled)
   tapOnSymbol(world) {
-    const store = this.ctx.store();
-    const id = openingOnBand(store.project, store.derived, world, this._mm(SYMBOL_TAP_PX.along), this._mm(SYMBOL_TAP_PX.across));
+    const id = this.symbolAt(world);
     if (!id) return false;
     this.ctx.openPanel(id, { at: world });
     return true;
+  }
+
+  // The opening whose symbol in the wall band (SYMBOL_TAP_PX) lies under a world point. → id | null
+  symbolAt(world) {
+    const store = this.ctx.store();
+    return openingOnBand(store.project, store.derived, world, this._mm(SYMBOL_TAP_PX.along), this._mm(SYMBOL_TAP_PX.across));
   }
 
   // Draw the ghost (call after renderPlan / drawOpenings, with the same opts).
@@ -249,6 +254,8 @@ export class OpeningPanel {
   open(id, { at = null } = {}) {
     const o = this._opening(id);
     if (!o) return;
+    // A size typed for the window/door shown so far (no [다음 ▶] / [확인]) goes into it first.
+    this.flushDraft();
     if (this.ctx.onOpen) this.ctx.onOpen();
     this.state = { id, field: 'w', part: 'outer', customOpen: false, wallSide: this._sideOf(o, at) };
     this._resetBuffer();
@@ -298,16 +305,49 @@ export class OpeningPanel {
     }, run);
   }
 
-  close() {
+  // opts.discard: Esc, or the opening is gone — a size still being typed is thrown away.
+  close({ discard = false } = {}) {
     if (!this.state) return;
+    if (discard) this._resetBuffer();
+    else this.flushDraft();
     this.state = null;
     this.host.hidden = true;
     this.host.replaceChildren();
     this.ctx.onChange();
   }
 
+  // A width or height typed on the numpad but not confirmed is put in when the panel closes or moves on
+  // (a tap on another wall or window, another tool, the other field, [벽 길이 ▶]), with a toast, as in the
+  // length panel (review 2026-10-25: a typed 1200 was lost when the next wall was tapped). → bool
+  flushDraft() {
+    const s = this.state;
+    if (!s || !this.edited || !s.field) { this._resetBuffer(); return false; }
+    const field = s.field;
+    const v = this._parse();
+    this._resetBuffer();
+    const o = this._opening(s.id);
+    const store = this.ctx.store();
+    if (v == null || !o || !store) return false;
+    const what = `${o.kind === 'door' ? '문' : '창'} ${field === 'w' ? '폭 W' : '높이 H'}`;
+    const [lo, hi] = field === 'w' ? [100, 20000] : [100, 5000];
+    if (v < lo || v > hi) {
+      this.ctx.toast(`입력하던 값(${formatMM(v)})은 넣지 않았습니다. ${field === 'w' ? '창·문 폭은 100~20000mm' : '창·문 높이는 100~5000mm'} 사이로 넣어 주세요.`, { type: 'warn', ms: 4500 });
+      return false;
+    }
+    if ((field === 'w' ? o.width : o.height) === v) return false;
+    const id = s.id;
+    const patch = field === 'w' ? { width: v } : { height: v };
+    const ok = this._hold(() => this.ctx.command(() => store.updateOpening(id, patch, this._anchorOpts()), '창호 규격'));
+    if (!ok) return false;
+    const after = this._opening(id);
+    if (after && after.width && after.height) this.prefs.addRecentSize(after.kind, after.width, after.height);
+    this.ctx.toast(`입력하던 값을 넣었습니다: ${what} ${formatMM(v)}mm (↶로 되돌릴 수 있습니다)`, { type: 'ok', ms: 4500 });
+    return true;
+  }
+
   // Forget the open opening without touching the host: PanelController has just taken the shared
   // bottom panel over (it already replaced the host's content).
+  // (PanelController puts a size still being typed here in first: ctx.beforeOpen → flushDraft, main.js.)
   detach() {
     this.state = null;
     this._resetBuffer();
@@ -316,7 +356,7 @@ export class OpeningPanel {
   // After any store change (undo/redo included): close when the opening is gone, else redraw.
   refresh() {
     if (!this.state) return;
-    if (!this._opening(this.state.id)) return this.close();
+    if (!this._opening(this.state.id)) return this.close({ discard: true });
     this._render();
   }
 
@@ -402,6 +442,7 @@ export class OpeningPanel {
   }
 
   _setField(field) {
+    if (this.state.field !== field) this.flushDraft();
     this.state.field = field;
     this._resetBuffer();
     this._render();
@@ -510,8 +551,9 @@ export class OpeningPanel {
     if (!s) return;
     const o = this._opening(s.id);
     const store = this.ctx.store();
+    this._resetBuffer();
     this.ctx.command(() => store.deleteOpening(s.id), o && o.kind === 'door' ? '문 지우기' : '창 지우기');
-    this.close();
+    this.close({ discard: true });
     this.ctx.toast('지웠습니다. ↶ 버튼으로 되돌릴 수 있습니다.', {
       action: { label: '되돌리기', run: () => this.ctx.command(() => this.ctx.store().undo(), '되돌리기') },
     });
@@ -677,7 +719,7 @@ export class OpeningPanel {
   }
 
   _renderActions(o) {
-    const swingText = o.kind === 'door' ? swingDescription(this.ctx.store(), o) : '';
+    const swingText = o.kind === 'door' ? swingDescription(this.ctx.store(), o, this.ctx.roomLabel) : '';
     return el('div', { class: 'panel-actions' },
       o.kind === 'door' ? el('button', { type: 'button', class: 'btn', onclick: () => this._cycleSwing() }, '열림 방향') : null,
       swingText ? el('span', { class: 'op-swing' }, swingText) : null,
@@ -689,8 +731,9 @@ export class OpeningPanel {
 }
 
 // Short Korean text for the current swing state (shown next to [열림 방향]), in the words of the
-// answer key: "방1 쪽으로 열림 · 경첩 왼쪽", "앞 문짝: 오른쪽".
-export function swingDescription(store, o) {
+// answer key: "방1 쪽으로 열림 · 경첩 왼쪽", "앞 문짝: 오른쪽". roomLabel (optional, the editor's): the
+// numbered label of an unnamed room ('이름 없는 실 2', as on the plan), so two unnamed rooms differ.
+export function swingDescription(store, o, roomLabel = null) {
   const s = o.swing || { side: 'left', hinge: 'start' };
   const fr = edgeFrame(store.project, store.derived, o.edge);
   if (!fr) return '';
@@ -702,7 +745,7 @@ export function swingDescription(store, o) {
   let room = '바깥';
   if (fi != null) {
     const dr = ((store.derived && store.derived.rooms) || []).find((r) => r.faceIndex === fi);
-    room = (dr && dr.room && dr.room.name) || '이름 없는 실';
+    room = (dr && dr.room && dr.room.name) || (dr && typeof roomLabel === 'function' && roomLabel(dr.roomId)) || '이름 없는 실';
   }
   return `${room} 쪽으로 열림 · 경첩 ${where}`;
 }

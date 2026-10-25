@@ -11,14 +11,15 @@ import {
   addSegment, removeEdge, moveNode as graphMoveNode, nearestEdge, findFaces, edgeFaces, nextId,
   findPlanarityProblem, snapPoint, joinStrokeEnds, dropLooseEnd, shortStroke, passedCorner, cornerDiagonal,
 } from './graph.js';
-import { roomSides, matchRooms, sidesForEdge, sidesByNode, sideRun } from './rooms.js';
-import { solve, thicknessPriors, scaleRatios, median, sketchInnerLength, innerLengthOf, innerLengthBetween } from './solver.js';
+import { roomSides, matchRooms, sidesForEdge, sidesByNode, sideRun, measureSideKey, TWIN_SUFFIX } from './rooms.js';
+import { solve, solutionAt, thicknessPriors, scaleRatios, median, sketchInnerLength, innerLengthOf, innerLengthBetween } from './solver.js';
 import { installOpenings, reconcileOpenings, sanitizeOpenings } from './openings.js';
 import { installFixtures, normalizeFixture } from './fixtures.js';
 import { installMemo, validMemo } from './memo.js';
 import { installDims } from './dims.js';
 import { installRotate } from './rotate.js';
 import { installErase, carryMerged } from './erase.js';
+import { installExterior } from './exterior.js';
 
 export const DEFAULT_SETTINGS = Object.freeze({ extWall: 150, intWall: 100, twoSideTolerance: 300, closureTolerance: 300 });
 export const UNDO_LIMIT = 100;
@@ -180,12 +181,15 @@ export function validateProject(obj) {
     const sketch = e.sketch && isNum(e.sketch.dx) && isNum(e.sketch.dy)
       ? { dx: e.sketch.dx, dy: e.sketch.dy }
       : { dx: (B.x - A.x) / p.sketchScale, dy: (B.y - A.y) / p.sketchScale };
-    p.edges.push({
+    const edge = {
       id: e.id, a: e.a, b: e.b,
       kind: e.kind === 'divider' ? 'divider' : 'wall',
       orient, sketch,
       thickness: isNum(e.thickness) && e.thickness >= 0 ? e.thickness : null,
-    });
+    };
+    // 외벽 chosen by hand (core/exterior.js): walls only; absent = automatic.
+    if (edge.kind === 'wall' && typeof e.exterior === 'boolean') edge.exterior = e.exterior;
+    p.edges.push(edge);
   }
   if (badEdges) errors.push(`연결이 잘못된 벽 ${badEdges}개를 정리했습니다.`);
   // Orphan nodes.
@@ -215,6 +219,7 @@ export function validateProject(obj) {
       parts: Array.isArray(m.parts) ? m.parts.filter(isNum) : [],
       check: !!m.check,
     };
+    if (m.twin === true) out.twin = true;
     const at = cleanAnchor(m.at);
     if (at) out.at = at;
     return out;
@@ -297,6 +302,17 @@ export function validateProject(obj) {
   const faceOk = (f) => f && Array.isArray(f.nodeIds) && Array.isArray(f.edgeIds) && f.nodeIds.length >= 3
     && f.edgeIds.length === f.nodeIds.length && f.nodeIds.every((id) => nodeMap.has(id)) && f.edgeIds.every((id) => edgeIds.has(id))
     && typeof f.room === 'string' && roomIdSet.has(f.room);
+  // The walls and finishes of a solve that did not settle (derive; storedSolvedWalls checks that they cover
+  // the plan when it opens): only numbers of existing walls and rooms.
+  const sw = obj.solvedWalls;
+  if (sw && typeof sw === 'object' && sw.thickness && typeof sw.thickness === 'object' && sw.finish && typeof sw.finish === 'object') {
+    const thickness = {}, finish = {};
+    for (const [id, t] of Object.entries(sw.thickness)) if (edgeIds.has(id) && isNum(t) && t >= 0) thickness[id] = t;
+    for (const [k, f] of Object.entries(sw.finish)) if (roomIdSet.has(k.slice(0, k.indexOf(':'))) && isNum(f) && f >= 0) finish[k] = f;
+    out.solvedWalls = { thickness, finish };
+  } else {
+    delete out.solvedWalls;
+  }
   if (Array.isArray(obj.faces) && obj.faces.length && obj.faces.every(faceOk) && typeof obj.faceKey === 'string') {
     out.faces = obj.faces.map((f) => ({ nodeIds: f.nodeIds.slice(), edgeIds: f.edgeIds.slice(), room: f.room }));
     out.faceKey = obj.faceKey;
@@ -309,7 +325,16 @@ export function validateProject(obj) {
 
 // ---- derivation ----------------------------------------------------------------------------------
 
-const sideKeyOf = (m) => [m.from, m.to].sort().join('-');
+const sideKeyOf = measureSideKey;
+// The corner fields of a measure taken on `side`: its corners as walked, and `twin` on the second face
+// of a wall the room walks on both faces (rooms.js roomSides).
+const isTwinSide = (side) => !!side && typeof side.key === 'string' && side.key.endsWith(TWIN_SUFFIX);
+function onSide(m, roomId, side) {
+  const out = { ...m, room: roomId, from: side.from, to: side.to };
+  if (isTwinSide(side)) out.twin = true;
+  else delete out.twin;
+  return out;
+}
 
 // Faces → rooms → measures check → solve → solved geometry.
 // opts.reuseFaces: the command did not move the plan as a whole (not 도면 돌리기): when the wall graph
@@ -338,8 +363,22 @@ function derive(project, prevDerived, opts = {}) {
     const st = storedFaces(project, key);
     if (st) { faces0 = st.faces; match = st.match; }
   }
+  // opts.sameGraph (도면 돌리기: core/rotate.js): the walls are the ones prevDerived's faces were found
+  // on, only turned. Where the turned corners do not give those faces again (walls folded or pressed
+  // together, a wall of no length), the faces and their rooms are kept: a turn lost rooms there, and a
+  // new unnamed room took the face of '현관' with its H (review 2026-10-25). Otherwise the faces found
+  // on the turned plan are used as before.
+  let found = null;
+  if (!match && opts.sameGraph && prevDerived && Array.isArray(prevDerived.faces)) {
+    found = findFaces(project);
+    const kept = reusedFaces(project, prevDerived);
+    if (kept && faceSignature(found) !== faceSignature(kept)) {
+      const m = sameRooms(project, prevDerived, kept.length);
+      if (m) { faces0 = kept; match = m; }
+    }
+  }
   if (!match) {
-    faces0 = findFaces(project);
+    faces0 = found || findFaces(project);
     let prevPolygons = null;
     if (prevDerived) {
       prevPolygons = new Map();
@@ -386,7 +425,7 @@ function derive(project, prevDerived, opts = {}) {
   };
   const solverSpans = new Map();
   for (const [id, parts] of att.spanParts) solverSpans.set(id, parts.map((r) => ({ roomId: r.dr.roomId, i: r.i })));
-  const sol = solve(pre, dRooms0, { spans: solverSpans });
+  let sol = solve(pre, dRooms0, { spans: solverSpans });
   // opts.holdPlace (a turn of the whole plan, core/rotate.js): the solved plan stays where the turn put
   // its corners (holdSolvedPlace). The solve's gauge rows (1e-6) against its 1e8 bound pins leave the
   // plan's place to the rounding: a solved 예시 세대 A moved 0.3 mm on every turn, and four turns did not come
@@ -396,7 +435,39 @@ function derive(project, prevDerived, opts = {}) {
   // 예시 세대 A 0.28 mm, which moved the printed name of a rectangular room by up to 300 mm (the label point of a
   // rectangle is anywhere along its middle line, and the search picks one by the rounding). When the
   // corners are kept exactly, the stored sketch scale is kept too: the reopened plan is the stored plan.
-  const held = opts.holdPlace ? holdSolvedPlace(pre.nodes, sol.positions) : null;
+  // opts.keepCorners (deriveOpened): the corners as stored, however far the solve would move them.
+  let held = opts.holdPlace ? holdSolvedPlace(pre.nodes, sol.positions, opts.keepCorners ? Infinity : HOLD_KEEP_MM) : null;
+  // opts.opened (DocStore constructor, replaceProject: deriveOpened): a household whose values contradict
+  // the walls (walls pressed together or crossing) can have two solved plans, each the solve of the other:
+  // it then changed shape on every opening, by up to a metre, back and forth between the tablet and the
+  // PC (review 2026-10-25). When solving the re-solve gives the stored corners back, they are a solve
+  // too: they are kept, with that second solve's numbers. The next edit solves from them on every device.
+  if (held === 'shifted' && opts.opened) {
+    const solveFrom = (positions) => {
+      const moved = (pre.nodes || []).map((n) => {
+        const q = positions.get(n.id);
+        return q && isNum(q.x) && isNum(q.y) ? { ...n, x: q.x, y: q.y } : n;
+      });
+      const pre2 = { ...pre, nodes: moved, sketchScale: sol.scale };
+      const dRooms2 = dRooms0.map((dr) => ({ ...dr, sides: roomSides(dr.face, pre2) }));
+      const same = dRooms2.every((dr, i) => dr.sides.length === dRooms0[i].sides.length
+        && dr.sides.every((sd, j) => sd.key === dRooms0[i].sides[j].key));
+      return same ? { sol: solve(pre2, dRooms2, { spans: solverSpans }) } : null;
+    };
+    const again = solveFrom(sol.positions);
+    if (again && holdSolvedPlace(pre.nodes, again.sol.positions) === 'kept') { sol = again.sol; held = 'kept'; }
+  }
+  // Opened as stored (the corners kept): every number shown with them is theirs (final check 2026-10-25:
+  // '욕실 아래쪽 벽: 잰 값 390, 그림 659 (269mm 차이)' on a plan whose drawing had 378; another device listed
+  // other 검사 lines for one file). The residuals ('그림'), the absorbed sums and the lengths the drawn order
+  // placed are computed for the kept corners (solver solutionAt), and a household whose solve did not settle
+  // (the passes of a plan with diagonal walls ran out: its corners are not a solve any device can find
+  // again) brings the walls and finishes its drawing device solved (project.solvedWalls, written below), so
+  // the walls, the dimension chains and the checks are the drawing device's too.
+  const openedAsStored = held === 'kept' && !prevDerived && (opts.opened || opts.keepCorners);
+  const storedWalls = openedAsStored ? storedSolvedWalls(project, sol) : null;
+  if (storedWalls) sol = solutionAt(pre, dRooms0, { ...sol, ...storedWalls }, sol.positions, { spans: solverSpans });
+  else if (opts.keepCorners && held === 'kept') sol = solutionAt(pre, dRooms0, sol, sol.positions, { spans: solverSpans });
 
   // Solved geometry.
   const nodes = (pre.nodes || []).map((n) => {
@@ -405,6 +476,10 @@ function derive(project, prevDerived, opts = {}) {
   });
   const keepScale = held === 'kept' && isNum(project.sketchScale) && project.sketchScale > 0;
   const solved = { ...pre, nodes, sketchScale: keepScale ? project.sketchScale : sol.scale };
+  // The walls and finishes of a solve that did not settle go with the household (see storedSolvedWalls).
+  if (storedWalls) solved.solvedWalls = { thickness: { ...project.solvedWalls.thickness }, finish: { ...project.solvedWalls.finish } };
+  else if (sol.info && sol.info.settled === false) solved.solvedWalls = solvedWallsOf(sol);
+  else delete solved.solvedWalls;
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
   const faces = faces0.map((f) => {
     const points = f.nodeIds.map((id) => ({ x: nodeMap.get(id).x, y: nodeMap.get(id).y }));
@@ -464,10 +539,55 @@ function derive(project, prevDerived, opts = {}) {
     notes: { splitComputed: computedMeasures.length > 0 },
     timeMs: t1 - t0,
   };
-  return { project: solved, derived, dropped: att.dropped, detachedNow: att.detachedNow };
+  return { project: solved, derived, dropped: att.dropped, detachedNow: att.detachedNow, held };
+}
+
+// A household opened as stored (DocStore constructor, replaceProject). Its stored corners are normally a
+// solve and are kept (derive holdPlace). When the re-solve moves them (values that contradict the walls),
+// the opened plan is opened once more, up to twice, until it opens as itself: such a household settled
+// only after several openings, a little different on each device (review 2026-10-25: 1017 mm, then 741).
+// When the moved plan moves again on its next opening, the household has no plan that opens as itself
+// (recheck 2026-10-25: fuzz seed 10 at 220 edits flipped between two shapes 475 mm apart on every
+// opening, at the cost of three derives each time): it then opens as stored, its corners kept exactly
+// (derive opts.keepCorners) with the numbers solved for them, the same on every device; the next edit
+// solves it from there.
+function deriveOpened(project) {
+  const r = derive(project, null, { holdPlace: true, opened: true });
+  if (r.held !== 'shifted') return r;
+  const again = derive(r.project, null, { holdPlace: true, opened: true });
+  if (again.held !== 'shifted') return r;   // r opens as itself
+  return derive(project, null, { holdPlace: true, keepCorners: true });
 }
 
 const round2 = (v) => Math.round(v * 100) / 100;
+
+// project.solvedWalls: { thickness: { edgeId: mm }, finish: { 'roomId:sideKey': mm } } of the last solve,
+// written only when that solve did not settle (derive). → the record
+function solvedWallsOf(sol) {
+  const thickness = {}, finish = {};
+  for (const [id, t] of sol.thickness || []) if (isNum(t)) thickness[id] = t;
+  for (const [k, f] of sol.finish || []) if (isNum(f)) finish[k] = f;
+  return { thickness, finish };
+}
+
+// The stored walls and finishes as the solve's maps, when they cover every wall and finish this solve has
+// (the same graph and rooms). → { thickness: Map, finish: Map } | null
+function storedSolvedWalls(project, sol) {
+  const sw = project && project.solvedWalls;
+  if (!sw || !sw.thickness || !sw.finish) return null;
+  const thickness = new Map(), finish = new Map();
+  for (const id of (sol.thickness || new Map()).keys()) {
+    const t = sw.thickness[id];
+    if (!isNum(t)) return null;
+    thickness.set(id, t);
+  }
+  for (const k of (sol.finish || new Map()).keys()) {
+    const f = sw.finish[k];
+    if (!isNum(f)) return null;
+    finish.set(k, f);
+  }
+  return { thickness, finish };
+}
 
 // derive opts.holdPlace: the solved positions (Map id → { x, y }, changed in place) stay where the corners
 // were before the solve. A turned solved plan is its own solution; the re-solve only adds its rounding
@@ -478,7 +598,7 @@ const round2 = (v) => Math.round(v * 100) / 100;
 // state before a turn is always a solved one); the solved shape is kept then, at the old place.
 // → 'kept' (the corners as given) | 'shifted' (the solved shape at the old place) | null (no corners)
 const HOLD_KEEP_MM = 2;
-function holdSolvedPlace(nodes, positions) {
+function holdSolvedPlace(nodes, positions, keepMM = HOLD_KEEP_MM) {
   let dx = 0, dy = 0, k = 0;
   const given = [];
   for (const n of nodes || []) {
@@ -494,7 +614,7 @@ function holdSolvedPlace(nodes, positions) {
     const q = positions.get(n.id);
     worst = Math.max(worst, Math.abs(q.x + dx - n.x), Math.abs(q.y + dy - n.y));
   }
-  if (worst <= HOLD_KEEP_MM) {
+  if (worst <= keepMM) {
     for (const n of given) positions.set(n.id, { ...positions.get(n.id), x: n.x, y: n.y });
     return 'kept';
   }
@@ -775,10 +895,21 @@ function attachMeasures(project, dRooms, match) {
     // 1. Same room, same corners. In the measure's OWN room (not the one it merged into) the corners
     // alone name the side, so the face test is skipped there: an anchor recorded while the plan was
     // folded faced the other way, and the value then never came back to its room (예시 세대 A test 2026-10-18).
-    const rec = byRoomKey.get(`${mergedInto.get(m.room) || m.room}|${key}`);
-    if (rec && (faces(rec.side) || rec.dr.roomId === m.room) && plausible(check, [rec.side.from, rec.side.to])) return [rec];
+    // A wall the room walks on both faces (rooms.js TWIN_SUFFIX): the face walked the way the measure's
+    // corners run is its own, else the one its anchor faces; a twin measure whose wall has only one face
+    // in the room now (a second link drawn) takes that face.
+    const room1 = mergedInto.get(m.room) || m.room;
+    const base = [m.from, m.to].sort().join('-');
+    const plainRec = byRoomKey.get(`${room1}|${base}`), twinRec = byRoomKey.get(`${room1}|${base}${TWIN_SUFFIX}`);
+    // (Then its face decides, also in its own room: the other face may be there too.)
+    const twinGone = !!m.twin && !twinRec;
+    const rec = plainRec && twinRec
+      ? [plainRec, twinRec].find((r) => r.side.from === m.from && r.side.to === m.to)
+        || (n && [plainRec, twinRec].find((r) => faces(r.side))) || byRoomKey.get(`${room1}|${key}`)
+      : twinGone ? plainRec : byRoomKey.get(`${room1}|${key}`);
+    if (rec && (faces(rec.side) || (rec.dr.roomId === m.room && !twinGone)) && plausible(check, [rec.side.from, rec.side.to])) return [rec];
     // 2. Same corners, same face, another room. Without an anchor only new rooms qualify (as before).
-    for (const r of byKey.get(key) || []) {
+    for (const r of byKey.get(twinGone ? base : key) || []) {
       if (n ? !faces(r.side) : !created.has(r.dr.roomId)) continue;
       if (plausible(check, [r.side.from, r.side.to])) return [r];
     }
@@ -832,15 +963,16 @@ function attachMeasures(project, dRooms, match) {
       if (takenSide.has(k)) return null;
       takenSide.add(k);
       if (m.room === dr.roomId && sideKeyOf(m) === side.key) return m;
-      return { ...m, room: dr.roomId, from: side.from, to: side.to };
+      return onSide(m, dr.roomId, side);
     }
     const sig = run.map((r) => `${r.dr.roomId}|${r.side.key}`).join(',');
     if (takenSpan.has(sig)) return null;
     takenSpan.add(sig);
     const start = run[0].side.from, end = run[run.length - 1].side.to;
     const roomId = run.some((r) => r.dr.roomId === m.room) ? m.room : run[0].dr.roomId;
-    const same = roomId === m.room && sideKeyOf(m) === [start, end].sort().join('-');
+    const same = roomId === m.room && !m.twin && sideKeyOf(m) === [start, end].sort().join('-');
     const out = same ? m : { ...m, room: roomId, from: start, to: end };
+    if (out !== m) delete out.twin;
     spanParts.set(out.id, run);
     return out;
   };
@@ -939,7 +1071,7 @@ function spanResults(project, dRooms, spanParts, sol) {
       joints.push({ kind, edgeId, thickness, gap: round2(gap) });
     }
     const wallGap = joints.reduce((s, j) => s + j.thickness, 0);
-    const byWall = joints.some((j) => j.kind === 'wall');
+    const byWall = joints.some((j) => j.kind === 'wall'), byDivider = joints.some((j) => j.kind === 'divider');
     const reals = parts.map((p) => real.get(`${p.dr.roomId}|${p.dr.sides[p.i].key}`) || null);
     const hasValue = isNum(m.value) && m.value > 0;
     const shown = hasValue ? roundParts(m.value, exact, reals, wallGap) : exact.map((v) => Math.round(v));
@@ -948,7 +1080,7 @@ function spanResults(project, dRooms, spanParts, sol) {
       measureId: m.id, roomId: m.room, key: sideKeyOf(m), value: m.value, check: !!m.check,
       orient: first.orient, normal: { x: first.inwardNormal.x, y: first.inwardNormal.y },
       from: first.from, to: last.to,
-      joints, wallGap: round2(wallGap), drawnGap: round2(joints.reduce((s, j) => s + j.gap, 0)), byWall,
+      joints, wallGap: round2(wallGap), drawnGap: round2(joints.reduce((s, j) => s + j.gap, 0)), byWall, byDivider,
       parts: parts.map((p, k) => {
         const side = p.dr.sides[p.i];
         const computed = hasValue && !reals[k];
@@ -970,7 +1102,8 @@ function spanResults(project, dRooms, spanParts, sol) {
       computedMeasures.push({
         id: `computed:${m.id}:${part.roomId}:${part.sideKey}`, room: part.roomId, from: side.from, to: side.to,
         value: part.value, exact: part.exact, parts: [part.value], check: false, computed: true, spanId: m.id,
-        byWall: span.byWall, wallGap: span.wallGap,
+        byWall: span.byWall, byDivider: span.byDivider, wallGap: span.wallGap,
+        ...(isTwinSide(side) ? { twin: true } : {}),
       });
     }
   }
@@ -1218,15 +1351,46 @@ function computeWarnings(project, dRooms, sol, extra = {}) {
   // closureTolerance (확인필요); for such a diagonal check above DIAGONAL_TOLERANCE_MM (nothing absorbs
   // it). A diagonal with rows of its own is a value like any other (closureTolerance).
   const diagRows = sol.diagonalRows || new Map();
+  // Two values of ONE room that contradict each other are shared: two opposite sides 500 mm apart (2900
+  // on top, 3400 below) were drawn 3150 wide with 250 mm on each, so up to twice closureTolerance passed
+  // as 참고 and printed 2900 and 3400 on one 3150 room (review 2026-10-25; an outline room has its
+  // closure row, a wall measured from both rooms its twoSide pair, but an inner room with T-junctions on
+  // its walls had neither). So the residuals of a room's facing h / v sides (opposite faces, overlapping
+  // extents, drawn too long on one and too short on the other) count together: `opposite`.
+  const opposite = new Map(); // measureId → { measureId (the other side's), amount (their contradiction) }
+  const resid = [];
+  for (const m of valid) {
+    const r = residualOf(m);
+    if (r == null || Math.abs(r) <= RESIDUAL_TOLERANCE_MM + RESIDUAL_EPS_MM) continue;
+    const at = sideOfMeasure(m);
+    const side = at && at.dr.sides[at.i];
+    if (!side || (side.orient !== 'h' && side.orient !== 'v')) continue;
+    resid.push({ m, r, side, ext: span(side) });
+  }
+  for (let i = 0; i < resid.length; i++) {
+    for (let j = i + 1; j < resid.length; j++) {
+      const a = resid[i], b = resid[j];
+      if (a.m.room !== b.m.room || a.side.orient !== b.side.orient || Math.sign(a.r) === Math.sign(b.r)) continue;
+      if (dot(a.side.inwardNormal, b.side.inwardNormal) > -0.5) continue;
+      if (Math.min(a.ext[1], b.ext[1]) - Math.max(a.ext[0], b.ext[0]) <= 1) continue;
+      const amount = Math.abs(a.r - b.r);
+      for (const [x, y] of [[a, b], [b, a]]) {
+        const cur = opposite.get(x.m.id);
+        if (!cur || amount > cur.amount) opposite.set(x.m.id, { measureId: y.m.id, amount });
+      }
+    }
+  }
   for (const m of valid) {
     const r = sol.measureResiduals && sol.measureResiduals.get(m.id);
     if (r == null || !isFinite(r) || Math.abs(r) <= RESIDUAL_TOLERANCE_MM + RESIDUAL_EPS_MM) continue;
     const dg = diagRows.get(m.id);
     const checkOnly = !!dg && !dg.rows;
     const tol = checkOnly ? Math.min(settings.closureTolerance, DIAGONAL_TOLERANCE_MM) : settings.closureTolerance;
+    const opp = opposite.get(m.id) || null;
     warnings.push({
       type: 'residual', measureId: m.id, amount: Math.abs(r), drawn: m.value + r,
-      check: Math.abs(r) > tol + RESIDUAL_EPS_MM,
+      check: Math.abs(r) > tol + RESIDUAL_EPS_MM || (!!opp && opp.amount > settings.closureTolerance + RESIDUAL_EPS_MM),
+      ...(opp ? { opposite: { measureId: opp.measureId, amount: round2(opp.amount) } } : {}),
       ...(dg ? { diagonal: checkOnly ? 'check' : 'rows' } : {}),
     });
   }
@@ -1313,7 +1477,7 @@ export class DocStore {
     this.lastMoveProblem = null;
     this._pendingDropped = null;
     // Opened as stored: the solved corners stay exactly where they are (derive holdPlace).
-    const r = derive(withoutRemovedFields(project || createProject()), null, { holdPlace: true });
+    const r = deriveOpened(withoutRemovedFields(project || createProject()));
     this._state = { project: r.project, derived: r.derived };
   }
 
@@ -1416,7 +1580,7 @@ export class DocStore {
   // solved plan stays where the move put its corners (derive holdPlace). prevProject: the project before
   // the move. → { project, derived, dropped, detached }
   _deriveMoved(project, movedPrev, prevProject) {
-    const r = derive(project, movedPrev, { reuseFaces: false, prevProject, holdPlace: true });
+    const r = derive(project, movedPrev, { reuseFaces: false, prevProject, holdPlace: true, sameGraph: true });
     const hooked = runDeriveHooks(project, r.project, r.derived, null);
     return { project: reconcileOpenings(project, hooked, null), derived: r.derived, dropped: r.dropped, detached: r.detachedNow };
   }
@@ -1793,7 +1957,9 @@ export class DocStore {
       const v = Number(value);
       if (!(isFinite(v) && v > 0)) return null;
       const measures = upsertMeasure(p.measures, roomId, side, v, Array.isArray(parts) && parts.length ? parts.map(Number) : [v], p);
-      id = measures.find((m) => m.room === roomId && sideKeyOf(m) === sideKey).id;
+      const placed = measures.find((m) => m.room === roomId && sideKeyOf(m) === sideKey);
+      if (!placed) return null;
+      id = placed.id;
       return { ...p, measures };
     }, { detail: { roomId, sideKey } });
     return id;
@@ -1827,7 +1993,7 @@ export class DocStore {
       const measures = p.measures.slice();
       if (i < 0) {
         if (!on) return null;
-        measures.push({ id: nextMeasureId(p), room: roomId, from: side.from, to: side.to, value: null, parts: [], check: true });
+        measures.push(onSide({ id: nextMeasureId(p), value: null, parts: [], check: true }, roomId, side));
       } else {
         if (!!measures[i].check === !!on) return null;
         if (!on && measures[i].value == null) measures.splice(i, 1);
@@ -1890,7 +2056,7 @@ export class DocStore {
 
   // Load another project (e.g. after import). Clears undo history.
   replaceProject(project) {
-    const r = derive(withoutRemovedFields(project), null, { holdPlace: true });
+    const r = deriveOpened(withoutRemovedFields(project));
     this._state = { project: r.project, derived: r.derived };
     this._undo = [];
     this._redo = [];
@@ -1980,6 +2146,7 @@ function runDeriveHooks(prevProject, nextProject, nextDerived, prevDerived = nul
 //   dims.js      setDimOverride, setLabelOffset, resetOutputLayout
 //   rotate.js    rotatePlan (도면 돌리기; NOT an undo step: it turns the history with the plan)
 //   erase.js     eraseItems (지우개: walls, windows / doors, fixtures, memo in one undo step), lastErased
+//   exterior.js  setWallExterior, toggleWallExterior (외벽 chosen by hand for one wall)
 // The 확인 완료 commands (checks-full.js installChecks) are installed by main.js, because
 // checks-full.js imports this module.
 installOpenings(DocStore);
@@ -1988,6 +2155,7 @@ installMemo(DocStore);
 installDims(DocStore);
 installRotate(DocStore);
 installErase(DocStore);
+installExterior(DocStore);
 
 // ---- internal helpers ----------------------------------------------------------------------------
 
@@ -2026,7 +2194,7 @@ function upsertMeasure(measures, roomId, side, value, parts, project = null) {
   const i = measures.findIndex((m) => m.room === roomId && sideKeyOf(m) === side.key);
   const out = measures.slice();
   if (i >= 0) out[i] = { ...out[i], value, parts };
-  else out.push({ id: nextMeasureId({ ...(project || {}), measures }), room: roomId, from: side.from, to: side.to, value, parts, check: false });
+  else out.push(onSide({ id: nextMeasureId({ ...(project || {}), measures }), value, parts, check: false }, roomId, side));
   return out;
 }
 

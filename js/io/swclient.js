@@ -19,7 +19,11 @@
 const APP_SCOPE = new URL('../../', import.meta.url).href;
 const SW_URL = new URL('../../sw.js', import.meta.url).href;
 
-const UPDATE_CHECK_MIN_INTERVAL_MS = 30 * 60 * 1000;
+// Coming back to the app (visibilitychange) checks again once this much has passed since the last check
+// (review 2026-10-25: 30 min meant a version published while the tablet was away often showed no banner
+// on coming back; registration.update() for an unchanged sw.js, updateViaCache 'none', is one small
+// request). Devtest step 9 says the same (devtest/index.html #t-update).
+export const UPDATE_CHECK_MIN_INTERVAL_MS = 2 * 60 * 1000;
 const UPDATE_CHECK_PERIOD_MS = 60 * 60 * 1000;
 
 const listeners = new Set();

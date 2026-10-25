@@ -44,10 +44,13 @@ function sameDirection(u, v) {
 }
 
 // Two diagonal edges drawn as one straight wall (sketch vectors parallel within 1°, e.g. one stroke split
-// where another wall meets it) stay ONE side while the solve leaves them within 5° of straight
-// (2026-10-19): the solver keeps such a corner on the wall's line, but a kink of a few hundredths of a
-// degree from contradicting values must not split the side and set its value loose.
-const SKETCH_STRAIGHT = Math.sin(Math.PI / 180), SOLVED_STRAIGHT = Math.sin(5 * Math.PI / 180);
+// where another wall meets it) stay ONE side (2026-10-19): the solver keeps such a corner on the wall's
+// line, but a kink from contradicting values must not split the side and set its value loose. Up to
+// 2026-10-25 only while the solve left them within 5° of straight: a busier solve that bent one further
+// split the side after the solve, so the value it had just used matched no side, showed nowhere, named
+// no check item, and on opening waited or was gone (review 2026-10-25). The drawing decides (a corner
+// dragged off the line changes the sketch); only a joint the solve turned back on itself is a corner.
+const SKETCH_STRAIGHT = Math.sin(Math.PI / 180);
 function straightDiagonal(e1, from1, e2, from2, u, v) {
   if (!e1 || !e2 || e1.orient !== 'd' || e2.orient !== 'd' || !e1.sketch || !e2.sketch) return false;
   const s1 = from1 === e1.a ? { x: e1.sketch.dx, y: e1.sketch.dy } : { x: -e1.sketch.dx, y: -e1.sketch.dy };
@@ -55,8 +58,17 @@ function straightDiagonal(e1, from1, e2, from2, u, v) {
   const l1 = Math.hypot(s1.x, s1.y), l2 = Math.hypot(s2.x, s2.y);
   if (!(l1 > EPS && l2 > EPS)) return false;
   const sketchCross = (s1.x * s2.y - s1.y * s2.x) / (l1 * l2), sketchDot = s1.x * s2.x + s1.y * s2.y;
-  return Math.abs(sketchCross) <= SKETCH_STRAIGHT && sketchDot > 0
-    && Math.abs(u.x * v.y - u.y * v.x) <= SOLVED_STRAIGHT && u.x * v.x + u.y * v.y > 0;
+  return Math.abs(sketchCross) <= SKETCH_STRAIGHT && sketchDot > 0 && u.x * v.x + u.y * v.y > 0;
+}
+
+// The key suffix of the second face of a wall that one room walks on both faces (roomSides).
+export const TWIN_SUFFIX = '~';
+
+// The side key a measure (or a computed part) names: its corners sorted, plus TWIN_SUFFIX for the
+// second face of a wall the room walks on both faces (m.twin, set when the value is taken there and
+// kept by every re-derive). Every engine match of a measure to a side goes through this.
+export function measureSideKey(m) {
+  return [m.from, m.to].sort().join('-') + (m && m.twin ? TWIN_SUFFIX : '');
 }
 
 // Sides of a room face: maximal straight runs between corners. A T-junction on the far side of a wall
@@ -88,20 +100,36 @@ export function roomSides(face, doc) {
   corners = corners.slice(startPos).concat(corners.slice(0, startPos));
 
   const sides = [];
-  const usedKeys = new Set();
+  const runs = [];
   for (let c = 0; c < corners.length; c++) {
     const k0 = corners[c];
     const k1 = corners[(c + 1) % corners.length];
+    const from = ns[k0], to = ns[k1];
+    const sorted = [from, to].sort();
+    runs.push({ c, k0, k1, from, to, first: sorted[0], base: sorted.join('-') });
+  }
+  // A wall that is the only link between an island room (a 창고 inside a 거실) and the outer walls is
+  // walked on both faces by the outer room: two sides between the same corners, in opposite directions
+  // (review 2026-10-25: the second face's value threw). The face walked from the first of the sorted
+  // corner ids keeps the plain key; the other one is `${key}~` (TWIN_SUFFIX), which a measure on it
+  // names with `twin: true` (measureSideKey). Anything else repeated (not expected) takes '~' + corner.
+  const baseCount = new Map();
+  for (const r of runs) baseCount.set(r.base, (baseCount.get(r.base) || 0) + 1);
+  const usedKeys = new Set();
+  for (const r of runs) {
+    let key = r.base;
+    if (baseCount.get(r.base) === 2 && r.from !== r.first) key = r.base + TWIN_SUFFIX;
+    if (usedKeys.has(key)) key = r.base + '~' + r.c;
+    usedKeys.add(key);
+    r.key = key;
+  }
+  for (const { k0, k1, from, to, key } of runs) {
     const edgeIds = [];
     for (let k = k0; k !== k1; k = (k + 1) % n) edgeIds.push(es[k]);
-    const from = ns[k0], to = ns[k1];
     const edges = edgeIds.map((id) => edgeMap.get(id));
     const orient = edges.every((e) => e.orient === 'h') ? 'h' : edges.every((e) => e.orient === 'v') ? 'v' : 'd';
     const dir = dirs[k0];
     const A = nodeMap.get(from), B = nodeMap.get(to);
-    let key = [from, to].sort().join('-');
-    if (usedKeys.has(key)) key += '~' + c; // only possible in degenerate shapes
-    usedKeys.add(key);
     sides.push({
       key, from, to, edgeIds, orient,
       dir: { x: dir.x, y: dir.y },
@@ -327,7 +355,9 @@ export function sideRun(byNode, nodeMap, fromId, toId, normal, opts = {}) {
 }
 
 // Room sides on both sides of an edge. derived: DocStore.derived ({ edgeFaces, rooms }).
-// → [{ roomId, side }] (0, 1 or 2 entries; a wall inside a single room gives at most one)
+// → [{ roomId, side }] (0, 1 or 2 entries). One room on both faces of the edge (a wall joining an island
+// room to the room around it: the room walks it on both faces) gives both of its sides, the second one
+// keyed '…~' (roomSides), so the length panel offers each face (review 2026-10-25).
 export function sidesForEdge(derived, edgeId) {
   if (!derived || !derived.edgeFaces) return [];
   const pair = derived.edgeFaces.get(edgeId);
@@ -339,8 +369,7 @@ export function sidesForEdge(derived, edgeId) {
     seen.add(fi);
     const r = (derived.rooms || []).find((x) => x.faceIndex === fi || (derived.faces && x.face === derived.faces[fi]));
     if (!r) continue;
-    const side = (r.sides || []).find((s) => s.edgeIds.includes(edgeId));
-    if (side) out.push({ roomId: r.roomId, side });
+    for (const side of (r.sides || []).filter((s) => s.edgeIds.includes(edgeId))) out.push({ roomId: r.roomId, side });
   }
   return out;
 }

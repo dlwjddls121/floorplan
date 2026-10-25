@@ -130,6 +130,11 @@ export class ListScreen {
 
   // ---- data ------------------------------------------------------------------------------------
 
+  // The households' names as listed (a new household's default name avoids them, main.js).
+  names() {
+    return this.showTrash ? [] : this.items.map(itemName);
+  }
+
   async refresh() {
     if (!this.ctx.storageReady()) {
       this.items = [];
@@ -196,7 +201,8 @@ export class ListScreen {
     const open = el('button', { type: 'button', class: 'list-open', onclick: () => this.open(it.id) },
       el('span', { class: 'list-name' }, name),
       el('span', { class: 'list-meta' }, `${formatDate(it.modifiedAt)} 수정`),
-      it.dirty ? el('span', { class: 'badge badge-warn' }, '마지막 내보내기 이후 수정됨') : null);
+      // Never exported: say so (review 2026-10-25: '마지막 내보내기 이후 수정됨' read as if it had been).
+      it.dirty ? el('span', { class: 'badge badge-warn' }, it.exportedAt ? '마지막 내보내기 이후 수정됨' : '아직 내보내지 않음') : null);
     return el('div', { class: 'list-row', role: 'listitem' },
       open,
       el('div', { class: 'list-actions' },

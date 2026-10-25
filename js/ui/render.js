@@ -19,7 +19,7 @@
 import { COLORS, LINES, TEXT_PX, DEFAULT_WALL, canvasFont, formatPlain } from './theme.js';
 import {
   finishPolygons, wallPolygons, wallOutline, uprightAngle, rotatedRect, rotatedRectParts, boxOf, boxPoints,
-  convexOverlap, polygonBoxArea,
+  convexOverlap, polygonBoxArea, exteriorJointOutlines, runInsideFrom,
 } from '../core/dims.js';
 import {
   placeLabels, fixtureObstacles, findFreeSpot, roomBasePoint, scanExtent, wrapName, boxesHit, boxInPolygon,
@@ -27,6 +27,7 @@ import {
 } from '../core/labels.js';
 import { PAPER_STYLE, PT_MM } from '../core/printlayout.js';
 import { pointInPolygon } from '../core/geom.js';
+import { measureSideKey } from '../core/rooms.js';
 import { FIXTURE_STYLE, fixtureInnerLineMM } from './draw-fixtures.js';
 
 const DEFAULTS = {
@@ -61,6 +62,7 @@ const DEFAULTS = {
   textItems: null,         // array: receives { kind, refId, key, x, y, w, h } of EVERY text drawn by the
                            // text layer (checks: nothing overlaps)
   fixtureExclude: null,    // fixture id whose label is left out (its size is being dragged)
+  exterior: null,          // Set of wall ids drawn as 외벽 (외벽 보기; core/exterior.js exteriorIds), in COLORS.exterior
 };
 
 // 구역 나누기 선 dash pattern on screen (css px) and on paper (paper mm; see output.js).
@@ -102,6 +104,15 @@ export function renderPlan(ctx, source, view, options = {}) {
   let finishes = [];
   try { finishes = derived ? finishPolygons(project, derived) : []; } catch (err) { console.error('[render] finish', err); }
   drawWalls(ctx, view, geo, null, COLORS.wall, finishes);
+  let redWalls = null;   // world polygons painted red (the 구역 나누기 선 keep out of them)
+  if (o.exterior && o.exterior.size) {
+    // At a joint with a diagonal wall the exterior walls also take the joint (dims.js exteriorJointOutlines).
+    const joints = exteriorJointOutlines(geo.edges, geo.byNode, o.exterior);
+    paintExterior(ctx, COLORS.wall, (c) => drawWalls(c, view, geo, o.exterior, c.fillStyle, finishes, joints));
+    redWalls = geo.edges.filter((it) => it.edge.kind !== 'divider' && o.exterior.has(it.edge.id))
+      .map((it) => wallPolygon(it, geo)).filter(Boolean)
+      .concat(finishes.filter((f) => f.edgeIds.some((id) => o.exterior.has(id))).map((f) => f.points), joints);
+  }
   let cutouts = [];
   if (typeof o.wallCutouts === 'function') {
     try { cutouts = o.wallCutouts(project, derived) || []; } catch (err) { console.error('[render] wall cutouts', err); }
@@ -112,7 +123,7 @@ export function renderPlan(ctx, source, view, options = {}) {
   const divW = o.dividerWidth != null ? o.dividerWidth : (screen ? LINES.divider : LINES.dividerExport * 60 * view.scale);
   // Dashed (점선): a 구역 나누기 선 is not a wall.
   const paperMM = divW / LINES.dividerExport;   // canvas units per paper mm (export mode)
-  drawDividers(ctx, view, geo, divW, screen ? DIVIDER_DASH_PX : DIVIDER_DASH_PAPER_MM.map((v) => v * paperMM));
+  drawDividers(ctx, view, geo, divW, screen ? DIVIDER_DASH_PX : DIVIDER_DASH_PAPER_MM.map((v) => v * paperMM), redWalls);
   if (screen && o.selectedEdges && o.selectedEdges.length) {
     drawWalls(ctx, view, geo, new Set(o.selectedEdges), COLORS.selectWall, finishes);
     clearCutouts(ctx, view, cutouts, o.background || COLORS.canvasBg);
@@ -271,7 +282,8 @@ function wallPolygon(item, geo) {
 }
 
 // finishes: polygons of the finish layers on room faces (core/dims.js finishPolygons), drawn as wall.
-function drawWalls(ctx, view, geo, onlyIds, color, finishes = []) {
+// extra: more world polygons in the same path (외벽: dims.js exteriorJointOutlines).
+function drawWalls(ctx, view, geo, onlyIds, color, finishes = [], extra = []) {
   ctx.fillStyle = color;
   ctx.beginPath();
   const add = (poly) => {
@@ -293,7 +305,31 @@ function drawWalls(ctx, view, geo, onlyIds, color, finishes = []) {
     if (onlyIds && !f.edgeIds.some((id) => onlyIds.has(id))) continue;
     add(f.points);
   }
+  for (const poly of extra || []) if (poly && poly.length >= 3) add(poly);
   ctx.fill('nonzero');
+}
+
+// 외벽 (core/exterior.js): the exterior walls, already drawn in the wall colour `under` with all the others,
+// turned COLORS.exterior. fill(ctx) fills their outlines (with their finish layers) as ONE path in
+// ctx.fillStyle. The colour is ADDED ('lighter') to the wall ink: inside a wall the result is exactly
+// COLORS.exterior, and on the anti-aliased edges it is the edge the wall would have in that colour, so an
+// exterior wall gets no dark rim from the black under it and meets the black walls without a seam (at a
+// corner or T the shared ink is red where an exterior wall covers it, black elsewhere). Shared with
+// ui/output.js (paper: walls in #000000).
+export function paintExterior(ctx, under, fill) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = colorDifference(COLORS.exterior, under);
+  fill(ctx);
+  ctx.restore();
+}
+
+// '#rrggbb' a − b per channel (≥ 0).
+function colorDifference(a, b) {
+  const ch = (hex, i) => parseInt(hex.slice(1 + 2 * i, 3 + 2 * i), 16);
+  let out = '#';
+  for (let i = 0; i < 3; i++) out += Math.max(0, ch(a, i) - ch(b, i)).toString(16).padStart(2, '0');
+  return out;
 }
 
 // Clears the wall parts taken by fixtures put into a wall (the fixture is drawn over the gap later).
@@ -316,7 +352,9 @@ function clearCutouts(ctx, view, cutouts, color) {
 }
 
 // Each divider is its own dashed path, so the dashes start at its end and look the same on every line.
-function drawDividers(ctx, view, geo, width, dash = []) {
+// redWalls: world polygons of the walls drawn red (외벽 보기): a line ending in one starts at its face
+// (dims.js runInsideFrom), its dashes where they were.
+function drawDividers(ctx, view, geo, width, dash = [], redWalls = null) {
   ctx.save();
   ctx.strokeStyle = COLORS.divider;
   ctx.lineWidth = width;
@@ -324,13 +362,32 @@ function drawDividers(ctx, view, geo, width, dash = []) {
   ctx.setLineDash(dash);
   for (const item of geo.edges) {
     if (item.edge.kind !== 'divider') continue;
-    const a = view.toScreen(item.a), b = view.toScreen(item.b);
+    let A = item.a, B = item.b, offset = 0;
+    if (redWalls && redWalls.length) {
+      const t = trimmedLine(item.a, item.b, redWalls);
+      if (!t) continue;
+      ({ A, B } = t);
+      offset = t.from * view.scale;
+    }
+    const a = view.toScreen(A), b = view.toScreen(B);
+    ctx.lineDashOffset = offset;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.stroke();
   }
   ctx.restore();
+}
+
+// A 구역 나누기 선 from P to Q without its ends inside the red walls (외벽; dims.js runInsideFrom). Shared with
+// ui/output.js. → { A, B, from (world mm cut at P) } | null (nothing left outside them)
+export function trimmedLine(P, Q, redWalls) {
+  const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+  if (!(L > 0)) return null;
+  const s = runInsideFrom(P, Q, redWalls), e = runInsideFrom(Q, P, redWalls);
+  if (s + e >= L - 1e-6) return null;
+  const ux = (Q.x - P.x) / L, uy = (Q.y - P.y) / L;
+  return { A: { x: P.x + ux * s, y: P.y + uy * s }, B: { x: Q.x - ux * e, y: Q.y - uy * e }, from: s, to: e };
 }
 
 function drawSelectedDividers(ctx, view, geo, ids) {
@@ -437,17 +494,19 @@ function drawRoomLabels(ctx, view, derived, font, screen, roomLabel, notRoomLabe
   }
 }
 
-// Index measures by "roomId|sortedNodeKey". The parts of a measured side cut by a 구역 나누기 선 are
-// computed by the engine (derived.computedMeasures, `computed: true`); a typed value of the same side
-// wins over them.
+// Index measures by "roomId|side key" (core/rooms.js measureSideKey: the sorted corners, plus '~' for the
+// second face of a wall the room walks on both faces, m.twin). The parts of a measured side cut by a
+// 구역 나누기 선 are computed by the engine (derived.computedMeasures, `computed: true`); a typed value of
+// the same side wins over them.
 function measureIndex(project, derived) {
   const map = new Map();
   const computed = derived && Array.isArray(derived.computedMeasures) ? derived.computedMeasures : [];
   for (const m of computed) {
-    if (m && m.room && m.value != null) map.set(`${m.room}|${sideKeyOf(m.from, m.to)}`, m);
+    if (m && m.room && m.value != null) map.set(`${m.room}|${measureSideKey(m)}`, m);
   }
   for (const m of project.measures || []) {
-    const key = `${m.room}|${sideKeyOf(m.from, m.to)}`;
+    if (!m) continue;
+    const key = `${m.room}|${measureSideKey(m)}`;
     if (m.value == null && map.has(key)) continue;   // a bare 확인필요 flag does not hide a computed value
     map.set(key, m);
   }
@@ -640,22 +699,64 @@ const PRIO = { active: 0, name: 1, moved: 1.5, value: 2, unknown: 2.4, placehold
 const PAPER_PRIO = { active: 0, moved: 0.8, value: 1, unknown: 1.1, name: 2, placeholder: 2.5, height: 2.1, opening: 3, fixture: 3.5 };
 
 let textCache = null;
+// Pinch / wheel zoom (review 2026-10-25: every zoom frame laid out every text again, 35–40 ms of JS a frame
+// for 40 rooms on a PC, several times that on the tablet): while the scale keeps changing from one frame
+// to the next (frames under ZOOM_SETTLE_MS apart), the last layout is drawn again — the same texts at
+// their spots, at their fixed px size — until the scale is ZOOM_REUSE_RATIO away from the one it was laid
+// out for. o.requestRelayout(ms) then has the editor draw once more when the zoom has stopped, which lays
+// everything out for the scale it stopped at. A redraw at an unchanged scale always lays out afresh.
+const ZOOM_SETTLE_MS = 160;
+const ZOOM_REUSE_RATIO = 0.15;
+let lastTextDraw = { scale: 0, at: -Infinity };
+// How many times the editor's text layer was laid out (tests: a zoom does not lay out every frame).
+export const textLayoutStats = { count: 0 };
 
 function drawScreenText(ctx, view, project, derived, geo, font, o) {
   if (!derived || (!o.labels && !o.sideLabels)) return;
   const key = {
-    project, derived, scale: view.scale, labels: !!o.labels, sideLabels: !!o.sideLabels,
+    project, derived, labels: !!o.labels, sideLabels: !!o.sideLabels,
     openingLabels: !!o.openingLabels, fixtureLabels: !!o.fixtureLabels, notRoomLabels: !!o.notRoomLabels,
-    wppm: o.worldPerPaperMM, roomLabel: o.roomLabel, obstacles: o.textObstacles, forceShow: o.forceShow,
+    wppm: o.worldPerPaperMM, roomLabel: o.roomLabel, forceShow: o.forceShow,
     exclude: o.fixtureExclude || null, inner: FIXTURE_STYLE.innerLine,
     active: o.activeSide ? `${o.activeSide.roomId}|${o.activeSide.sideKey}` : '', font: JSON.stringify(font),
   };
-  let layout = textCache && sameKeys(textCache.key, key) ? textCache.layout : null;
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const zooming = view.scale !== lastTextDraw.scale && now - lastTextDraw.at < ZOOM_SETTLE_MS;
+  lastTextDraw = { scale: view.scale, at: now };
+  let layout = null;
+  if (textCache && sameKeys(textCache.key, key)) {
+    if (textCache.scale === view.scale && textCache.obstacles === o.textObstacles) {
+      layout = textCache.layout;
+    } else if (zooming && typeof o.requestRelayout === 'function' && textCache.scale > 0
+      && Math.abs(view.scale / textCache.scale - 1) <= ZOOM_REUSE_RATIO) {
+      layout = textCache.layout;
+      o.requestRelayout(ZOOM_SETTLE_MS + 20);
+    }
+  }
   if (!layout) {
     layout = layoutScreenText(ctx, view, project, derived, geo, font, o);
-    textCache = { key, layout };
+    textCache = { key, layout, scale: view.scale, obstacles: o.textObstacles };
+    textLayoutStats.count++;
   }
   drawTextLayout(ctx, view, layout, o);
+}
+
+// ctx.measureText of a text at px / weight (canvasFont), remembered: a layout of 40 rooms measures about
+// 3,500 texts, the same ones at every zoom step. (The canvas transform does not change measureText.)
+const textWidths = new Map();
+function measureWidth(ctx, text, px, weight = 'normal') {
+  const font = canvasFont(px, weight);
+  const k = `${font}|${text}`;
+  let w = textWidths.get(k);
+  if (w === undefined) {
+    if (textWidths.size > 20000) textWidths.clear();
+    ctx.font = font;
+    w = ctx.measureText(text).width;
+    textWidths.set(k, w);
+  } else {
+    ctx.font = font;
+  }
+  return w;
 }
 
 function sameKeys(a, b) {
@@ -675,16 +776,28 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
   const LP = paper ? o.paperText.labelPx : SCREEN_LABEL_PX;
   const P = paper ? PAPER_PRIO : PRIO;
   const offsets = project.labelOffsets || {};
-  const measure = (text, px, weight = 'normal') => {
-    ctx.font = canvasFont(px, weight);
-    return ctx.measureText(text).width;
-  };
+  // Widths do not change with the zoom (text px are fixed): kept across frames (measureWidth).
+  const measure = (text, px, weight = 'normal') => measureWidth(ctx, text, px, weight);
   const fixtures = fixtureObstacles(project);
   const columns = fixtures.filter((f) => f.column);
   const soft = fixtures.filter((f) => !f.column);
   let wallBoxes = [];
   // Diagonal walls by their real outline (poly; their bounding box would cover the rooms beside them).
   try { wallBoxes = wallPolygons(project, derived).map((w) => (w.orient === 'd' ? { ...w.box, poly: w.points } : w.box)); } catch (_) { wallBoxes = []; }
+  // Paper: the finish layers on room faces are printed black as part of their walls (output.js
+  // drawPaperWalls), so a room name keeps off them too (review 2026-10-25: the turned 예시 세대 A at 1:75 wrote
+  // '화장실2' into the 화장실's tiled wall, which is off the bare wall but not off the print's black).
+  let nameWalls = wallBoxes;
+  if (paper) {
+    try {
+      const fin = finishPolygons(project, derived).map((f) => {
+        const b = boxOf(f.points);
+        const axis = f.points.every((p) => [b.minX, b.maxX].some((x) => Math.abs(p.x - x) < 0.5) && [b.minY, b.maxY].some((y) => Math.abs(p.y - y) < 0.5));
+        return axis ? b : { ...b, poly: f.points };
+      });
+      nameWalls = wallBoxes.concat(fin);
+    } catch (_) { nameWalls = wallBoxes; }
+  }
   const extra = Array.isArray(o.textObstacles) ? o.textObstacles.filter(Boolean) : [];
   const items = [];
   let order = 0;
@@ -769,7 +882,18 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         // before a name would be written over a value.
         let innerPoly = null;
         if (slanted) { try { innerPoly = roomInnerPolygon(r, project, derived); } catch (_) { innerPoly = null; } }
-        if (paper) cands.push(...paperNameSpots(r.face.points, spot, scale, mk, innerPoly));
+        if (paper) {
+          cands.push(...paperNameSpots(r.face.points, spot, scale, mk, innerPoly));
+          // A one-line name that finds no free spot may still fit as two lines ('화장실' / '2'), before the
+          // least-overlap fallback would put it onto a wall (review 2026-10-25: 예시 세대 A turned, 1:75).
+          if (texts.length === 1 && named) {
+            const wrapped = wrapName(text);
+            if (wrapped.length > 1) {
+              const mk2 = (s, at) => roomCand(at, wrapped, style, s, rot, hText);
+              cands.push(...paperNameSpots(r.face.points, spot, scale, mk2, innerPoly));
+            }
+          }
+        }
       }
       const id = `name:${r.roomId}`;
       const moved = !!(off && named);
@@ -778,7 +902,11 @@ export function layoutScreenText(ctx, view, project, derived, geo, font, o) {
         // Paper: a name placed by hand goes with the other texts placed by hand, before the values,
         // and its H right after it (review 0.5.0: the H came first, found no name and was lost).
         prio: named ? (paper && moved ? P.moved : P.name) : P.placeholder, sub: -(r.area || 0),
-        mustShow: paper || o.forceShow === key, hard: columns.concat(extra), soft,
+        // Paper: a name is never written onto a wall (the walls are hard; a name moved by hand stays put).
+        mustShow: paper || o.forceShow === key, hard: paper && !moved ? columns.concat(extra, nameWalls) : columns.concat(extra), soft,
+        // Paper, no free spot: the least overlap among the spots off the walls (a name over a number
+        // still reads; half of it in the black wall does not), and only when there is none, anywhere.
+        fallback: paper && !moved ? (all) => all.filter((c) => c.box && !nameWalls.some((h) => obstacleHit(c.box, null, h))) : null,
         boxOf: paper ? (c) => c.box : (c) => c.nameBox,
       });
       if (hText && !tiny) {
@@ -1262,8 +1390,12 @@ function resolveText(items) {
     }
     // Nothing free: the spot that overlaps least (columns count four times), not simply the first
     // (review 0.5.0: on paper, where everything is shown, crowded rooms piled texts on one spot).
-    // it.fallback: the candidates this choice may take (window / door labels: the attached ones).
-    if (!pick && it.mustShow) pick = leastOverlap(it.fallback || cands, boxOf, placed, it, partsOf);
+    // it.fallback: the candidates this choice may take (window / door labels: the attached ones), or a
+    // function of the candidates (paper room names: those clear of the walls, when there are any).
+    if (!pick && it.mustShow) {
+      const fb = typeof it.fallback === 'function' ? it.fallback(cands) : it.fallback;
+      pick = leastOverlap(fb && fb.length ? fb : cands, boxOf, placed, it, partsOf);
+    }
     if (!pick) continue;
     chosen.set(it.id, pick);
     itemOf.set(it.id, it);

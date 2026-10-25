@@ -231,7 +231,11 @@ export function installRotate(DocStore) {
     const prevRooms = ((state.derived && state.derived.rooms) || []).filter((r) => r && r.face && Array.isArray(r.face.points));
     const prevSolve = state.derived && state.derived.solve;
     const movedPrev = {
-      rooms: prevRooms.map((r) => ({ roomId: r.roomId, face: { points: r.face.points.map(turn.point), nodeIds: (r.face.nodeIds || []).slice() } })),
+      rooms: prevRooms.map((r) => ({ roomId: r.roomId, faceIndex: r.faceIndex, face: { points: r.face.points.map(turn.point), nodeIds: (r.face.nodeIds || []).slice() } })),
+      // The faces themselves (model.js derive opts.sameGraph): kept where the turned corners do not give
+      // them again.
+      faces: ((state.derived && state.derived.faces) || []).filter((f) => f && Array.isArray(f.nodeIds) && Array.isArray(f.edgeIds))
+        .map((f) => ({ nodeIds: f.nodeIds.slice(), edgeIds: f.edgeIds.slice() })),
       // The state's 'fold' warnings and wall thicknesses (model.js foldsOf): a value that pressed two
       // walls into each other stays named after the turn (they name values and walls, which a turn
       // keeps). Without them the fold became an 'overlap' (벽이 겹침) item and a 확인 완료 on it was

@@ -60,6 +60,7 @@
 //   - 설비가 벽보다 김: a wall fixture longer than the room side it stands on (fixtures.js centres a
 //     measured one: 확인필요 with a ※ note; an unmeasured default length is drawn shortened: 참고).
 //   - 실 밖 설비: a free-standing fixture whose centre is in no room.
+//   - 벽에 걸친 설비: a free-standing fixture (not a column or stair) whose box reaches into a wall.
 //   - 기둥: a column standing in a window / door opening, or deeper than its room (measured depth).
 //   - 계단: a stair whose measured size does not fit its room (no check against openings).
 //   - 확인필요 flags set by the user: on measures, walls, openings, fixtures and room heights.
@@ -77,8 +78,8 @@
 //   axis sides only; the 다시 확인 median includes diagonal values.
 
 import { DEFAULT_SETTINGS } from './model.js';
-import { fixtureRoomSide, normalizeFixture, isColumn, isStair, fixtureBounds, depthInRoom, freeColumnSticksOut, fixtureExtents, freeFixturesOutside } from './fixtures.js';
-import { sidesForEdge } from './rooms.js';
+import { fixtureRoomSide, normalizeFixture, isColumn, isStair, fixtureBounds, depthInRoom, freeColumnSticksOut, fixtureExtents, freeFixturesOutside, fixtureCrossesWalls, keepsInRoom } from './fixtures.js';
+import { sidesForEdge, measureSideKey } from './rooms.js';
 import { thicknessPriors, sketchInnerLength, straightDiagonalJoints } from './solver.js';
 import { pointInPolygon, segmentIntersection } from './geom.js';
 import { twoSideKey, resolvedKeys, isKeyResolved, legacyKeyPattern } from './checkkeys.js';
@@ -108,6 +109,7 @@ export const CATEGORY_LABELS = Object.freeze({
   fixtureLong: '설비가 벽보다 김',
   fixtureDeep: '기둥이 실보다 김',
   fixtureOutside: '실 밖 설비',
+  fixtureWall: '벽에 걸친 설비',
   columnOpening: '기둥과 창·문 겹침',
   stairFit: '계단이 실보다 김',
   userMeasure: '확인필요',
@@ -124,7 +126,7 @@ export const BOTH_VALUES_NOTE = '※ 괄호 안은 반대쪽 실에서 잰 값�
 const CATEGORY_ORDER = [
   'closure', 'overall', 'twoSide', 'outlier', 'fold', 'residual', 'absorbed', 'conflict',
   'userMeasure', 'userWall', 'userOpening', 'userFixture', 'userRoom',
-  'openingWide', 'openingOverlap', 'columnOpening', 'fixtureLong', 'fixtureDeep', 'fixtureOutside', 'stairFit', 'overlap', 'cross', 'dangling',
+  'openingWide', 'openingOverlap', 'columnOpening', 'fixtureLong', 'fixtureDeep', 'fixtureOutside', 'fixtureWall', 'stairFit', 'overlap', 'cross', 'dangling',
   'twoSidePair', 'openingFit', 'gapPlaced', 'unmeasured',
 ];
 
@@ -152,7 +154,7 @@ const num = (v) => (isNum(v) ? v : null);
 // apart, split evenly) came out 25.49999 on one device and 25.50001 on the one that opened its file, and the
 // item said '25mm' there and '26mm' here (round-trip check 2026-10-24).
 const plain = (v) => (isNum(v) ? String(Math.round(Math.round(v * 100) / 100)) : '');
-const sideKeyOf = (m) => [m.from, m.to].sort().join('-');
+const sideKeyOf = measureSideKey;
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
 class UnionFind {
@@ -339,6 +341,24 @@ function edgeLocation(ctx, edgeId) {
   return roomId ? `${ctx.label(roomId)} 안 ${noun}` : `바깥 ${noun}`;
 }
 
+// Which end of wall e the node is, seen along the wall: '위쪽' | '아래쪽' | '왼쪽' | '오른쪽' | '오른쪽 위' …
+// (y down). A wall drawn h / v names one way; a diagonal both when it leans clearly both ways.
+function endDirectionWord(ctx, e, nodeId) {
+  const P = ctx.nodeMap.get(nodeId), Q = ctx.nodeMap.get(nodeId === e.a ? e.b : e.a);
+  let dx = P && Q ? P.x - Q.x : 0, dy = P && Q ? P.y - Q.y : 0;
+  if (Math.hypot(dx, dy) < 1e-6 && e.sketch) {
+    const k = nodeId === e.b ? 1 : -1;
+    dx = k * (e.sketch.dx || 0); dy = k * (e.sketch.dy || 0);
+  }
+  const l = Math.hypot(dx, dy) || 1;
+  const ux = dx / l, uy = dy / l;
+  const xWord = ux > 0 ? '오른쪽' : '왼쪽', yWord = uy > 0 ? '아래쪽' : '위쪽';
+  if (e.orient === 'h') return xWord;
+  if (e.orient === 'v') return yWord;
+  if (Math.abs(ux) > 0.38 && Math.abs(uy) > 0.38) return `${xWord} ${uy > 0 ? '아래' : '위'}`;
+  return Math.abs(ux) >= Math.abs(uy) ? xWord : yWord;
+}
+
 // Innermost room containing a world point. → roomId | null
 function roomAtPoint(ctx, pt) {
   let best = null, bestArea = Infinity;
@@ -416,6 +436,7 @@ export function runChecks(project, derived, opts = {}) {
     seen.add(it.key);
     out.push({ ...it, resolved: isKeyResolved(resolved, it.key), _i: index });
   });
+  numberSameTexts(out);
   const rank = (c) => {
     const i = CATEGORY_ORDER.indexOf(c);
     return i < 0 ? CATEGORY_ORDER.length : i;
@@ -426,10 +447,55 @@ export function runChecks(project, derived, opts = {}) {
   return out;
 }
 
+// Items whose whole message is the same (final check 2026-10-25: 5× '거실 오른쪽 벽: 벽 두 개가 겹쳐 그려졌습니다.
+// 하나를 지워 주세요.', 4× '거실 오른쪽 벽: 확인필요로 표시했습니다.', 2× '신발장: 어느 실에도 없는 설비입니다.')
+// could only be told apart with [위치 보기]. As the loose ends are numbered (drawingChecks), each gets its
+// order across the plan in its place description (the text before the first ': '): '(왼쪽에서 N번째)'
+// when they spread along x, '(위에서 N번째)' along y, merged into an existing '(…)'. Its ※ note, where it
+// starts with the same description, says the same. The keys stay. items: changed in place.
+function numberSameTexts(items) {
+  const groups = new Map();
+  for (const it of items) {
+    if (!it || typeof it.message !== 'string' || it.message.indexOf(': ') <= 0) continue;
+    if (!groups.has(it.message)) groups.set(it.message, []);
+    groups.get(it.message).push(it);
+  }
+  const pointOf = (it) => {
+    const w = it.where || {};
+    if (w.point && isNum(w.point.x) && isNum(w.point.y)) return w.point;
+    const ps = (w.points || []).filter((q) => q && isNum(q.x) && isNum(q.y));
+    if (!ps.length) return null;
+    return { x: ps.reduce((a, q) => a + q.x, 0) / ps.length, y: ps.reduce((a, q) => a + q.y, 0) / ps.length };
+  };
+  for (const [message, list] of groups) {
+    if (list.length < 2) continue;
+    const at = list.map(pointOf);
+    if (at.some((q) => !q)) continue;
+    const xs = at.map((q) => q.x), ys = at.map((q) => q.y);
+    const alongX = Math.max(...xs) - Math.min(...xs) >= Math.max(...ys) - Math.min(...ys);
+    const order = list.map((it, i) => ({ it, q: at[i] }))
+      .sort((a, b) => (alongX ? a.q.x - b.q.x || a.q.y - b.q.y : a.q.y - b.q.y || a.q.x - b.q.x) || (a.it.key < b.it.key ? -1 : 1));
+    const loc = message.slice(0, message.indexOf(': '));
+    order.forEach(({ it }, i) => {
+      const q = `${alongX ? '왼쪽' : '위'}에서 ${i + 1}번째`;
+      const loc2 = loc.endsWith(')') ? `${loc.slice(0, -1)}, ${q})` : `${loc}(${q})`;
+      it.message = loc2 + message.slice(loc.length);
+      if (typeof it.note === 'string' && it.note.startsWith(`※ ${loc}`)) it.note = `※ ${loc2}${it.note.slice(2 + loc.length)}`;
+    });
+  }
+}
+
 // Number of unresolved 확인필요 items (the [검사 N] badge).
 export function countForBadge(items) {
   return (items || []).filter((it) => it && it.level === LEVEL_CHECK && !it.resolved).length;
 }
+
+// At most this many ※ lines of 확인필요 items are printed; the rest are counted on one more line
+// (PRINT_NOTES_MORE). Review 2026-10-25: the notes are one column and the layout takes their band from
+// the plan, so 18 lines took 예시 세대 A from 1:60 to 1:75, 40 to 1:150, and from about 45 the plan was pushed
+// over the title and off the top of the paper.
+export const MAX_PRINT_ITEM_NOTES = 9;
+export const PRINT_NOTES_MORE = (n) => `※ 그 밖의 확인필요 ${n}건은 검사 목록에 있습니다.`;
 
 // ※ lines for the printed drawing (plan §1-2 "주기", §6, §7).
 //   options: { drawingOnly, bothValues } — 그림만 prints no notes at all.
@@ -437,8 +503,15 @@ export function notesForPrint(items, options = {}) {
   if (options && options.drawingOnly) return [];
   const lines = [];
   const add = (s) => { if (s && !lines.includes(s)) lines.push(s); };
+  const itemNotes = [];
   for (const it of items || []) {
-    if (it && it.level === LEVEL_CHECK && !it.resolved && it.note) add(it.note);
+    if (it && it.level === LEVEL_CHECK && !it.resolved && it.note && !itemNotes.includes(it.note)) itemNotes.push(it.note);
+  }
+  if (itemNotes.length > MAX_PRINT_ITEM_NOTES) {
+    itemNotes.slice(0, MAX_PRINT_ITEM_NOTES - 1).forEach(add);
+    add(PRINT_NOTES_MORE(itemNotes.length - (MAX_PRINT_ITEM_NOTES - 1)));
+  } else {
+    itemNotes.forEach(add);
   }
   // Only sides that no measure fixes are drawn off scale (a side set by a neighbour's value is not).
   if ((items || []).some((it) => it && it.category === 'unmeasured' && !it.resolved
@@ -1279,15 +1352,21 @@ function engineWarningChecks(ctx, push, explain, opts = {}) {
         const check = !!w.check && !own && !along;
         const diag = x.side.orient === 'd';
         const why = own ? OWN_REASON[own] : along ? AXIS_REASON[along] : '';
+        // The facing side of the same room it contradicts (model.js computeWarnings `opposite`).
+        const opp = w.opposite && ctx.measureInfo.get(w.opposite.measureId);
+        const facing = opp && opp.valid && opp.m.room === x.m.room
+          ? ` 마주 보는 ${sideDirectionWord(opp.side)} 벽: ${plain(opp.m.value)} (${plain(Math.abs(opp.m.value - x.m.value))}mm 차이).` : '';
         push({
           key: `residual:${x.m.id}=${v}`,
           level: check ? LEVEL_CHECK : LEVEL_INFO,
           category: 'residual',
           message: diag
             ? `${loc}: 잰 사선 길이 ${v}, 다른 길이로 계산하면 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 사선 길이나 주변 벽 길이를 확인해 주세요.${why}`
-            : `${loc}: 잰 값 ${v}, 그림 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 다른 길이 값과 맞지 않습니다.${why}`,
+            : `${loc}: 잰 값 ${v}, 그림 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 다른 길이 값과 맞지 않습니다.${facing}${why}`,
           where,
-          note: check ? `※ ${loc} ${v}: 다른 길이와 ${plain(w.amount)}mm 안 맞음 — 확인필요` : null,
+          note: check
+            ? (facing ? `※ ${loc} ${v} / 마주 보는 벽 ${plain(opp.m.value)}: 안 맞음 — 확인필요` : `※ ${loc} ${v}: 다른 길이와 ${plain(w.amount)}mm 안 맞음 — 확인필요`)
+            : null,
         });
       } else if (w.type === 'absorbed') {
         const own = explain.own(x.m.id, ['twoSide', 'overall', 'outlier']);
@@ -1686,19 +1765,42 @@ function drawingChecks(ctx, push, explain = null) {
       edgesAt.get(id).push(e);
     }
   }
+  const loose = [];
   for (const [nodeId, d] of degree) {
     if (d !== 1) continue;
     const e = edgesAt.get(nodeId)[0];
     const n = ctx.nodeMap.get(nodeId);
+    // Which end (review 2026-10-25): the two loose ends of one wall gave two identical lines.
+    loose.push({ nodeId, e, n, loc: ctx.edgeLocation(e.id), end: `${endDirectionWord(ctx, e, nodeId)} 끝` });
+  }
+  // Several walls in the same place description ('거실 안 벽', '바깥 벽'): their order across the plan,
+  // as sideLocation numbers same-direction sides (recheck 2026-10-25: two wing walls hanging into a 거실
+  // gave the same line twice, a busy plan 10–15 times).
+  const groups = new Map();
+  for (const x of loose) {
+    const k = `${x.e.kind === 'divider' ? 'd' : 'w'}|${x.loc}|${x.end}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(x);
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const xs = list.map((x) => x.n.x), ys = list.map((x) => x.n.y);
+    const alongX = Math.max(...xs) - Math.min(...xs) >= Math.max(...ys) - Math.min(...ys);
+    const sorted = list.slice().sort((p, q) => (alongX ? p.n.x - q.n.x || p.n.y - q.n.y : p.n.y - q.n.y || p.n.x - q.n.x));
+    sorted.forEach((x, i) => {
+      const q = `${alongX ? '왼쪽' : '위'}에서 ${i + 1}번째`;
+      x.loc = x.loc.endsWith(')') ? `${x.loc.slice(0, -1)}, ${q})` : `${x.loc}(${q})`;
+    });
+  }
+  for (const { nodeId, e, n, loc, end } of loose) {
     const divider = e.kind === 'divider';
-    const loc = ctx.edgeLocation(e.id);
     push({
       key: `dangling:${nodeId}`,
       level: LEVEL_CHECK, category: 'dangling',
       message: divider
-        ? `${loc}: 선 끝이 벽에 닿지 않아 구역이 나뉘지 않습니다. 끝을 벽까지 이어 주세요.`
+        ? `${loc}: ${end}이 벽에 닿지 않아 구역이 나뉘지 않습니다. 끝을 벽까지 이어 주세요.`
         // ht #12: model.moveNode joins a loose end dropped on a wall, so say how to fix it in place.
-        : `${loc}: 벽 끝이 다른 벽에 이어지지 않았습니다. [선택]으로 끝을 벽 위에 끌어 놓으면 이어집니다. 일부러 그린 짧은 벽이면 [확인 완료]를 누르세요.`,
+        : `${loc}: ${end}이 다른 벽에 이어지지 않았습니다. [선택]으로 끝을 벽 위에 끌어 놓으면 이어집니다. 일부러 그린 짧은 벽이면 [확인 완료]를 누르세요.`,
       where: { edgeId: e.id, nodeId, point: { x: n.x, y: n.y }, points: [{ x: n.x, y: n.y }] },
       note: null,
     });
@@ -2215,8 +2317,11 @@ function fixtureChecks(ctx, push, explain = null) {
     if (!f || !f.id || !f.wall) continue;
     let rs = null;
     try { rs = fixtureRoomSide(ctx.project, ctx.derived, f); } catch (_) { rs = null; }
-    if (!rs || !(rs.length > 0)) continue;
-    const avail = rs.length;
+    // A side of no length (a wall drawn 0 mm long) is 0 mm whatever the solve's rounding left there: the
+    // item came and went between the device that drew it and every device that opened the file (review
+    // 2026-10-25, a 보일러 on a 0 mm wall). A folded side (clearly negative) has no item.
+    if (!rs || !(rs.length > -1)) continue;
+    const avail = Math.max(0, rs.length);
     const loc = ctx.sideLocation(rs.roomId, rs.sideKey);
     const name = fixtureName(raw);
     const at = { x: f.x, y: f.y };
@@ -2303,6 +2408,31 @@ function fixtureChecks(ctx, push, explain = null) {
       message: `${name}: 어느 실에도 없는 설비입니다. 자리를 확인해 주세요.`,
       where: { fixtureId: f.id, point: at, points: [at] },
       note: `※ ${name}: 실 밖에 있음 — 확인필요`,
+    });
+  }
+  // A free-standing fixture whose box reaches into or through a wall (final check 2026-10-25: a sink moved
+  // after it had been shortened on a wall, a free sink turned with [↻ 회전], a 수납장 typed wider than its
+  // room; fixtures.js moves such a fixture clear of the wall or onto it where it can, and this names the
+  // rest). Columns and stairs have their own items; a fixture in no room has 실 밖 설비. Like the column
+  // items, 참고 while the scale is not settled (the room is still the sketch's guess).
+  const outsideIds = new Set(outside.map((w) => w.fixtureId));
+  for (const raw of ctx.project.fixtures || []) {
+    const f = normalizeFixture(raw);
+    if (!f || !f.id || f.wall || keepsInRoom(f) || outsideIds.has(f.id)) continue;
+    let walls = [];
+    try { walls = fixtureCrossesWalls(ctx.project, ctx.derived, f); } catch (_) { walls = []; }
+    if (!walls.length) continue;
+    const name = fixtureName(raw);
+    const at = { x: f.x, y: f.y };
+    const dr = ((ctx.derived && ctx.derived.rooms) || []).filter((r) => r.face && r.face.points && pointInPolygon(at, r.face.points))
+      .sort((a, b) => a.area - b.area)[0];
+    const { ex, ey } = fixtureExtents(f);
+    push({
+      key: `fixtureWall:${f.id}:${plain(ex)}:${plain(ey)}:${plain(f.x)}:${plain(f.y)}`,
+      level: fit.level, category: 'fixtureWall',
+      message: `${dr ? `${ctx.label(dr.roomId)} ` : ''}${name}: 설비가 벽에 걸쳐 있습니다.${fit.tail(' 자리나 크기를 확인해 주세요.')}`,
+      where: { fixtureId: f.id, roomId: dr ? dr.roomId : undefined, edgeId: walls[0], point: at, points: [at] },
+      note: fit.note(`※ ${dr ? `${ctx.label(dr.roomId)} ` : ''}${name}: 벽에 걸침 — 확인필요`),
     });
   }
 }

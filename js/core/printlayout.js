@@ -2,8 +2,10 @@
 //
 //   computePrintLayout(project, derived, options) → layout
 //     options: { scale: 'auto' | 50 | 60 | 75 | 100 | 150, dpi = 300, noteLines = 0,
-//                orientation: 'auto' (default) | 'portrait' | 'landscape' }
-//     layout:  { scale, autoScale, manual, warning, overflow, empty (no walls), dpi, pxPerPaperMM,
+//                orientation: 'auto' (default) | 'portrait' | 'landscape', memo (default true: the
+//                memo strokes are part of the content) }
+//     layout:  { scale, autoScale, offsetScale (the editor's automatic scale: no memo, either paper
+//                orientation; hand-moved offsets are converted at it), manual, warning, overflow, empty (no walls), dpi, pxPerPaperMM,
 //                orientation ('portrait' | 'landscape'),
 //                worldToPaper(pt) → paper mm, paperToPx(pt) → px, toPx(pt) → px (world → canvas px),
 //                paperRect, printRect, contentRect, planRect, titleRect, notesRect (paper mm rects
@@ -18,15 +20,19 @@
 //   the plan larger (the larger scale); at the same scale a plan wider than tall (with its dimension
 //   rows) lies on landscape, a taller one stands on portrait. With a scale picked by hand: the
 //   orientation where it fits, else by the plan's shape. Decided by the drawing only, like the rest.
-// - The layout depends only on the drawing, never on the output choices: the title band is reserved
-//   whenever the project has a title, the dimension rows and labels are always counted, and the notes
-//   band holds `noteLines` (the caller passes the largest set of notes any choice can print). So
+// - The layout depends only on the drawing, never on the 종류 or the other output choices: the title band
+//   is reserved whenever the project has a title, the dimension rows and labels are always counted, and
+//   the notes band holds `noteLines` (the caller passes the largest set of notes any choice can print). So
 //   '전체 도면' and '그림만' (and 제목 포함 on/off) overlay exactly (plan: "축척과 도면 위치는 출력
-//   선택과 상관없이 고정").
+//   선택과 상관없이 고정"). The one exception is 메모 포함: the handwritten memo is counted when it is
+//   printed (opts.memo, ui/output.js printsMemo; review 2026-10-25: a memo written beside the plan was
+//   printed off the paper), and takes no room when it is not (recheck 2026-10-25: an unprinted memo
+//   shrank the print to 1:75 / 1:100).
 
 import { buildDimensions, placeRowTexts, formatDimValue, DIM_SIDES, layoutAlignedDims, wallPolygons } from './dims.js';
 import { placeLabels, estimateTextWidth, fixtureObstacles } from './labels.js';
 import { placeOpening, slidingLeaves, normalizeOpening } from './openings.js';
+import { validMemo, memoPaperWidth } from './memo.js';
 
 // What the dimensions of diagonal sides (dims.js rule 7, layoutAlignedDims opts.obstacles) keep their
 // numbers off besides the walls and the chains (fixer 2026-10-20, field: 1518 on the 싱크대 after a turn,
@@ -104,9 +110,10 @@ export function notesBandMM(lines) {
 }
 
 // Extent of everything except the title and notes, relative to the plan's outer wall faces, at one
-// scale. → { box: { minX, minY, maxX, maxY } in paper mm with the plan's top-left outer corner at 0,0,
-//            planW, planH, rows }
-export function contentExtent(project, derived, scale, dimsResult = null) {
+// scale. opts.memo === false leaves the memo strokes out (they are counted by default).
+// → { box: { minX, minY, maxX, maxY } in paper mm with the plan's top-left outer corner at 0,0,
+//      planW, planH, rows }
+export function contentExtent(project, derived, scale, dimsResult = null, opts = {}) {
   const dims = dimsResult || buildDimensions(project, derived, {});
   const b = dims.bounds;
   if (!b) return null;
@@ -165,6 +172,16 @@ export function contentExtent(project, derived, scale, dimsResult = null) {
     worldPerUnit: PT_MM * scale, worldPerPaperMM: scale,
   });
   for (const l of labels) grow((l.box.minX - b.minX) * k, (l.box.minY - b.minY) * k, (l.box.maxX - b.minX) * k, (l.box.maxY - b.minY) * k);
+  // The memo strokes with half their printed line width.
+  if (opts.memo !== false) {
+    for (const st of validMemo(project && project.memo)) {
+      const half = memoPaperWidth(st) / 2;
+      for (const p of st.points) {
+        const x = (p.x - b.minX) * k, y = (p.y - b.minY) * k;
+        grow(x - half, y - half, x + half, y + half);
+      }
+    }
+  }
   return { box, planW, planH, rows, bounds: b };
 }
 
@@ -179,29 +196,54 @@ export function computePrintLayout(project, derived, options = {}) {
   // No walls (a new household, or only a memo): nothing to fit, so the largest scale and no warning.
   const empty = !dims || !dims.bounds;
   // The content extent does not depend on the page: one per scale, shared by both orientations.
-  const extents = new Map();
-  const extentAt = (s) => {
-    if (!extents.has(s)) extents.set(s, contentExtent(project, derived, s, dims));
-    return extents.get(s);
+  const extentsOf = (memo) => {
+    const cache = new Map();
+    return (s) => {
+      if (!cache.has(s)) cache.set(s, contentExtent(project, derived, s, dims, { memo }));
+      return cache.get(s);
+    };
   };
+  const memoCounted = options.memo !== false;
+  const extentAt = extentsOf(memoCounted);
 
   // The best fit on one page size.
-  const fitOn = (page, orientation) => {
+  const areaOn = (page) => {
     const printRect = { x: PRINT_MARGIN_MM, y: PRINT_MARGIN_MM, w: page.w - 2 * PRINT_MARGIN_MM, h: page.h - 2 * PRINT_MARGIN_MM };
     const area = { x: printRect.x, y: printRect.y + titleH, w: printRect.w, h: printRect.h - titleH - notesH };
     const fits = (ext) => ext && ext.box.maxX - ext.box.minX <= area.w + 1e-9 && ext.box.maxY - ext.box.minY <= area.h + 1e-9;
+    return { printRect, area, fits };
+  };
+  // The automatic scale on one page size with these extents. → { autoScale, autoExt }
+  const autoOn = (page, extent) => {
+    const { fits } = areaOn(page);
     let autoScale = empty ? AUTO_SCALES[0] : FALLBACK_SCALE, autoExt = null;
     if (!empty) {
       for (const s of AUTO_SCALES) {
-        const ext = extentAt(s);
+        const ext = extent(s);
         if (fits(ext)) { autoScale = s; autoExt = ext; break; }
       }
-      if (!autoExt) autoExt = extentAt(FALLBACK_SCALE);
+      if (!autoExt) autoExt = extent(FALLBACK_SCALE);
     }
+    return { autoScale, autoExt };
+  };
+  const fitOn = (page, orientation) => {
+    const { printRect, area, fits } = areaOn(page);
+    const { autoScale, autoExt } = autoOn(page, extentAt);
     const ext = manual ? (dims && extentAt(manual)) : autoExt;
     return { page, orientation, printRect, area, autoScale, ext, overflow: ext ? !fits(ext) : false };
   };
   const portrait = fitOn(A4_MM, 'portrait'), landscape = fitOn(A4_LANDSCAPE_MM, 'landscape');
+  // Texts moved by hand are paper mm at the scale the editor shows them with: the automatic scale of the
+  // print without the memo, the paper's orientation chosen freely (main.js printScale, ui/wiring.js
+  // autoPrintScale). With 메모 포함 the print's own automatic scale may be smaller (a memo beside the plan)
+  // and with a scale picked by hand the other orientation's: converted at those, the moved name of 거실
+  // printed 2.6 paper mm from where the editor showed it (final check 2026-10-25). → offsetScale
+  const editorAuto = (port, land) => Math.min(port, land);
+  let offsetScale = editorAuto(portrait.autoScale, landscape.autoScale);
+  if (memoCounted && validMemo(project && project.memo).length) {
+    const bare = extentsOf(false);
+    offsetScale = editorAuto(autoOn(A4_MM, bare).autoScale, autoOn(A4_LANDSCAPE_MM, bare).autoScale);
+  }
   let fit = portrait;
   if (options.orientation === 'landscape') fit = landscape;
   else if (options.orientation !== 'portrait' && !empty) {
@@ -236,7 +278,7 @@ export function computePrintLayout(project, derived, options = {}) {
   const paperToPx = (p) => ({ x: p.x * pxPerPaperMM, y: p.y * pxPerPaperMM });
   const toPx = (p) => paperToPx(worldToPaper(p));
   return {
-    scale, autoScale, manual: !!manual, warning, overflow, empty, dpi, pxPerPaperMM, orientation: fit.orientation,
+    scale, autoScale, offsetScale, manual: !!manual, warning, overflow, empty, dpi, pxPerPaperMM, orientation: fit.orientation,
     worldToPaper, paperToPx, toPx,
     paperRect: { x: 0, y: 0, w: page.w, h: page.h },
     printRect, planRect, contentRect,

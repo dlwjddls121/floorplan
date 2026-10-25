@@ -31,15 +31,32 @@ const MIGRATIONS = [
 ];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-// Re-ask the browser for persistent storage at most this often while it keeps saying no. Chrome decides
-// silently (no prompt) and becomes more willing after the app is installed, so a later retry can succeed.
-const PERSIST_RETRY_MS = 7 * DAY_MS;
+// Re-ask the browser for persistent storage, in a browser tab, at most this often while it keeps saying no.
+// Chrome decides silently (no prompt) and becomes more willing after the app is installed, so a later
+// retry can succeed. The installed app (display-mode standalone) asks on every start while not persisted,
+// and at once when the last request was made in a tab: the usual first visit is a Chrome tab, which is
+// refused, and a 7-day wait left the household plans (on the device only) as best-effort storage for the
+// first week after installing (review 2026-10-25). A tab still waits, because some browsers (Firefox)
+// do show a prompt for persist().
+const PERSIST_RETRY_MS = DAY_MS;
+
+// 'standalone' (opened from the home-screen icon / installed app) or 'browser'.
+function displayMode() {
+  try {
+    if (typeof matchMedia === 'function' && matchMedia('(display-mode: standalone)').matches) return 'standalone';
+    if (typeof navigator !== 'undefined' && navigator.standalone === true) return 'standalone';
+  } catch (_) { /* unknown: a tab */ }
+  return 'browser';
+}
 // navigator.storage calls are raced against this timeout: some environments (e.g. headless Chrome)
 // never settle them, and opening the app must not hang on a nice-to-have.
 const PERSIST_TIMEOUT_MS = 2000;
 
 let dbName = 'floorplan-db';
 let dbPromise = null;
+// The open connection itself, once dbPromise has resolved (null while opening or after it closed): the
+// pagehide write (saveProjectNow) must be issued synchronously, without awaiting anything.
+let openDb = null;
 
 // ---------------------------------------------------------------------------------------------------------
 // Errors
@@ -139,10 +156,12 @@ function openDatabase() {
       db.onversionchange = () => {
         db.close();
         dbPromise = null;
+        if (openDb === db) openDb = null;
       };
       // The browser may close the connection on its own (e.g. storage cleared): reopen on next use.
       db.onclose = () => {
         dbPromise = null;
+        if (openDb === db) openDb = null;
       };
       resolve(db);
     };
@@ -164,10 +183,14 @@ function openDatabase() {
 
 function getDb() {
   if (!dbPromise) {
-    dbPromise = openDatabase().catch((err) => {
-      dbPromise = null; // allow a later retry
+    const p = openDatabase().then((db) => {
+      if (dbPromise === p) openDb = db;
+      return db;
+    }, (err) => {
+      if (dbPromise === p) dbPromise = null; // allow a later retry
       throw err;
     });
+    dbPromise = p;
   }
   return dbPromise;
 }
@@ -201,6 +224,7 @@ async function withStores(storeNames, mode, action, work) {
     } catch (err) {
       if (attempt === 0 && err && err.name === 'InvalidStateError') {
         dbPromise = null;
+        if (openDb === db) openDb = null;
         continue;
       }
       throw toStorageError(err, action);
@@ -302,8 +326,9 @@ function withTimeout(promise, ms, fallback) {
   return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(fallback), ms))]);
 }
 
-// Ask for persistent storage on the first launch, then again at most every PERSIST_RETRY_MS while the
-// browser keeps refusing. The outcome is recorded in meta 'persist' and reported by storageStatus().
+// Ask for persistent storage on the first launch; while the browser keeps refusing, again on every start
+// of the installed app and at most every PERSIST_RETRY_MS in a tab. The outcome is recorded in meta
+// 'persist' (with the display mode of the last request) and reported by storageStatus().
 async function requestPersistence() {
   const sm = typeof navigator !== 'undefined' ? navigator.storage : null;
   if (!sm || typeof sm.persist !== 'function') return { supported: false, persisted: false };
@@ -315,7 +340,8 @@ async function requestPersistence() {
   try { record = await readMeta('persist'); } catch (_) { /* meta is best-effort */ }
   const now = Date.now();
   const last = record ? timeOf(record.lastRequestedAt) : null;
-  const shouldAsk = !persisted && (last === null || now - last >= PERSIST_RETRY_MS);
+  const mode = displayMode();
+  const shouldAsk = !persisted && (last === null || mode === 'standalone' || now - last >= PERSIST_RETRY_MS);
   if (shouldAsk) {
     let granted = false;
     try {
@@ -329,6 +355,7 @@ async function requestPersistence() {
       lastRequestedAt: iso,
       granted: persisted,
       requestCount: ((record && record.requestCount) || 0) + 1,
+      mode,
     };
   } else {
     record = Object.assign({ key: 'persist' }, record || {}, { granted: persisted });
@@ -346,6 +373,7 @@ export function configureStorage({ name } = {}) {
   if (name) {
     if (dbPromise) dbPromise.then((db) => db.close()).catch(() => {});
     dbPromise = null;
+    openDb = null;
     dbName = name;
   }
 }
@@ -389,6 +417,29 @@ export async function saveProject(project) {
     await promisifyRequest(s.projects.put(record));
     return record;
   });
+}
+
+// The last-moment write when the page is going away (pagehide: a tab or window closed, review 2026-10-25).
+// saveProject awaits the connection and reads the stored copy before it writes, and a closing page is gone
+// before the write is even issued. This issues the put at once, in this call, on the connection that is
+// already open, without that read, and commits it; the stored exportedAt is not merged (the caller's copy
+// carries the latest export it knows). It may still not land if the page goes first; the caller keeps its
+// normal save as well. → true when the write was issued, false when nothing was (no open connection, an
+// invalid project, or the transaction could not start). Never throws.
+export function saveProjectNow(project) {
+  const db = openDb;
+  if (!db) return false;
+  try {
+    checkSavable(project);
+    const tx = db.transaction(['projects'], 'readwrite', { durability: 'strict' });
+    tx.onerror = () => {};
+    tx.onabort = () => {};
+    tx.objectStore('projects').put(project);
+    if (typeof tx.commit === 'function') tx.commit();
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // Records a successful export of a stored project without rewriting the whole document.

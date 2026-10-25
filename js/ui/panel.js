@@ -1,6 +1,7 @@
 // Bottom panels of the editor (dev/DESIGN.md §5, plan §2-4, §4):
 //   - length panel + numpad for a tapped wall ("방1 쪽 [ 2,900 ] / 거실 쪽 [      ]")
 //   - wall-thickness entry (the [두께] button)
+//   - the [외벽] switch of a wall (core/exterior.js: automatic, or set by hand for this wall)
 //   - room panel (the current name with [이름 바꾸기] (on-screen keyboard), name presets with
 //     auto-numbering, H with the numpad, [실 아님(설비)]); a tap on a room's name on the plan opens it
 //     with the name field already open
@@ -9,9 +10,14 @@
 //
 // PanelController keeps the editor selection (which wall / room / side is active), because the
 // selection is exactly what the open panel is about. The editor reads `highlight` when drawing.
-import { sidesForEdge } from '../core/rooms.js';
+import { sidesForEdge, measureSideKey } from '../core/rooms.js';
 import { wallThickness } from '../core/openings.js';
+import { exteriorInfo } from '../core/exterior.js';
 import { ROOM_PRESETS, formatMM, TIMING } from './theme.js';
+
+// A length typed but not confirmed is put in on a tap elsewhere only from this size up (smaller: a number
+// not finished, see _flushNumberDraft).
+export const MIN_FLUSH_LENGTH_MM = 100;
 
 // ---- DOM helpers -------------------------------------------------------------------------------
 
@@ -268,9 +274,10 @@ export class PanelController {
   //                        the wall band.
   // Without either: the first side of the tapped wall piece.
   openEdge(edgeId, prefer = null) {
-    this._flushNameDraft();
-    const store = this.ctx.store();
-    const fields = this._buildFields(store, edgeId);
+    // The side a tap meant is decided on the plan as the surveyor saw it: a number still being typed
+    // (here, or in the window/door or fixture panel) is put in next and may move the walls.
+    let store = this.ctx.store();
+    let fields = this._buildFields(store, edgeId);
     let active = -1;
     if (prefer && prefer.at) {
       active = this._fieldAt(store, edgeId, fields, prefer.at, prefer.roomId || null);
@@ -279,6 +286,16 @@ export class PanelController {
       if (active < 0) active = fields.findIndex((f) => f.roomId === prefer.roomId);
     }
     if (active < 0) active = firstPrimary(fields);
+    const want = fields[active] || null;
+    const before = store && store.project;
+    this._leaveDrafts();
+    store = this.ctx.store();
+    if (!store) return;
+    if (store.project !== before) {
+      fields = this._buildFields(store, edgeId);
+      const i = want ? fields.findIndex((f) => f.roomId === want.roomId && f.sideKey === want.sideKey) : -1;
+      active = i >= 0 ? i : firstPrimary(fields);
+    }
     this.state = { mode: 'edge', edgeId, fields, active };
     this.round = null;   // the [확인 ▶] round restarts from the next confirmed side
     this.buffer.reset('');
@@ -287,8 +304,8 @@ export class PanelController {
 
   // opts.editName: open the name field right away (prefilled, selected, keyboard up).
   openRoom(roomId, { editName = false } = {}) {
-    this._flushNameDraft();
-    this.state ={ mode: 'room', roomId, customOpen: !!editName, focusCustom: !!editName };
+    this._leaveDrafts();
+    this.state = { mode: 'room', roomId, customOpen: !!editName, focusCustom: !!editName };
     const room = this._room(roomId);
     this.buffer.reset('');
     if (!room) return this.close();
@@ -308,7 +325,7 @@ export class PanelController {
   // rect = { a, b } world corners as drawn; onConfirm(w, h, typed: { w, h }) creates the room
   // (typed tells which sizes were entered on the numpad, i.e. are real measurements).
   openRect(rect, onConfirm, onCancel) {
-    this._flushNameDraft();
+    this._leaveDrafts();
     const w = roundTo(Math.abs(rect.b.x - rect.a.x), 10);
     const h = roundTo(Math.abs(rect.b.y - rect.a.y), 10);
     this.state = { mode: 'rect', rect, drawn: { w, h }, values: [null, null], active: 0, onConfirm, onCancel };
@@ -330,8 +347,87 @@ export class PanelController {
     }
   }
 
-  close() {
+  // What was typed and not confirmed yet, here and in the other bottom panels (ctx.beforeOpen: the
+  // window/door and fixture panels), is put in before this panel shows something else.
+  _leaveDrafts() {
     this._flushNameDraft();
+    this._flushNumberDraft();
+    if (typeof this.ctx.beforeOpen === 'function') this.ctx.beforeOpen();
+  }
+
+  // A number typed on the numpad but not confirmed with [확인 ▶] is kept when the panel closes or moves
+  // on — a tap on another wall, in a room or on empty space, another tool, another field, [두께] — like a
+  // typed name (review 2026-10-25: 3600 typed and then a tap on the next wall was lost without a word).
+  // It goes into the field it was typed for; the [확인 ▶] round does not move on, and a toast says what
+  // was put in. Nothing happens for an empty field (⌫ / C down to nothing), an unchanged value, or Esc
+  // (close({ discard: true })). → bool (a value was put in)
+  _flushNumberDraft() {
+    const s = this.state;
+    const buf = this.buffer;
+    if (!s || !buf.edited) return false;
+    const parsed = buf.parse();
+    buf.reset('');
+    const store = this.ctx.store();
+    if (!parsed || !store) return false;
+    const v = parsed.value;
+    const said = (what) => this.ctx.toast(`입력하던 값을 넣었습니다: ${what} ${formatMM(v)}mm (↶로 되돌릴 수 있습니다)`, { type: 'ok', ms: 4500 });
+    const refused = (why) => this.ctx.toast(`입력하던 값(${formatMM(v)})은 넣지 않았습니다. ${why}`, { type: 'warn', ms: 4500 });
+    if (s.mode === 'edge') {
+      const f = s.fields && s.fields[s.active];
+      if (!f) return false;
+      if (v > 100000) { refused('값이 너무 큽니다. mm 단위로 넣어 주세요.'); return false; }
+      // A digit or two typed and then a tap elsewhere is a number not finished (or typed for the wrong
+      // wall), not a wall of 2 or 27 mm (recheck 2026-10-25: the plan collapsed around a 2 mm room).
+      // [확인 ▶] still puts such a value in.
+      if (v < MIN_FLUSH_LENGTH_MM) { refused('벽 길이로는 너무 작습니다. 이 값을 넣으려면 [확인 ▶]을 눌러 주세요.'); return false; }
+      const m = this._measure(store, f.roomId, f.sideKey);
+      const same = m && !m.computed && m.value === v
+        && (m.parts && m.parts.length > 1 ? m.parts : [m.value]).join('+') === parsed.parts.join('+');
+      if (same) return false;
+      const anchor = () => sideMid(this.ctx.store(), f.roomId, f.sideKey);
+      const ok = this._hold(anchor, () => this.ctx.command(() => store.setMeasure(f.roomId, f.sideKey, v, parsed.parts), '길이 입력'));
+      if (ok) said(`${this.ctx.roomLabel(f.roomId)} 쪽 길이`);
+      return !!ok;
+    }
+    if (s.mode === 'thickness') {
+      if (v < 10 || v > 1500) { refused('벽 두께는 10~1500mm 사이로 넣어 주세요.'); return false; }
+      const edge = store.project.edges.find((e) => e.id === s.edgeId);
+      if (!edge || edge.thickness === v) return false;
+      const ok = this._hold(() => edgeMid(this.ctx.store(), s.edgeId), () => this.ctx.command(() => store.setWallThickness(s.edgeId, v), '벽 두께'));
+      if (ok) said('벽 두께');
+      return !!ok;
+    }
+    if (s.mode === 'room') {
+      const room = this._room(s.roomId);
+      if (!room) return false;
+      if (v < 500 || v > 10000) { refused('천장고는 500~10000mm 사이로 넣어 주세요.'); return false; }
+      if (room.height === v) return false;
+      this._setRoomFields(s.roomId, { height: v }, '천장고');
+      said(`${this.ctx.roomLabel(s.roomId)} 천장고 H`);
+      return true;
+    }
+    // 'rect': the sizes are used only by [만들기] / [그대로]; leaving the panel drops the rectangle.
+    return false;
+  }
+
+  // opts.discard: Esc, or what the panel was about is gone — a name or number still being typed is
+  // thrown away instead of put in.
+  // opts.discardNumber: a typed name is applied (the name field has its own [취소]), a number not
+  // confirmed is thrown away (no caller since [✕ 닫기] puts the number in, final check 2026-10-25).
+  // The host is shared with the window / door and fixture panels: with nothing of its own shown, this
+  // leaves it alone (final check 2026-10-25: Editor.closePanels closed this panel first, which emptied the
+  // host under an open fixture panel, and that panel then took itself for closed and dropped the size
+  // typed in it).
+  close({ discard = false, discardNumber = false } = {}) {
+    if (!this.state && !(this._body && this.host.contains(this._body))) return;
+    if (discard) {
+      if (this.state) this.state.nameDraft = null;
+      this.buffer.reset('');
+    } else {
+      this._flushNameDraft();
+      if (discardNumber) this.buffer.reset('');
+      else this._flushNumberDraft();
+    }
     const s = this.state;
     this.state = null;
     this.host.hidden = true;
@@ -346,13 +442,13 @@ export class PanelController {
     if (!s) return;
     const store = this.ctx.store();
     if (s.mode === 'edge' || s.mode === 'thickness') {
-      if (!store.project.edges.some((e) => e.id === s.edgeId)) return this.close();
+      if (!store.project.edges.some((e) => e.id === s.edgeId)) return this.close({ discard: true });
       const cur = s.fields[s.active];
       s.fields = this._buildFields(store, s.edgeId);
       const i = cur ? s.fields.findIndex((f) => f.roomId === cur.roomId && f.sideKey === cur.sideKey) : -1;
       s.active = i >= 0 ? i : firstPrimary(s.fields);
     } else if (s.mode === 'room') {
-      if (!this._room(s.roomId)) return this.close();
+      if (!this._room(s.roomId)) return this.close({ discard: true });
     }
     this._render();
   }
@@ -427,6 +523,7 @@ export class PanelController {
 
   _cycleField(step) {
     const s = this.state;
+    this._flushNumberDraft();
     if (s.mode === 'edge' && s.fields.length) {
       s.active = (s.active + step + s.fields.length) % s.fields.length;
     } else if (s.mode === 'rect') {
@@ -461,6 +558,7 @@ export class PanelController {
         this._hold(anchor, () => this.ctx.command(() => store.setMeasure(f.roomId, f.sideKey, null, []), '길이 지우기'));
       }
     }
+    this.buffer.reset('');
     this._advance(f.roomId, f.sideKey);
   }
 
@@ -572,7 +670,7 @@ export class PanelController {
     const on = !(m && m.check);
     this.ctx.command(() => store.setMeasureCheck(f.roomId, f.sideKey, on), '확인필요');
     this.ctx.toast(on ? '확인필요로 표시했습니다.' : '확인필요를 해제했습니다.', { type: on ? 'warn' : 'ok' });
-    if (on && !(m && m.value != null) && !this.buffer.edited) {
+    if (on && !(m && m.value != null) && !(this.buffer.edited && this.buffer.parse())) {
       // The value is unknown: move on, like [확인 ▶].
       this._advance(f.roomId, f.sideKey);
     } else {
@@ -580,19 +678,49 @@ export class PanelController {
     }
   }
 
+  // [외벽]: this wall shown the other way (one undo step). A choice equal to what the app decides by itself
+  // is not kept, so a second tap gives the automatic state back. 외벽 보기 is turned on (with the toast), so
+  // the result shows on the plan.
+  _toggleExterior() {
+    const s = this.state;
+    const store = this.ctx.store();
+    if (!s || !store || typeof store.toggleWallExterior !== 'function') return;
+    const before = exteriorInfo(store.project, store.derived, s.edgeId);
+    if (!before) return;
+    this.ctx.command(() => store.toggleWallExterior(s.edgeId), '외벽');
+    const after = exteriorInfo(this.ctx.store().project, this.ctx.store().derived, s.edgeId);
+    if (!after || after.on === before.on) { this.refresh(); return; }
+    const wasOff = typeof this.ctx.exteriorView === 'function' && !this.ctx.exteriorView();
+    if (wasOff && typeof this.ctx.showExterior === 'function') this.ctx.showExterior();
+    let msg;
+    if (after.override == null) {
+      msg = after.on ? '이 벽을 다시 외벽으로 표시했습니다 (자동).' : '이 벽을 외벽에서 뺐습니다 (자동).';
+    } else {
+      msg = after.on ? '이 벽을 외벽으로 표시했습니다.' : '이 벽을 외벽에서 뺐습니다.';
+      msg += ` 한 번 더 누르면 자동(${after.auto ? '외벽' : '외벽 아님'})으로 돌아갑니다.`;
+    }
+    if (wasOff) msg += ' [외벽 보기]를 켰습니다.';
+    this.ctx.toast(msg, { type: 'ok', ms: 4000 });
+    this.refresh();
+  }
+
   deleteWall() {
     const s = this.state;
     const store = this.ctx.store();
     const edgeId = s.edgeId;
+    const edge = store.project.edges.find((e) => e.id === edgeId);
+    const what = edge && edge.kind === 'divider' ? '선' : '벽';
     this.state = null;
-    this.ctx.command(() => store.deleteEdge(edgeId), '벽 지우기');
+    this.buffer.reset('');
+    // report: false — this toast says what happened to the values (one toast, as the [지우개] gives).
+    this.ctx.command(() => store.deleteEdge(edgeId), `${what} 지우기`, { report: false });
     this.close();
     // The wall's own values go with it (drawn again, it starts without values); the other walls' values
     // stay, and the ones whose side is open now come back when the wall is drawn again (DESIGN.md §7.7).
     const dropped = (store.lastDropped || []).length, waiting = (store.lastDetached || []).length;
     let msg = '지웠습니다.';
-    if (dropped) msg += ` 이 벽의 길이 값 ${dropped}개도 지웠습니다.`;
-    if (waiting) msg += ` 다른 벽의 길이 값 ${waiting}개는 그대로 두었다가, 벽을 다시 그려 방이 닫히면 다시 보입니다.`;
+    if (dropped) msg += ` 이 ${what}의 길이 값 ${dropped}개도 지웠습니다.`;
+    if (waiting) msg += ` ${waitingValuesText(waiting, what)}`;
     this.ctx.toast(`${msg} ↶ 버튼으로 되돌릴 수 있습니다.`, {
       action: { label: '되돌리기', run: () => this.ctx.command(() => this.ctx.store().undo(), '되돌리기') },
     });
@@ -602,6 +730,7 @@ export class PanelController {
 
   _openThickness() {
     const s = this.state;
+    this._flushNumberDraft();
     s.mode = 'thickness';
     this.buffer.reset('');
     this._render();
@@ -609,6 +738,7 @@ export class PanelController {
 
   _backToLength() {
     const s = this.state;
+    this._flushNumberDraft();
     s.mode = 'edge';
     this.buffer.reset('');
     this.refresh();
@@ -632,12 +762,14 @@ export class PanelController {
         this._hold(anchor, () => this.ctx.command(() => store.setWallThickness(s.edgeId, null), '벽 두께'));
       }
     }
+    this.buffer.reset('');
     this._backToLength();
   }
 
   _resetThickness() {
     const s = this.state;
     const store = this.ctx.store();
+    this.buffer.reset('');   // [자동으로 되돌리기]: a number being typed is not put in
     this._hold(() => edgeMid(this.ctx.store(), s.edgeId), () => this.ctx.command(() => store.setWallThickness(s.edgeId, null), '벽 두께'));
     this.ctx.toast('벽 두께를 자동(가정값)으로 되돌렸습니다.', { type: 'ok' });
     this._backToLength();
@@ -795,16 +927,18 @@ export class PanelController {
 
   // The typed measure of a side, else the value the engine computed for it from where a 구역 나누기 선
   // cuts a measured side (derived.computedMeasures, `computed: true`; typing a value replaces it).
+  // Matched through core/rooms.js measureSideKey, so each face of a wall the room walks on both faces
+  // (a wall joining an island room: '…~', m.twin) shows its own value.
   _measure(store, roomId, sideKey) {
     let flagOnly = null;
     for (const m of store.project.measures || []) {
-      if (m.room === roomId && [m.from, m.to].sort().join('-') === sideKey) {
+      if (m.room === roomId && measureSideKey(m) === sideKey) {
         if (m.value != null) return m;
         flagOnly = m;
       }
     }
     const computed = (store.derived && Array.isArray(store.derived.computedMeasures)) ? store.derived.computedMeasures : [];
-    const c = computed.find((m) => m && m.room === roomId && m.value != null && [m.from, m.to].sort().join('-') === sideKey);
+    const c = computed.find((m) => m && m.room === roomId && m.value != null && measureSideKey(m) === sideKey);
     if (c) return flagOnly ? { ...c, check: !!flagOnly.check } : c;
     return flagOnly;
   }
@@ -890,10 +1024,16 @@ export class PanelController {
     else if (s.mode === 'thickness') body = this._renderThickness();
     else if (s.mode === 'room') body = this._renderRoom();
     else body = this._renderRect();
+    this._body = body;
     this.host.replaceChildren(body);
     this.ctx.onChange();
   }
 
+  // [✕ 닫기] puts in what was typed and not confirmed, as a tap elsewhere, Android back and the ✕ of the
+  // window / door and fixture panels do, with the toast '입력하던 값을 넣었습니다 …' (final check 2026-10-25:
+  // a measured 2900 typed and ✕ was lost without a word here, and kept there). A wall length under
+  // MIN_FLUSH_LENGTH_MM is refused with a toast (recheck 2026-10-25: '27' typed and ✕ stored a 27 mm wall);
+  // [확인 ▶] still takes it. Esc (PC) throws the number away.
   _closeButton() {
     return el('button', { type: 'button', class: 'btn btn-ghost panel-close', 'aria-label': '닫기', onclick: () => this.close() }, '✕ 닫기');
   }
@@ -982,6 +1122,7 @@ export class PanelController {
           flag,
           computed: !!(m && m.computed && m.value != null && !(active && this.buffer.edited)),
           onclick: () => {
+            if (s.active !== i) this._flushNumberDraft();
             s.active = i;
             this.buffer.reset('');
             this._render();
@@ -992,8 +1133,17 @@ export class PanelController {
     const f = s.fields[s.active];
     const m = f && this._measure(store, f.roomId, f.sideKey);
     const checkOn = f ? !!(m && m.check) : (store.project.wallChecks || []).some((w) => w.edge === s.edgeId);
+    // [외벽 ✓ · 자동] / [외벽 · 직접]: what is shown and printed for this wall, and whether the app decided it.
+    let ext = null;
+    try { ext = isDivider || typeof store.toggleWallExterior !== 'function' ? null : exteriorInfo(store.project, store.derived, s.edgeId); } catch (_) { ext = null; }
     const actions = el('div', { class: 'panel-actions' },
       el('button', { type: 'button', class: `btn ${checkOn ? 'btn-on' : ''}`, 'aria-pressed': checkOn ? 'true' : 'false', onclick: () => this._toggleCheck() }, '확인필요'),
+      ext ? el('button', {
+        type: 'button', class: `btn btn-ext ${ext.on ? 'btn-ext-on' : ''}`, 'aria-pressed': ext.on ? 'true' : 'false',
+        'data-auto': ext.override == null ? '1' : '0',
+        title: '누르면 이 벽을 외벽으로 표시하거나 뺍니다. 자동: 앱이 바깥쪽 벽으로 판단한 것',
+        onclick: () => this._toggleExterior(),
+      }, ext.on ? '외벽 ✓' : '외벽', el('span', { class: 'btn-note' }, ext.override == null ? '자동' : '직접')) : null,
       isDivider ? null : el('button', { type: 'button', class: 'btn', onclick: () => this._openThickness() }, '두께'),
       el('button', { type: 'button', class: 'btn btn-danger', onclick: () => this.deleteWall() }, isDivider ? '선 지우기' : '벽 지우기'),
       this._closeButton());
@@ -1031,7 +1181,7 @@ export class PanelController {
           el('button', { type: 'button', class: 'btn', onclick: () => this._resetThickness() }, '자동으로 되돌리기'),
           el('button', { type: 'button', class: 'btn', onclick: () => this._backToLength() }, '◀ 길이 입력으로'),
           this._closeButton()),
-        el('p', { class: 'panel-hint' }, '두께를 잰 벽만 넣으세요. 넣지 않으면 바깥벽 150, 안쪽 벽 100으로 가정하고, 잰 길이에 맞게 자동으로 조정됩니다.')),
+        el('p', { class: 'panel-hint' }, '두께를 잰 벽만 넣으세요. 넣지 않으면 바깥벽(한쪽에만 실이 있는 벽) 150, 안쪽 벽 100으로 가정하고, 잰 길이에 맞게 자동으로 조정됩니다. [외벽] 표시는 두께를 바꾸지 않습니다.')),
       this.numpad.element);
   }
 
@@ -1173,6 +1323,12 @@ export class PanelController {
 
 // ---- shared pure helpers -------------------------------------------------------------------------
 
+// The other walls' values left waiting by the [지우개] or [벽 지우기] (DESIGN.md §7.7, §7.20): they come
+// back when the erased wall (or 구역 나누기 선: what = '선') is drawn again. The same words in both toasts.
+export function waitingValuesText(n, what = '벽') {
+  return `다른 벽의 길이 값 ${n}개는 그대로 두었다가, 지운 ${what}을 다시 그리면 다시 보입니다.`;
+}
+
 export function roundTo(v, step) {
   return Math.round(v / step) * step;
 }
@@ -1228,7 +1384,7 @@ export function needsInputFn(store) {
   }
   const measured = new Set((store.project.measures || [])
     .filter((m) => m.value != null)
-    .map((m) => `${m.room}|${[m.from, m.to].sort().join('-')}`));
+    .map((m) => `${m.room}|${measureSideKey(m)}`));
   return (roomId, sideKey) => !measured.has(`${roomId}|${sideKey}`);
 }
 

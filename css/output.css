@@ -93,6 +93,11 @@
   opacity: 0.4;
   cursor: default;
 }
+/* 제목 포함 off: '파일 이름에도 세대명을 넣지 않습니다.' as a small second line inside the label (the label
+   keeps its 48 px; a block of its own pushed [↻ 도면 회전] below the fold, recheck 2026-10-25). */
+.out-check-text { display: flex; flex-direction: column; line-height: 1.25; }
+.out-title-note { font-size: 13px; color: var(--muted, #5F6670); line-height: 1.25; }
+.out-title-note[hidden] { display: none; }
 .out-select {
   min-height: var(--touch, 48px);
   padding: 0 10px;
@@ -131,6 +136,14 @@
   font-size: 15px;
   line-height: 1.45;
 }
+/* [↻ 도면 회전] and its hint, under the preview (output.js _build). As wide as the preview: the hint wraps
+   and does not widen the preview column. */
+.out-preview .out-rotate {
+  align-self: stretch;
+  width: 0;
+  min-width: 100%;
+  margin-top: 8px;
+}
 /* [↻ 도면 회전] and its hint. */
 .out-rotate-row {
   display: flex;
@@ -141,6 +154,7 @@
 .out-rotate-hint {
   color: #9A4A00;
   font-size: 15px;
+  word-break: keep-all;   /* under the preview it wraps: between words, not inside '눕힙니다' */
 }
 .out-rotate-hint:empty { display: none; }
 .out-select:disabled { opacity: 0.45; }

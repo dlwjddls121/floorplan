@@ -11,6 +11,7 @@
 //         on the screen lands on the same spot of the plan whatever scale is printed),
 //         nameObstacles (paper: world boxes of the numbers of diagonal sides, which room names in rooms
 //         with a diagonal side keep clear of; core/labels.js),
+//         thinLines (paper: world segments [[p, q]] of the drawn extension lines; core/labels.js),
 //         options: { include: { rooms, openings, fixtures }, notes: [string], includeTitle } }
 // Paper sizes: name 12.3 pt black, 'H: 2280' 8.8 pt blue, opening labels 8.8 pt blue, fixture labels
 // 8.8 pt black, title 14 pt black, notes 7.5 pt. Screen: comfortable fixed px sizes.
@@ -50,6 +51,9 @@ function placeFor(ctx, project, derived, opts) {
     obstacles: opts.obstacles,
     // Paper: room names keep clear of the dimensions of diagonal sides inside the rooms.
     nameObstacles: opts.nameObstacles,
+    // Paper: the dimension extension lines (world segments, ui/output.js paperLabelObstacles); a window /
+    // door label moves along its wall off them where it can (the 구역 나누기 선 always count).
+    thinLines: opts.thinLines,
     // Hand-moved offsets at the automatic print scale (opts.offsetScale; screen = paper).
     offsetWorldPerPaperMM: opts.offsetScale > 0 ? opts.offsetScale : undefined,
     // The plain boxes' inner outline (draw-fixtures.js): their labels keep inside it.
@@ -67,6 +71,15 @@ export function drawLabels(ctx, project, derived, opts = {}) {
   ctx.textBaseline = 'middle';
   for (const l of labels) {
     const c = opts.toPx({ x: l.x, y: l.y });
+    if (opts.paper && l.knockout && l.box) {
+      // A window / door label whose spot is clear of everything but thin lines (extension lines, the
+      // dashed 구역 나누기 선): those lines stop at the label (core/labels.js placeClear).
+      const p = opts.toPx({ x: l.box.minX, y: l.box.minY }), q = opts.toPx({ x: l.box.maxX, y: l.box.maxY });
+      ctx.save();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(Math.min(p.x, q.x), Math.min(p.y, q.y), Math.abs(q.x - p.x), Math.abs(q.y - p.y));
+      ctx.restore();
+    }
     ctx.save();
     ctx.translate(c.x, c.y);
     if (l.rot) ctx.rotate((l.rot * Math.PI) / 180);

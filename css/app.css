@@ -25,7 +25,9 @@
   --radius: 10px;
   --topbar-h: 60px;
   --toolbar-w: 96px;
+  --banner-h: 0px;   /* the update banner's strip (body.has-update) */
 }
+body.has-update { --banner-h: 56px; }
 
 * { box-sizing: border-box; }
 
@@ -91,6 +93,10 @@ button, input { font: inherit; color: inherit; }
 .btn-danger { color: var(--danger); border-color: #E6B3B1; }
 .btn-ghost { border-color: transparent; background: transparent; }
 .btn-on { background: #FFF1E0; border-color: var(--warn); color: #9A4A00; }
+/* The length panel's [외벽] switch (core/exterior.js): on = the wall is drawn and printed red as 외벽. */
+.btn-ext-on { background: #FDECEA; border-color: #D32F2F; color: #B71C1C; }
+.btn-note { font-size: 12px; font-weight: 500; color: var(--muted); }
+.btn-ext-on .btn-note { color: #B71C1C; }
 .btn-big { min-height: 64px; font-size: 20px; padding: 0 28px; }
 .btn-small { min-height: var(--touch); padding: 0 12px; font-size: 15px; font-weight: 500; }
 .btn-soon, .btn-soon:active { color: var(--soon); border-style: dashed; background: transparent; cursor: default; }
@@ -106,23 +112,25 @@ button, input { font: inherit; color: inherit; }
 }
 
 /* ---- update banner ------------------------------------------------------------------- */
+/* A strip above the screen, which moves down by its height (.screen top: --banner-h): it never covers the
+   top bar (↶ / ↷, 검사, 내보내기; review 2026-10-25). [나중에] hides it for this visit (main.js). */
 
 .update-banner {
   position: fixed;
-  top: 0; left: 50%;
-  transform: translateX(-50%);
+  top: 0; left: 0; right: 0;
+  height: var(--banner-h);
   z-index: 50;
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 8px 8px 16px;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
   background: #FFF8E1;
-  border: 1px solid #F3D27A;
-  border-radius: 0 0 12px 12px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+  border-bottom: 1px solid #F3D27A;
 }
+.update-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.update-banner .btn { flex: none; }
 
 /* ---- screens ------------------------------------------------------------------------------ */
 
-.screen { position: fixed; inset: 0; }
+.screen { position: fixed; inset: var(--banner-h) 0 0 0; }
 
 /* ---- list screen -------------------------------------------------------------------------- */
 
@@ -232,6 +240,10 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   border-bottom: 1px solid var(--line);
 }
 .btn-top { min-height: var(--touch); }
+/* Only the household name shrinks (with …) when the bar is short of room: a long 세대명 squeezed [≡ 목록]
+   until its text spilled out (portrait tablet, review 2026-10-25). */
+.topbar > .btn-top, .topbar-right, .topbar-right .btn-top { flex: none; }
+.title-btn { min-width: 0; }
 .btn-icon { font-size: 24px; padding: 0 12px; }
 .title-btn {
   min-height: var(--touch);
@@ -321,7 +333,7 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 .hint {
   position: absolute;
   top: 8px; left: 10px;
-  max-width: min(640px, calc(100% - 400px)); /* leave room for [↻ 회전] [치수선 보기] [전체 보기] */
+  max-width: min(640px, calc(100% - 500px)); /* leave room for [↻ 회전] [치수선 보기] [외벽 보기] [전체 보기] */
   margin: 0;
   padding: 6px 10px;
   border-radius: 8px;
@@ -331,9 +343,10 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   line-height: 1.4;
   pointer-events: none;
 }
-/* Under [전체 보기] on the right, so it never covers the tool hint on the left. */
+/* Under [전체 보기] on the right, so it never covers the tool hint on the left. Above the 설비 / 메모 bars. */
 .pen-chip {
   position: absolute;
+  z-index: 7;
   top: 58px; right: 10px;
   max-width: 45%;
   padding: 6px 12px;
@@ -345,15 +358,23 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   pointer-events: none;
 }
 .fit-btn { position: absolute; top: 8px; right: 10px; background: rgba(255, 255, 255, 0.95); }
-/* [↻ 회전] [치수선 보기] [전체 보기] at the top right of the canvas. */
+/* [↻ 회전] [치수선 보기] [외벽 보기] [전체 보기] at the top right of the canvas. */
 .view-btns { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 5; }
 .view-btns .btn { background: rgba(255, 255, 255, 0.95); }
 .view-btns .btn.btn-on { background: #E8F0FE; border-color: #1A73E8; color: #174EA6; }
+/* A narrow plan (the tablet upright: 727 px): the hint goes under the canvas buttons, as wide as the plan
+   (it was 227 px wide and 7 lines tall, mostly under the 설비 bar), and the S펜 chip takes the free space
+   left of the buttons. */
+.canvas-wrap { container: plan / inline-size; }
+@container plan (max-width: 960px) {
+  .hint { top: 64px; max-width: min(640px, calc(100% - 20px)); }
+  .pen-chip { top: 8px; left: 10px; right: auto; max-width: calc(100% - 500px); border-radius: 14px; line-height: 1.3; }
+}
 /* ---- checks popover ----------------------------------------------------------------------- */
 
 .checks-popover {
   position: fixed;
-  top: calc(var(--topbar-h) + 4px);
+  top: calc(var(--banner-h) + var(--topbar-h) + 4px);
   right: 12px;
   z-index: 30;
   width: min(460px, calc(100vw - 24px));
@@ -481,6 +502,8 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   -webkit-user-select: none;
 }
 .key:active:not(:disabled) { background: #DDE3EA; }
+/* A finger press held back while the S Pen hovers (input.js installPalmGuard): it acts when the finger lifts. */
+.key.key-held:not(:disabled) { background: #DDE3EA; box-shadow: inset 0 0 0 2px #1A73E8; }
 .key:disabled { opacity: 0.35; cursor: default; }
 .key-back, .key-plus, .key-clear { background: #EEF1F5; }
 .key-0 { grid-column: span 2; }
@@ -509,9 +532,12 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 
 /* ---- toasts and dialogs ------------------------------------------------------------------- */
 
+/* Under the row of canvas buttons ([↻ 회전] … [전체 보기], 8 + 48 px), and taps go through a toast (only
+   its own button takes them): a toast over [↻ 회전] swallowed the next press (review 2026-10-25). In the
+   editor main.js (_placeToasts) sets `top` under the buttons, the tool hint and a shown 설비 / 메모 bar. */
 .toasts {
   position: fixed;
-  top: calc(var(--topbar-h) + 10px);
+  top: calc(var(--banner-h) + var(--topbar-h) + 66px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 80;   /* above every dialog (70), so a message from a dialog's button is seen */
@@ -523,7 +549,7 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   pointer-events: none;
 }
 .toast {
-  pointer-events: auto;
+  pointer-events: none;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -541,7 +567,15 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 .toast-warn { background: #8A4B00; }
 .toast-error { background: #A31F1C; }
 .toast-out { opacity: 0; transform: translateY(-6px); }
+/* The action keeps its size and one line; the message wraps (final check 2026-10-25: a three-line [벽 지우기]
+   message squeezed [되돌리기] to 56 px, one letter per line). While the S Pen is near (body.pen-near, set by
+   main.js from the input controller's pen-near state) the action takes no taps: a pen tap there is meant
+   for the plan under it (final check 2026-10-25: a pen tap on the next wall undid the delete instead). A
+   finger or the mouse presses it; ↶ undoes with the pen, as the toast says. */
 .toast-action {
+  pointer-events: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
   min-height: 40px;
   padding: 0 12px;
   border: 1px solid rgba(255, 255, 255, 0.6);
@@ -551,6 +585,7 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   font-weight: 700;
   cursor: pointer;
 }
+body.pen-near .toast-action { pointer-events: none; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
 .dialog-backdrop {

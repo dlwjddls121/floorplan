@@ -51,11 +51,26 @@
 //     assumed thickness between them; computed dims carry `byWall` / `wallGap` (tap text names the wall).
 
 import { cornerCoeffs } from './solver.js';
+import { pointInPolygon } from './geom.js';
+import { measureSideKey } from './rooms.js';
 import { twoSideKey, resolvedKeys } from './checkkeys.js';
 
 export const DIM_SIDES = ['top', 'right', 'bottom', 'left'];
-// ※ line printed when a computed (parenthesised) dimension is on the page (see rule 8).
+// ※ line printed when a computed (parenthesised) dimension is on the page (see rule 8). It names what
+// split the measured side (review 2026-10-25: a side split by a WALL printed '구역을 나눈 위치', though
+// the plan has no 구역 나누기 선 and the screen says '벽 위치로 계산'): splitComputedNote picks one.
 export const SPLIT_COMPUTED_NOTE = '※ 괄호 치수는 구역을 나눈 위치로 계산한 값입니다.';
+export const SPLIT_COMPUTED_WALL_NOTE = '※ 괄호 치수는 벽 위치로 계산한 값입니다.';
+export const SPLIT_COMPUTED_MIXED_NOTE = '※ 괄호 치수는 나눈 위치(벽·구역 나누기 선)로 계산한 값입니다.';
+export const SPLIT_COMPUTED_NOTES = [SPLIT_COMPUTED_NOTE, SPLIT_COMPUTED_WALL_NOTE, SPLIT_COMPUTED_MIXED_NOTE];
+// The note for these computed parts (computed dims, or derived.computedMeasures: `byWall` when a wall
+// lies between the parts of their span, `byDivider` when a divider does). → string | null (none)
+export function splitComputedNote(items) {
+  const list = (items || []).filter((d) => d && d.computed);
+  if (!list.length) return null;
+  const wall = list.some((d) => d.byWall), divider = list.some((d) => !d.byWall || d.byDivider);
+  return wall && divider ? SPLIT_COMPUTED_MIXED_NOTE : wall ? SPLIT_COMPUTED_WALL_NOTE : SPLIT_COMPUTED_NOTE;
+}
 const SPAN_EPS = 1;        // mm: wall lines closer than this are "the same line"
 // Spans of the rooms on the two sides of a wall touch at the wall. When measures contradict each other
 // the solver absorbs the difference in assumed walls and finishes, which can make such neighbours
@@ -66,7 +81,7 @@ const TOUCH_FRACTION = 0.3;
 // Rule 3 next to a diagonal wall: inner faces whose ends differ by less than this are the same span.
 const FACE_SPAN_MM = 5;
 
-const sideKeyOf = (m) => [m.from, m.to].sort().join('-');
+const sideKeyOf = measureSideKey;
 const isNum = (v) => typeof v === 'number' && isFinite(v);
 
 // ---- wall geometry shared with the drawing and print layout --------------------------------------
@@ -105,6 +120,17 @@ export function isStraightOn(o, ux, uy) {
 
 // Outline of every wall (same construction as render.js, see wallOutline). → [{ edgeId, orient, t, points, box }]
 export function wallPolygons(project, derived) {
+  const { items, byNode } = wallItems(project, derived);
+  const out = [];
+  for (const it of items) {
+    const points = wallOutline(it, byNode);
+    if (points) out.push({ edgeId: it.edge.id, orient: it.edge.orient, t: it.t, points, box: boxOf(points) });
+  }
+  return out;
+}
+
+// The walls as wallOutline takes them. → { items: [{ edge, a, b, t }], byNode: Map nodeId → items }
+function wallItems(project, derived) {
   const nodes = new Map((project.nodes || []).map((n) => [n.id, n]));
   const items = [];
   const byNode = new Map();
@@ -119,12 +145,89 @@ export function wallPolygons(project, derived) {
       byNode.get(id).push(it);
     }
   }
+  return { items, byNode };
+}
+
+// 외벽 (core/exterior.js; the red of ui/render.js paintExterior, on screen and on paper): the extra outlines
+// an exterior wall is painted with at a MITRED joint (a diagonal wall meets there) shared with a wall that is
+// not exterior. A mitred joint is shared out among all the walls meeting there, each to the node, so the
+// inner wall's share reached into the exterior wall's band up to the node: a black wedge in the red corner
+// (checker 2026-10-25: the 사선 벽 예시's 드레스룸 | 방1 diagonal at the top-left outer corner, the common
+// "corner to corner" diagonal). Here the exterior wall's half at such a joint is outlined as joined to the
+// other EXTERIOR walls only: its band runs through the joint and the outline's corner is whole. That area
+// is wall ink anyway (the walls meeting at a joint leave no gap), so the red never reaches past the black.
+// Only the half at the joint (cut square at the wall's middle, inside its own outline), so no other
+// corner is outlined twice. Joints of horizontal / vertical walls only need nothing: there each end already
+// reaches over the joint.
+// items / byNode as wallOutline (render.js buildGeometry or wallItems); ids: Set of exterior wall ids.
+// → [[{ x, y }]]
+export function exteriorJointOutlines(items, byNode, ids) {
   const out = [];
+  if (!ids || !ids.size) return out;
+  const shared = (it, nodeId) => {
+    const others = (byNode.get(nodeId) || []).filter((o) => o !== it && joinsWalls(o));
+    return others.some((o) => !ids.has(o.edge.id)) && (!isAxisWall(it) || others.some((o) => !isAxisWall(o)));
+  };
+  const MID = '\u0000mid';
   for (const it of items) {
-    const points = wallOutline(it, byNode);
-    if (points) out.push({ edgeId: it.edge.id, orient: it.edge.orient, t: it.t, points, box: boxOf(points) });
+    if (!ids.has(it.edge.id) || !joinsWalls(it)) continue;
+    for (const [nodeId, N] of [[it.edge.a, it.a], [it.edge.b, it.b]]) {
+      if (!shared(it, nodeId)) continue;
+      const mid = { x: (it.a.x + it.b.x) / 2, y: (it.a.y + it.b.y) / 2 };
+      const half = { edge: { ...it.edge, a: nodeId, b: MID }, a: N, b: mid, t: it.t };
+      const own = new Map([[nodeId, [half, ...(byNode.get(nodeId) || []).filter((o) => o !== it && ids.has(o.edge.id))]]]);
+      const points = wallOutline(half, own);
+      if (points) out.push(points);
+    }
   }
   return out;
+}
+
+// The same for the paper (ui/output.js), built as wallPolygons builds the walls. → [{ points }]
+export function exteriorJointPolygons(project, derived, ids) {
+  if (!ids || !ids.size) return [];
+  const { items, byNode } = wallItems(project, derived);
+  return exteriorJointOutlines(items, byNode, ids).map((points) => ({ points }));
+}
+
+// 외벽: how far a 구역 나누기 선 from P towards Q runs inside the red walls at its end P (world mm). A line runs
+// to the centre line of the wall it ends at; on a black wall that bit never showed, on a red one it was a
+// black stub (checker 2026-10-25), so ui/render.js and ui/output.js start the line this much later (keeping
+// its dashes where they were). Through walls overlapping or meeting at P, to the face of the last one; a
+// point on the edge between two pieces of a wall (the line ends at the node splitting them) counts as
+// inside. polys: world polygons ([{x,y}] | { points }). → distance (0: P is not in a red wall)
+export function runInsideFrom(P, Q, polys) {
+  const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+  if (!(L > 1e-6) || !polys || !polys.length) return 0;
+  const d = { x: (Q.x - P.x) / L, y: (Q.y - P.y) / L };
+  const side = { x: -d.y * 0.01, y: d.x * 0.01 };
+  const list = polys.map((pl) => (Array.isArray(pl) ? pl : pl && pl.points)).filter((pts) => Array.isArray(pts) && pts.length >= 3);
+  let t = 0;
+  for (let k = 0; k < 16 && t < L; k++) {
+    const at = { x: P.x + d.x * (t + 0.01), y: P.y + d.y * (t + 0.01) };
+    const probes = [at, { x: at.x + side.x, y: at.y + side.y }, { x: at.x - side.x, y: at.y - side.y }];
+    let next = t;
+    for (const pts of list) {
+      if (!probes.some((p) => pointInPolygon(p, pts))) continue;
+      // The first crossing of P→Q with this polygon's outline beyond t.
+      let exit = L;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const a = pts[j], b = pts[i];
+        const ex = b.x - a.x, ey = b.y - a.y;
+        const den = d.x * ey - d.y * ex;
+        if (Math.abs(den) < 1e-12) continue;
+        const rx = a.x - P.x, ry = a.y - P.y;
+        const u = (rx * ey - ry * ex) / den;       // along P→Q
+        const v = (rx * d.y - ry * d.x) / den;     // along a→b
+        if (v < -1e-9 || v > 1 + 1e-9 || u <= t + 1e-6) continue;
+        if (u < exit) exit = u;
+      }
+      if (exit > next) next = exit;
+    }
+    if (!(next > t + 1e-6)) break;
+    t = next;
+  }
+  return Math.min(t, L);
 }
 
 // ---- wall outline of one wall (shared with render.js) -------------------------------------------
@@ -588,7 +691,8 @@ export function describeDim(project, dim) {
 // ---- building the chains -------------------------------------------------------------------------
 
 // options: { bothValues = false, showUnknown = false }
-// result.notes: { splitComputed } — true when a computed '(…)' dimension is shown (SPLIT_COMPUTED_NOTE).
+// result.notes: { splitComputed, splitNote } — splitComputed: true when a computed '(…)' dimension is
+// shown; splitNote: the ※ line it needs (splitComputedNote), or null.
 // result.aligned: the dimensions of measured diagonal sides (rule 7; placed by layoutAlignedDims):
 //   [{ key, measureIds, roomIds, value, alt, note, text, aligned: true, A, B (inner corners of the shown
 //      face, world), dir (unit, along the side), inward (unit normal into the shown room), exterior,
@@ -596,7 +700,7 @@ export function describeDim(project, dim) {
 export function buildDimensions(project, derived, options = {}) {
   const opt = { bothValues: false, showUnknown: false, ...(options || {}) };
   const chains = DIM_SIDES.map((side) => ({ side, rows: [] }));
-  const result = { chains, dims: [], aligned: [], hidden: [], bounds: null, notes: { splitComputed: false } };
+  const result = { chains, dims: [], aligned: [], hidden: [], bounds: null, notes: { splitComputed: false, splitNote: null } };
   if (!project || !derived || !Array.isArray(derived.rooms)) return result;
   const walls = wallPolygons(project, derived);
   const bounds = planOuterBounds(project, derived, walls);
@@ -684,7 +788,7 @@ export function buildDimensions(project, derived, options = {}) {
       key: c.id, measureIds: [], roomIds: [c.room], value: c.value, alt: null, note: false,
       axis: cand.axis, a: cand.a, b: cand.b, line: cand.line, lineSpan: cand.lineSpan, exterior: cand.exterior,
       side: owner ? owner.side : cand.side, override: ov, text: '', extFrom: [], computed: true, spanId: c.spanId,
-      byWall: !!c.byWall, wallGap: isNum(c.wallGap) ? c.wallGap : 0,
+      byWall: !!c.byWall, byDivider: !!c.byDivider, wallGap: isNum(c.wallGap) ? c.wallGap : 0,
     };
     if (ov && DIM_SIDES.includes(ov.side) && sideAxis(ov.side) === d.axis) d.side = ov.side;
     const dup = dims.some((x) => x.side === d.side && x.axis === d.axis
@@ -698,6 +802,7 @@ export function buildDimensions(project, derived, options = {}) {
   // Texts.
   for (const d of dims) d.text = dimText(d, opt.bothValues);
   result.notes.splitComputed = dims.some((d) => d.computed);
+  result.notes.splitNote = splitComputedNote(dims);
 
   // 4. Rows per chain.
   for (const d of dims) d.depth = Math.max(0, distToChain(d, bounds));

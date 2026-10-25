@@ -5,7 +5,7 @@
 
 .fx-bar, .memo-bar {
   position: absolute;
-  top: 66px;                 /* under the tool hint (.hint, top left, up to two lines) */
+  top: 66px;                 /* under the tool hint: main.js _placeToolBars sets it from the hint's real height */
   left: 10px;
   max-width: calc(100% - 20px);
   z-index: 6;

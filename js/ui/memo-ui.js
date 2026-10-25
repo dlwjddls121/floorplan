@@ -9,11 +9,14 @@
 //               fixed paper width (core/memo.js memoPaperWidth); the screen shows it as at 1:60.
 //
 // ctx = { store(), view, command(fn, label) → bool, toast(msg, opts), requestRender(),
-//         overlayHost: element over the canvas for the mode bar (e.g. #canvasWrap) }
+//         overlayHost: element over the canvas for the mode bar (e.g. #canvasWrap),
+//         onModeChange() (optional: [✎ 펜] / [메모 지우개] changed; the editor shows `hint`) }
 import { el, openDialog } from './panel.js';
 import { MEMO_COLOR, MEMO_PAPER_MM, WORLD_PER_PAPER_MM, memoStrokesAlong, validMemo, memoPaperWidth, isMemoHidden } from '../core/memo.js';
 
 export const MEMO_HINT = '메모: S펜이나 손가락으로 자유롭게 적으세요. 메모는 도면과 따로 저장되고, 출력할 때 넣을지 고릅니다.';
+// The memo bar's own eraser is not the toolbar's [지우개] (that one erases walls, windows … and memo too).
+export const MEMO_ERASER_HINT = '메모 지우개: 지울 메모를 문지르세요. 벽·창·문·설비는 왼쪽 [지우개]로 지웁니다. 다시 쓰려면 [✎ 펜]을 누르세요.';
 
 const ERASER_PX = 14;      // eraser radius on screen
 const MIN_SCREEN_PX = 1.2;
@@ -133,6 +136,12 @@ export class MemoTool {
     if (mode !== 'pen' && mode !== 'eraser') return;
     this.mode = mode;
     this._renderBar();
+    if (typeof this.ctx.onModeChange === 'function') this.ctx.onModeChange(mode);
+  }
+
+  // The tool hint for the current mode.
+  get hint() {
+    return this.mode === 'eraser' ? MEMO_ERASER_HINT : MEMO_HINT;
   }
 
   setVisible(on) {
@@ -168,7 +177,7 @@ export class MemoTool {
     this.bar.replaceChildren(
       el('span', { class: 'memo-bar-label' }, '메모'),
       b('✎ 펜', this.mode === 'pen', () => this.setMode('pen')),
-      b('지우개', this.mode === 'eraser', () => this.setMode('eraser')),
+      b('메모 지우개', this.mode === 'eraser', () => this.setMode('eraser'), 'memo-eraser'),
       b(this.visible ? '메모 숨기기' : '메모 보이기', !this.visible, () => this.setVisible(!this.visible)),
       el('button', { type: 'button', class: 'btn btn-small btn-danger', onclick: () => this.clearAll() }, '모두 지우기'));
   }
@@ -215,6 +224,8 @@ export class MemoTool {
       const ids = [...this.erasing.ids];
       this.erasing = null;
       if (ids.length) this.ctx.command(() => store.deleteMemoStroke(ids), '메모 지우기');
+      // A rub that touched no memo (on a wall, say) says why nothing went (review 2026-10-25).
+      else this.ctx.toast('여기에는 지울 메모가 없습니다. 벽·창·문·설비는 왼쪽 [지우개]로 지웁니다.');
     } else if (this.live) {
       const points = g.isTap ? [g.points[0]] : g.points.slice();
       this.live = null;

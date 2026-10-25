@@ -69,6 +69,7 @@
 // first part's start corner to the last part's end corner (dividers have no thickness).
 
 import { EPS } from './geom.js';
+import { measureSideKey } from './rooms.js';
 
 export const SOLVER_WEIGHTS = Object.freeze({
   measure: 1e4,
@@ -427,7 +428,7 @@ function measuredRuns(project, derivedRooms, spans) {
     }
     const dr = byRoom.get(m.room);
     if (!dr || dr.sides.length < 3) continue;
-    const key = [m.from, m.to].sort().join('-');
+    const key = measureSideKey(m);
     const i = dr.sides.findIndex((s) => s.key === key);
     if (i < 0) continue;
     out.push({ m, parts: [{ dr, i }] });
@@ -482,6 +483,49 @@ export function straightDiagonalJoints(project) {
     }
   }
   return out;
+}
+
+// The drawn inner length of a measured side (or span: from side i of dr to side iB of drB) minus its
+// value, at these corners, walls and finishes.
+function residualOf(m, dr, i, drB, iB, edgeMap, positions, thickness, finish) {
+  const len = innerLengthBetween({ sides: dr.sides, i, roomId: dr.roomId }, { sides: drB.sides, i: iB, roomId: drB.roomId },
+    edgeMap, positions, thickness, finish);
+  return len - m.value;
+}
+
+// solve()'s measureResiduals, absorbed sums and gap lengths again, for corners (and walls, finishes) other
+// than the solve's own: a household opened as stored keeps its stored corners (model.js derive), and every
+// number shown with them must be theirs (final check 2026-10-25: '그림 659 (269mm 차이)' came from the solve
+// whose corners were thrown away, on a plan whose drawing had 378). sol: a solve() result whose thickness /
+// finish are the ones to use; positions: Map id → { x, y }. → a copy of sol with those positions
+export function solutionAt(project, derivedRooms, sol, positions, opts = {}) {
+  const edgeMap = new Map((project.edges || []).map((e) => [e.id, e]));
+  const measureResiduals = new Map();
+  for (const { m, parts } of measuredRuns(project, derivedRooms, (opts && opts.spans) || null)) {
+    const last = parts[parts.length - 1];
+    measureResiduals.set(m.id, residualOf(m, parts[0].dr, parts[0].i, last.dr, last.i, edgeMap, positions, sol.thickness, sol.finish));
+  }
+  const coord = (ids, axis) => {
+    const q = (ids || []).map((id) => positions.get(id)).find((p) => p && isFinite(p[axis]));
+    return q ? q[axis] : NaN;
+  };
+  const gaps = (sol.gaps || []).map((g) => {
+    const L = Math.abs(coord(g.nodesB, g.axis) - coord(g.nodesA, g.axis));
+    return isFinite(L) ? { ...g, length: L } : g;
+  });
+  let absorbed = sol.absorbed;
+  if (sol.softTerms) {
+    absorbed = new Map();
+    for (const [id, terms] of sol.softTerms) {
+      let sum = 0;
+      for (const q of terms) {
+        const v = q.edgeId != null ? sol.thickness.get(q.edgeId) : sol.finish.get(q.finishKey);
+        sum += q.c * ((isFinite(v) ? v : 0) - q.prior);
+      }
+      absorbed.set(id, Math.abs(sum));
+    }
+  }
+  return { ...sol, positions, measureResiduals, absorbed, gaps };
 }
 
 // derivedRooms: [{ roomId, room?, face, sides }]
@@ -1176,10 +1220,21 @@ export function solve(project, derivedRooms, opts = {}) {
 
   // Residuals use the final geometry (exact corner formula, final angles).
   const measureResiduals = new Map(), absorbed = new Map();
+  // softTerms: what each measure's absorbed sum is made of, by wall and finish (solutionAt sums it again
+  // for other walls and finishes): Map measureId → [{ c, prior, edgeId | finishKey }].
+  const softTerms = new Map();
+  const reverse = new Map();
+  const unknownsOf = (ax) => {
+    if (!reverse.has(ax)) {
+      const t = new Map(), f = new Map();
+      for (const [id, k] of ax.tIdx) if (!t.has(k)) t.set(k, id);
+      for (const [key, k] of ax.fIdx) if (!f.has(k)) f.set(k, key);
+      reverse.set(ax, { t, f });
+    }
+    return reverse.get(ax);
+  };
   for (const { m, dr, i, drB, iB } of measured) {
-    const len = innerLengthBetween({ sides: dr.sides, i, roomId: dr.roomId }, { sides: drB.sides, i: iB, roomId: drB.roomId },
-      edgeMap, positions, thickness, finish);
-    measureResiduals.set(m.id, len - m.value);
+    measureResiduals.set(m.id, residualOf(m, dr, i, drB, iB, edgeMap, positions, thickness, finish));
     const side = dr.sides[i];
     const ax = side.orient === 'h' ? axes.x : side.orient === 'v' ? axes.y : null;
     const soft = ax && ax.measureSoft.get(m.id);
@@ -1187,6 +1242,8 @@ export function solve(project, derivedRooms, opts = {}) {
       let sum = 0;
       for (const { idx, c, prior } of soft) sum += c * (ax.x[idx] - prior);
       absorbed.set(m.id, Math.abs(sum));
+      const u = unknownsOf(ax);
+      softTerms.set(m.id, soft.map(({ idx, c, prior }) => (u.t.has(idx) ? { c, prior, edgeId: u.t.get(idx) } : { c, prior, finishKey: u.f.get(idx) })));
     }
   }
 
@@ -1202,7 +1259,7 @@ export function solve(project, derivedRooms, opts = {}) {
 
   const both = (key) => [...axes.x[key], ...axes.y[key]];
   return {
-    positions, thickness, finish, scale, measureResiduals, absorbed,
+    positions, thickness, finish, scale, measureResiduals, absorbed, softTerms,
     // Map measureId → { tied: { x, y }, rows: '' | 'x' | 'y' | 'xy' } for every measured diagonal side
     diagonalRows,
     // h/v edges the measures pushed below their minimum (they would have folded there): amount = mm

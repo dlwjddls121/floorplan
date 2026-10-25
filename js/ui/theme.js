@@ -33,6 +33,7 @@ export const COLORS = {
   ink: '#37474F',               // live stroke preview
   inkDiagonal: '#E8710A',       // live stroke once the long-press (diagonal) mode is on
   preview: '#1A73E8',           // rectangle preview, drag ghost
+  exterior: '#D32F2F',          // 외벽 (외벽 보기, [출력] 종류 외벽 표시; core/exterior.js): prints dark gray in black and white
 };
 
 // Line widths in CSS pixels (screen mode).

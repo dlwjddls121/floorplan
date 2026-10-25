@@ -46,7 +46,7 @@ export const PEN_ERASE_HINT = 'S펜 옆 버튼을 누른 채 문지르면 어느
 export const TOOL_HINTS = {
   wall: `벽: 손가락이나 S펜으로 벽을 그으세요. 비스듬히 그으면 사선 벽이 됩니다. ${PEN_ERASE_HINT}`,
   // Kept short (two lines at most on a tablet): the hint floats over the top of the plan.
-  select: '선택: 벽·실·창·문·설비를 누르세요(실 이름을 누르면 이름을 바꿀 수 있습니다). 끌면 옮겨지고, 글자도 끌어 옮기며 길게 누르면 되돌립니다.',
+  select: '선택: 벽·실·창·문·설비를 누르세요(실 이름을 누르면 이름을 바꿀 수 있습니다). 끌면 옮겨지고(글자도), 옮긴 글자를 길게 누르면 제자리로 돌아갑니다.',
   room: '실 추가: 직사각형을 끌어서 그리면 가로×세로를 물어봅니다.',
   divider: '구역 나누기: 벽은 없지만 천장고나 실 이름이 다른 곳(예: 거실·주방 사이)에 선을 그으세요. 점선으로 그려집니다.',
   window: '창: 벽 위로 끌어다 놓으세요. 벽 끝 가까이 놓으면 끝에 붙습니다. 놓은 창을 누르면 재질·종류·규격을 고릅니다.',
@@ -339,7 +339,7 @@ export class ToolController {
       return;
     }
     if (a.kind === 'opening') {
-      if (g.isTap && a.nameRoom) {
+      if (g.isTap && a.nameRoom && !this._nameHidesOpening(a.nameRoom, g.points[0])) {
         this.openings.onGestureCancel();
         this.ctx.panel.openRoom(a.nameRoom, { editName: true });
         this.ctx.requestRender();
@@ -405,7 +405,7 @@ export class ToolController {
     // the letters it wins over everything; a near miss counts only when no wall is under the finger
     // (zoomed far out, names cover the walls of small rooms).
     const named = this._roomNameAt(world, NAME_PAD_PX.exact);
-    if (named) {
+    if (named && !this._nameHidesOpening(named, world)) {
       panel.openRoom(named, { editName: true });
       return;
     }
@@ -548,6 +548,16 @@ export class ToolController {
       console.error(err);
       return null;
     }
+  }
+
+  // An unnamed room's gray placeholder name ('이름 없는 실 1') drawn across a window or door does not hide
+  // it: a tap on the symbol opens the window/door (review 2026-10-25: 예시 세대 A o11 in 치수선 보기 opened the
+  // room's name field). A real name keeps priority (the surveyor taps it to rename).
+  _nameHidesOpening(roomId, world) {
+    const store = this.ctx.store();
+    const room = store && (store.project.rooms || []).find((r) => r.id === roomId);
+    if (room && room.name) return false;
+    return !!(world && this.openings.symbolAt(world));
   }
 
   _roomNameAt(world, padPx) {

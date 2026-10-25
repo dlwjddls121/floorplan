@@ -1,6 +1,6 @@
 // Raster export helpers (DEVTEST package; used by the device test page now and by the editor in stage C).
 //
-// - canvasToBlob: canvas → PNG / JPEG blob.
+// - canvasToBlob: canvas → PNG / JPEG blob (opts.dpi: the file says its resolution; withDpi, readDpi).
 // - buildRasterPdf: a minimal, hand-written PDF 1.4 with one page and one JPEG image (DCTDecode)
 //   drawn over the whole page. Because the image covers the page exactly, the printed physical size
 //   is exact when the user prints at "actual size" (100 %). No fonts are embedded: all text is already
@@ -25,10 +25,18 @@ export function mmToPt(mm) {
 
 /**
  * Encode a canvas (HTMLCanvasElement or OffscreenCanvas) as a Blob.
+ * opts.dpi: the resolution the canvas was drawn at; a PNG or JPEG then says so in the file (withDpi), so
+ * that 한글 / Word / Excel insert it, and a printer prints it at 'actual size', at its paper size.
  * Rejects with error.code = 'CANVAS_TO_BLOB_FAILED' when the browser cannot encode it
  * (typically because the canvas is larger than the device allows).
  */
-export function canvasToBlob(canvas, type = 'image/png', quality = 0.92) {
+export function canvasToBlob(canvas, type = 'image/png', quality = 0.92, opts = {}) {
+  const dpi = opts && opts.dpi;
+  const encoded = encodeBlob(canvas, type, quality);
+  return dpi > 0 ? encoded.then((blob) => withDpi(blob, dpi)) : encoded;
+}
+
+function encodeBlob(canvas, type, quality) {
   if (typeof canvas.toBlob !== 'function' && typeof canvas.convertToBlob === 'function') {
     return canvas.convertToBlob({ type, quality }).then((blob) => {
       if (!blob) throw codedError('CANVAS_TO_BLOB_FAILED', 'convertToBlob returned no blob');
@@ -51,6 +59,142 @@ export function canvasToBlob(canvas, type = 'image/png', quality = 0.92) {
       reject(e);
     }
   });
+}
+
+/**
+ * The same PNG or JPEG saying it is `dpi` dots per inch (review 2026-10-25: the browser writes no
+ * resolution — a PNG without a pHYs chunk, a JPEG with JFIF density 1:1 and no unit — so programs that
+ * size a picture by it took the 300 dpi A4 page for 96 or 72 dpi, three times A4, and the 1:60 written on
+ * it held only after resizing it by hand). PNG: a pHYs chunk (pixels per metre) right after IHDR, an
+ * earlier one dropped. JPEG: the JFIF APP0 segment's unit (1 = dots per inch) and density, or such a
+ * segment added after SOI. Anything else, or data that cannot be read so, comes back unchanged.
+ * blob: Blob | ArrayBuffer | Uint8Array. → Promise<Blob> (the input's type; image/png | image/jpeg)
+ */
+export async function withDpi(blob, dpi) {
+  const bytes = await toBytes(blob);
+  const type = (blob && blob.type) || (isPng(bytes) ? 'image/png' : isJpeg(bytes) ? 'image/jpeg' : '');
+  const d = Math.round(Number(dpi));
+  let out = null;
+  if (d > 0 && isPng(bytes)) out = pngWithDpi(bytes, d);
+  else if (d > 0 && isJpeg(bytes)) out = jpegWithDpi(bytes, d);
+  if (!out) return blob instanceof Blob ? blob : new Blob([bytes], { type });
+  return new Blob([out], { type });
+}
+
+/**
+ * The resolution a PNG or JPEG says it has. → { dpiX, dpiY } | null (none, or no unit)
+ */
+export function readDpi(bytes) {
+  if (isPng(bytes)) {
+    for (const c of pngChunks(bytes)) {
+      if (c.type !== 'pHYs' || c.length !== 9) continue;
+      const x = u32(bytes, c.data), y = u32(bytes, c.data + 4);
+      return bytes[c.data + 8] === 1 ? { dpiX: x * 0.0254, dpiY: y * 0.0254 } : null;
+    }
+    return null;
+  }
+  if (isJpeg(bytes)) {
+    const j = jfifAt(bytes);
+    if (j == null) return null;
+    const unit = bytes[j + 11], x = (bytes[j + 12] << 8) | bytes[j + 13], y = (bytes[j + 14] << 8) | bytes[j + 15];
+    if (unit === 1) return { dpiX: x, dpiY: y };
+    if (unit === 2) return { dpiX: x * 2.54, dpiY: y * 2.54 };
+    return null;
+  }
+  return null;
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const isPng = (b) => b instanceof Uint8Array && b.length >= 33 && PNG_SIGNATURE.every((v, i) => b[i] === v);
+const isJpeg = (b) => b instanceof Uint8Array && b.length >= 4 && b[0] === 0xff && b[1] === 0xd8;
+const u32 = (b, i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+
+// PNG chunks: [{ type, length, at (chunk start), data (data start), end (after the CRC) }]
+function pngChunks(bytes) {
+  const out = [];
+  let i = 8;
+  while (i + 12 <= bytes.length) {
+    const length = u32(bytes, i);
+    const end = i + 12 + length;
+    if (end > bytes.length) break;
+    out.push({ type: ascii(bytes, i + 4, 4), length, at: i, data: i + 8, end });
+    i = end;
+  }
+  return out;
+}
+
+function pngWithDpi(bytes, dpi) {
+  const chunks = pngChunks(bytes);
+  if (!chunks.length || chunks[0].type !== 'IHDR') return null;
+  const ppm = Math.round(dpi / 0.0254);
+  const phys = new Uint8Array(21);
+  const put32 = (i, v) => { phys[i] = (v >>> 24) & 255; phys[i + 1] = (v >>> 16) & 255; phys[i + 2] = (v >>> 8) & 255; phys[i + 3] = v & 255; };
+  put32(0, 9);
+  phys.set([0x70, 0x48, 0x59, 0x73], 4); // 'pHYs'
+  put32(8, ppm);
+  put32(12, ppm);
+  phys[16] = 1; // unit: metre
+  put32(17, crc32(phys, 4, 17));
+  const parts = [bytes.subarray(0, chunks[0].end), phys];
+  let at = chunks[0].end;
+  for (const c of chunks.slice(1)) {
+    if (c.type === 'pHYs') { parts.push(bytes.subarray(at, c.at)); at = c.end; }
+  }
+  parts.push(bytes.subarray(at));
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let k = 0;
+  for (const p of parts) { out.set(p, k); k += p.length; }
+  return out;
+}
+
+// The offset of the JFIF APP0 segment's marker (FF E0 … 'JFIF\0') among the segments before the
+// image data, or null.
+function jfifAt(bytes) {
+  let i = 2;
+  while (i + 4 <= bytes.length && bytes[i] === 0xff) {
+    const marker = bytes[i + 1];
+    if (marker === 0xda || marker === 0xd9) return null;
+    const len = (bytes[i + 2] << 8) | bytes[i + 3];
+    if (len < 2) return null;
+    if (marker === 0xe0 && len >= 16 && ascii(bytes, i + 4, 5) === 'JFIF\u0000') return i;
+    i += 2 + len;
+  }
+  return null;
+}
+
+function jpegWithDpi(bytes, dpi) {
+  const v = Math.min(65535, dpi);
+  const j = jfifAt(bytes);
+  if (j != null) {
+    const out = bytes.slice();
+    out[j + 11] = 1; // dots per inch
+    out[j + 12] = v >> 8; out[j + 13] = v & 255;
+    out[j + 14] = v >> 8; out[j + 15] = v & 255;
+    return out;
+  }
+  // No JFIF segment: one after SOI (version 1.1, no thumbnail).
+  const app0 = new Uint8Array([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 1, v >> 8, v & 255, v >> 8, v & 255, 0, 0]);
+  const out = new Uint8Array(bytes.length + app0.length);
+  out.set(bytes.subarray(0, 2), 0);
+  out.set(app0, 2);
+  out.set(bytes.subarray(2), 2 + app0.length);
+  return out;
+}
+
+let CRC_TABLE = null;
+// CRC-32 (PNG chunks) of bytes[start, end).
+function crc32(bytes, start, end) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      CRC_TABLE[n] = c >>> 0;
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = start; i < end; i++) c = CRC_TABLE[(c ^ bytes[i]) & 255] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
 /**

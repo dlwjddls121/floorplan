@@ -25,7 +25,8 @@ import {
 } from '../core/fixtures.js';
 import { drawFixtureGhost, FIXTURE_STYLE } from './draw-fixtures.js';
 
-export const FIXTURE_HINT = '설비: 위에서 종류를 고르고 놓을 곳을 누르거나 끌어 놓으세요. 벽 가까이 놓으면 벽에 붙습니다 (모서리 가까이면 모서리에 붙습니다). 놓은 설비를 끌면 옮겨지고, 고른 설비의 네모 점을 끌면 크기가 바뀝니다.';
+// Two lines at most on a landscape tablet (the 설비 chip bar sits right under the hint, main.js).
+export const FIXTURE_HINT = '설비: 위에서 종류를 고르고 놓을 곳을 누르세요. 벽이나 모서리 가까이 놓으면 붙습니다. 놓은 설비를 끌면 옮겨지고, 누른 설비의 네모 점을 끌면 크기가 바뀝니다.';
 
 const DRAG_SLOP_PX = 8;
 const SNAP_PX = 28;        // wall snapping distance on screen
@@ -524,6 +525,8 @@ export class FixturePanel {
   // opts.focusName: a 기타 — the name box takes the focus (the tablet keyboard opens).
   open(id, field = null, opts = {}) {
     if (this.state && this.state.nameDraft != null && this.state.id !== id) this.close();
+    // A size typed for the fixture shown so far (no [다음 ▶] / [확인]) goes into it first.
+    this.flushDraft();
     if (this.ctx.beforePanelOpen) this.ctx.beforePanelOpen();
     this.state = { id, active: field || 'w', focusName: !!(opts && opts.focusName) };
     this.buffer.reset('');
@@ -552,9 +555,40 @@ export class FixturePanel {
     return isWidthOnly(f) ? ['가로', '깊이'] : ['길이', '깊이'];
   }
 
-  close() {
-    // A 기타 name typed but not applied yet is kept (typed, then a tap elsewhere instead of [적용]).
+  // A size typed on the numpad but not confirmed is put in when the panel closes or moves on (a tap
+  // elsewhere, another tool, the other field, [벽 길이 ▶]), with a toast, as in the length panel (review
+  // 2026-10-25: a typed 싱크대 1500 was lost when the tool changed). Only while this panel shows. → bool
+  flushDraft() {
     const s = this.state;
+    const buf = this.buffer;
+    if (!s || !buf.edited) return false;
+    const v = buf.value();
+    buf.reset('');
+    const f = this.isOpen ? this._fixture() : null;
+    const store = this.ctx.store();
+    if (v == null || !f || !store) return false;
+    const name = this._names(f)[this._order(f).indexOf(s.active)] || '크기';
+    const what = `${f.type === OTHER_TYPE && typeof f.label === 'string' && f.label.trim() ? f.label.trim() : f.type} ${name}`;
+    if (v < MIN_FIXTURE_MM || v > MAX_FIXTURE_MM) {
+      this.ctx.toast(`입력하던 값(${formatMM(v)})은 넣지 않았습니다. 설비 크기는 ${MIN_FIXTURE_MM}~${formatMM(MAX_FIXTURE_MM)}mm 사이로 넣어 주세요.`, { type: 'warn', ms: 4500 });
+      return false;
+    }
+    if (f.measured[s.active] && Math.round(f[s.active]) === v) return false;
+    const ok = this.ctx.command(() => store.updateFixture(s.id, { [s.active]: v }), `${isStair(f) ? '계단' : '설비'} ${name}`);
+    if (ok) this.ctx.toast(`입력하던 값을 넣었습니다: ${what} ${formatMM(v)}mm (↶로 되돌릴 수 있습니다)`, { type: 'ok', ms: 4500 });
+    return !!ok;
+  }
+
+  // opts.discard: Esc, or the fixture is gone — a size or name still being typed is thrown away.
+  close({ discard = false } = {}) {
+    const s = this.state;
+    if (discard) {
+      this.buffer.reset('');
+      if (s) s.nameDraft = null;
+    } else {
+      this.flushDraft();
+    }
+    // A 기타 name typed but not applied yet is kept (typed, then a tap elsewhere instead of [적용]).
     if (s && s.nameDraft != null) {
       const draft = s.nameDraft;
       s.nameDraft = null;
@@ -574,7 +608,7 @@ export class FixturePanel {
   // Call after every store change (undo, redo, commands).
   refresh() {
     if (!this.isOpen) return;
-    if (!this._fixture()) return this.close();
+    if (!this._fixture()) return this.close({ discard: true });
     this._render();
   }
 
@@ -612,6 +646,7 @@ export class FixturePanel {
   }
 
   _setField(field) {
+    if (this.state.active !== field) this.flushDraft();
     this.state.active = field;
     this.buffer.reset('');
     this._render();
@@ -749,8 +784,9 @@ export class FixturePanel {
     const id = this.state && this.state.id;
     if (!id) return;
     const store = this.ctx.store();
+    this.buffer.reset('');
     this.ctx.command(() => store.deleteFixture(id), '설비 지우기');
-    this.close();
+    this.close({ discard: true });
     this.ctx.toast('지웠습니다. ↶ 버튼으로 되돌릴 수 있습니다.', {
       action: { label: '되돌리기', run: () => this.ctx.command(() => this.ctx.store().undo(), '되돌리기') },
     });

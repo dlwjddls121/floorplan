@@ -472,7 +472,11 @@ function sideFromRot(rot) {
 //       perpendicular walls (default true); exclude — fixture to ignore (not used yet).
 // A column keeps its plan size (가로 × 세로) on every wall: its along / depth sizes depend on the wall's
 // orientation (size.type '기둥'; its 가로 / 세로 are read at size.rot).
-export function snapFixture(project, derived, size, point, { snapMM = 300, rot = null, corner = true } = {}) {
+// opts.clear (a fixture dropped by the user, placeFixture; a free [↻ 회전]): a free result that would stand
+// through a wall is not returned as it is (see clearOfWalls). opts.clearW: the length the fixture has when
+// it stays free (placeFixture gives an unmeasured length shortened on a wall its full length back; final
+// check 2026-10-25: a sink shortened to 1450 and moved free stood 100 mm into a wall at 1800).
+export function snapFixture(project, derived, size, point, { snapMM = 300, rot = null, corner = true, clear = false, clearW = null } = {}) {
   const column = isColumn(size);
   const ext = column ? fixtureExtents({ w: size.w, d: size.d, rot: size.rot || 0 }) : null;
   const sizeOn = (h) => (column ? (h ? { w: ext.ex, d: ext.ey } : { w: ext.ey, d: ext.ex }) : { w: size.w, d: size.d });
@@ -483,6 +487,7 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
   // the fixture belongs to another room or to the outside (a deep stair dropped next to the end of
   // an L's inner wall snapped onto that wall's notch side) is not a candidate.
   const home = keepsInRoom(size) ? roomAround(project, derived, point) : null;
+  const inSomeRoom = (pt) => ((derived && derived.rooms) || []).some((dr) => dr.face && dr.face.points && pointInPolygon(pt, dr.face.points));
   let best = null;
   for (const wl of walls) {
     const { w, d } = sizeOn(wl.h);
@@ -490,12 +495,30 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
     const across = wl.h ? point.y : point.x;
     // The fixture must overlap the wall's extent (half its length may stick out at an end).
     if (along < wl.s0 - w / 2 || along > wl.s1 + w / 2) continue;
-    const side = across >= wl.c ? 1 : -1;
+    // Distance from the wall face on the drop point's side to the point (negative inside the wall).
+    const dist = Math.abs(across - wl.c) - wl.t / 2;
+    // In front of the piece itself (not beyond its end, where the fixture would only stick out past it).
+    const inFront = along >= wl.s0 && along <= wl.s1;
+    let side = across >= wl.c ? 1 : -1;
+    // A point on the wall itself: the face toward a room (a tap on an outer wall's line put the
+    // fixture outside the house).
+    if (dist < 0 && inFront) {
+      const front = (sd) => (wl.h ? { x: along, y: wl.c + sd * (wl.t / 2 + 50) } : { x: wl.c + sd * (wl.t / 2 + 50), y: along });
+      if (!inSomeRoom(front(side)) && inSomeRoom(front(-side))) side = -side;
+    }
     const r = rotFor(wl.h, side);
     if (rot != null && normalizeRot(rot) !== r) continue;
-    // Gap between the fixture's back (centre at `point`) and the wall face on that side.
-    const gap = Math.abs(across - wl.c) - wl.t / 2 - d / 2;
-    if (Math.abs(gap) > snapMM) continue;
+    // A drop point is the fixture's centre, but one nearer the face than half the depth means the
+    // fixture against the wall (centred there it would stand in the wall): a tap right next to a wall
+    // attaches the fixture to it, as the hint says (review 2026-10-25: such taps left it free, unturned and
+    // half through the wall; only a band about half its depth away attached). `gap`: how far the
+    // fixture's back would be from the face.
+    // Beyond the piece's end the point is the centre as before (|gap| ≤ snapMM).
+    const gap = !inFront ? Math.abs(dist - d / 2) : dist < d / 2 ? 0 : dist - d / 2;
+    if (gap > snapMM) continue;
+    // Which wall: the one the point is nearest to, either at its face or at its fixture centre (a sink
+    // dropped centred against one wall near a side wall stays on its own wall).
+    const score = inFront ? Math.min(Math.max(0, dist), Math.abs(dist - d / 2)) : gap;
     if (home) {
       // Where it would stand along this wall piece (kept on the piece, as fitFixtureOnSide does).
       const s = wl.s1 - wl.s0 >= w ? Math.min(wl.s1 - w / 2, Math.max(wl.s0 + w / 2, along)) : (wl.s0 + wl.s1) / 2;
@@ -503,9 +526,11 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
       const at = wl.h ? { x: s, y: c } : { x: c, y: s };
       if (!pointInPolygon(at, home.dr.face.points)) continue;
     }
-    if (!best || Math.abs(gap) < Math.abs(best.gap)) best = { wl, side, rot: r, gap, along };
+    if (!best || score < best.score) best = { wl, side, rot: r, gap, score, along };
   }
+  if (!best && clear && !keepsInRoom(size)) best = clearOfWalls(walls, isNum(clearW) && clearW > 0 ? { ...size, w: clearW } : size, point, free, rot, inSomeRoom);
   if (!best) return free;
+  if (best.free) return best.free;
   let { wl } = best;
   const { side } = best;
   const { w, d } = sizeOn(wl.h);
@@ -527,6 +552,98 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
     rot: best.rot,
     wall: wl.edge.id,
   };
+}
+
+// A fixture dropped farther from every wall than the snap reaches stands free, centred on the drop point
+// and unturned. When that box would reach into or through a wall (recheck 2026-10-25: a 1800 싱크대 tapped
+// 500–800 mm from a side wall stood 100–400 mm into it or through it, outside the house; a 욕조 at 600 mm
+// 150 mm into it, with no check item), it goes against the wall it would cross, turned to face the room,
+// when the drop point is in front of that wall (the nearest such wall); else (a rotation asked for, or the
+// point beyond the wall's end) it is moved clear of the wall's face. Columns and stairs are kept in their
+// room by keepColumnInRoom. → { wl, side, rot, along } (as snapFixture's best) | { free } (moved) | null
+function clearOfWalls(walls, size, point, free, rot, inSomeRoom) {
+  const fe = fixtureExtents({ w: size.w, d: size.d, rot: free.rot });
+  const box = (p) => ({ minX: p.x - fe.ex / 2, maxX: p.x + fe.ex / 2, minY: p.y - fe.ey / 2, maxY: p.y + fe.ey / 2 });
+  const eps = 1;
+  const crosses = (wl, b) => {
+    const a0 = wl.h ? b.minX : b.minY, a1 = wl.h ? b.maxX : b.maxY;
+    const c0 = wl.h ? b.minY : b.minX, c1 = wl.h ? b.maxY : b.maxX;
+    return a1 > wl.s0 + eps && a0 < wl.s1 - eps && c1 > wl.c - wl.t / 2 + eps && c0 < wl.c + wl.t / 2 - eps;
+  };
+  const crossing = walls.filter((wl) => crosses(wl, box(point)));
+  if (!crossing.length) return null;
+  let best = null;
+  for (const wl of crossing) {
+    const along = wl.h ? point.x : point.y;
+    const across = wl.h ? point.y : point.x;
+    if (along < wl.s0 || along > wl.s1) continue;
+    let side = across >= wl.c ? 1 : -1;
+    const dist = Math.abs(across - wl.c) - wl.t / 2;
+    if (dist < 0) {
+      const front = (sd) => (wl.h ? { x: along, y: wl.c + sd * (wl.t / 2 + 50) } : { x: wl.c + sd * (wl.t / 2 + 50), y: along });
+      if (!inSomeRoom(front(side)) && inSomeRoom(front(-side))) side = -side;
+    }
+    const r = rotFor(wl.h, side);
+    if (rot != null && normalizeRot(rot) !== r) continue;
+    if (!best || dist < best.dist) best = { wl, side, rot: r, along, dist };
+  }
+  if (best) return best;
+  // Moved across each wall it reaches into, to the face on the drop point's side.
+  const at = { x: point.x, y: point.y };
+  for (const wl of crossing) {
+    if (!crosses(wl, box(at))) continue;
+    const side = (wl.h ? point.y : point.x) >= wl.c ? 1 : -1;
+    const half = (wl.h ? fe.ey : fe.ex) / 2;
+    const c = wl.c + side * (wl.t / 2 + half);
+    if (wl.h) at.y = c; else at.x = c;
+  }
+  return { free: { ...free, x: at.x, y: at.y } };
+}
+
+// A free fixture (not a column or stair: keepColumnInRoom keeps those in their room) whose box reaches into
+// or through a wall after its size was typed (final check 2026-10-25: a 수납장 typed 6000 wide in a 4850 mm
+// room stood through both side walls) is moved clear of the face on its centre's side of each such wall;
+// when it then still crosses a wall (larger than the room) it stays where it was, and the check
+// '벽에 걸친 설비' names it (checks-full.js, fixtureCrossesWall). → fixture (the same object if unchanged)
+export function clearFreeOfWalls(project, derived, raw) {
+  const f = normalizeFixture(raw);
+  if (!f || f.wall || keepsInRoom(f) || !project) return raw;
+  const walls = axisWalls(project, derived).filter((wl) => wl.edge.kind !== 'divider' && wl.t > 0);
+  const hit = (x, y) => walls.filter((wl) => boxCrossesWall(wl, fixtureBoundsAt(f, x, y)));
+  const crossing = hit(f.x, f.y);
+  if (!crossing.length) return raw;
+  const { ex, ey } = fixtureExtents(f);
+  const at = { x: f.x, y: f.y };
+  for (const wl of crossing) {
+    const side = (wl.h ? f.y : f.x) >= wl.c ? 1 : -1;
+    const c = wl.c + side * (wl.t / 2 + (wl.h ? ey : ex) / 2);
+    if (wl.h) at.y = c; else at.x = c;
+  }
+  if (hit(at.x, at.y).length) return raw;
+  return { ...raw, x: at.x, y: at.y };
+}
+
+// The walls (straight h / v, not dividers, not its own) a free fixture's box reaches into by more than
+// 1 mm. → [edge id]
+export function fixtureCrossesWalls(project, derived, raw) {
+  const f = normalizeFixture(raw);
+  if (!f || !project) return [];
+  const walls = axisWalls(project, derived).filter((wl) => wl.edge.kind !== 'divider' && wl.t > 0 && wl.edge.id !== f.wall);
+  const b = fixtureBoundsAt(f, f.x, f.y);
+  return walls.filter((wl) => boxCrossesWall(wl, b)).map((wl) => wl.edge.id);
+}
+
+function fixtureBoundsAt(f, x, y) {
+  const { ex, ey } = fixtureExtents(f);
+  return { minX: x - ex / 2, maxX: x + ex / 2, minY: y - ey / 2, maxY: y + ey / 2 };
+}
+
+// The box reaches into the wall band (centre line ± half the thickness, along the wall piece) by more
+// than eps mm each way, as clearOfWalls judges it.
+function boxCrossesWall(wl, b, eps = 1) {
+  const a0 = wl.h ? b.minX : b.minY, a1 = wl.h ? b.maxX : b.maxY;
+  const c0 = wl.h ? b.minY : b.minX, c1 = wl.h ? b.maxY : b.maxX;
+  return a1 > wl.s0 + eps && a0 < wl.s1 - eps && c1 > wl.c - wl.t / 2 + eps && c0 < wl.c + wl.t / 2 - eps;
 }
 
 // Slide the fixture along its wall so an end that is within snapMM of a perpendicular wall's face
@@ -1844,7 +1961,7 @@ export function installFixtures(DocStore) {
       // A new length (or type) must still fit the room side; where it stands is kept (`along` is taken
       // from the resized position, whose end near the corner stayed put).
       if (nf.wall) nf = fitFixtureOnSide(p, this.derived, nf);
-      else nf = keepColumnInRoom(p, this.derived, nf);
+      else nf = clearFreeOfWalls(p, this.derived, keepColumnInRoom(p, this.derived, nf));
       // The drop place (dropShare) only stands while the length is unmeasured and still nearly fills
       // its side (a shorter type has room: `along` says where it is from now on).
       if (nf.dropShare != null && !keepsDropShare(p, this.derived, nf)) nf = { ...nf, dropShare: undefined };
@@ -1924,8 +2041,11 @@ export function installFixtures(DocStore) {
       if (turned) {
         placed = turned;
       } else if (opts.snapMM > 0) {
-        const s = snapFixture(p, this.derived, { ...cur, rot: nextRot }, { x: cur.x, y: cur.y }, { snapMM: opts.snapMM, rot: nextRot });
-        if (s.wall) placed = s;
+        // A free fixture turned so that it would stand through a wall goes against that wall when the
+        // turn faces the room from it, else it is moved clear of the wall's face (clearOfWalls; final check
+        // 2026-10-25: a free sink 800 mm below the top face, turned, stood 100 mm into the top wall).
+        const s = snapFixture(p, this.derived, { ...cur, rot: nextRot }, { x: cur.x, y: cur.y }, { snapMM: opts.snapMM, rot: nextRot, clear: true });
+        if (s.wall || s.x !== cur.x || s.y !== cur.y) placed = s;
       }
       // On a wall: inside the room side it now stands on (R3: the turn keeps it in the room); free: off
       // a diagonal wall of its room.
@@ -1979,7 +2099,11 @@ export function installFixtures(DocStore) {
 // (dropNearCorner), not because its default-size end happens to come close on a small sketch.
 export function placeFixture(project, derived, f, point, snapMM, rot = null) {
   if (snapMM > 0) {
-    let s = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null });
+    const fm = f.measured || {};
+    const clearW = !fm.w && isNum(f.fullW) ? f.fullW : f.w;   // its length when it stays free (below)
+    let s = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null, clear: true, clearW });
+    // Free, but moved off a wall it would have stood through (clearOfWalls).
+    if (!s.wall && (s.x !== point.x || s.y !== point.y)) point = { x: s.x, y: s.y };
     if (s.wall) {
       const turned = isColumn(f) ? orientColumn(f, s.rot) : f;
       let dropShare = null;
@@ -1989,7 +2113,7 @@ export function placeFixture(project, derived, f, point, snapMM, rot = null) {
         const rs = probe ? fixtureRoomSide(project, derived, probe) : null;
         const e = rs ? (project.edges || []).find((x) => x.id === s.wall) : null;
         if (rs && e && nearlyFills(want, rs.length)) {
-          const plain = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null, corner: false });
+          const plain = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null, corner: false, clear: true, clearW });
           if (plain.wall === s.wall && plain.rot === s.rot) s = plain;
           dropShare = shareAt(project, e, rs.key, rs.lo, rs.hi, point[rs.key]);
         } else if (rs && e) {
@@ -1999,7 +2123,7 @@ export function placeFixture(project, derived, f, point, snapMM, rot = null) {
           // the values). So the DROP decides: into the corner when the drop point is within snapMM of
           // the side's end, or when the fixture's end is that close AND in the outer quarter of the free
           // length beside it (dropped clearly toward the corner); else it stays where it was dropped.
-          const plain = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null, corner: false });
+          const plain = snapFixture(project, derived, f, point, { snapMM, rot: rot != null ? rot : null, corner: false, clear: true, clearW });
           if (plain.wall === s.wall && plain.rot === s.rot && !dropNearCorner(rs, plain[rs.key], Math.min(want, rs.length), snapMM)) s = plain;
         }
       }
