@@ -99,11 +99,28 @@ export function isDesktopPlatform(nav = typeof navigator !== 'undefined' ? navig
   return !((nav.maxTouchPoints || 0) > 1);
 }
 
+// What a write adds to a household (a file, the copy on the device: storage.js): writeHooks.stamp(project) →
+// the project to write. ui/wiring.js sets it (core/model.js FILE_RECORDS: the version whose solve the
+// corners are, the print scale the texts moved by hand were written at; only a household open in the editor
+// gets them, any other copy is written as it is). Never throws: without it the project is written as before.
+// opts.quick (storage.saveProjectNow, a page going away): nothing that takes time (the print scale only when
+// it is known already); the normal save that follows writes the rest.
+export const writeHooks = { stamp: null };
+export function stampForWrite(project, opts = {}) {
+  if (!project || typeof writeHooks.stamp !== 'function') return project;
+  try {
+    return writeHooks.stamp(project, opts) || project;
+  } catch (err) {
+    console.error('[fileio] stamp failed', err);
+    return project;
+  }
+}
+
 // Builds the file content and the two candidate files for an export. Pure apart from `new File`.
 // → { text, exportedAt, project, jsonFile, txtFile }
 export function buildExportFiles(project, now = new Date()) {
   const exportedAt = now.toISOString();
-  const out = Object.assign({}, project, { exportedAt });
+  const out = Object.assign({}, stampForWrite(project), { exportedAt });
   // Two-space indentation keeps the file readable for the person who reads it for estimates (appendix A).
   const text = JSON.stringify(out, null, 2);
   const jsonFile = new File([text], projectFileName(out, '.json', now), { type: 'application/json', lastModified: now.getTime() });

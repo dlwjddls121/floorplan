@@ -120,6 +120,11 @@ const ANGLE_SETTLED_MM = 0.01; // stop when no node moved more than this between
 // ... and with diagonal rows: the dense solve's own rounding (bound pins at 1e8 against the 1e-6
 // gauge) moves nodes by a few hundredths of a mm from pass to pass, so these settle at 0.1 mm.
 const DIAGONAL_SETTLED_MM = 0.1;
+// From this pass on, passes with diagonal rows that turn round without settling are calmed (see the loop).
+const RELAX_FROM_PASS = 4;
+// The row weight of a measured part of a straight diagonal line whose ends the axis values fix (see
+// diagonalRuns' locator): about an assumed wall's (thicknessDefault), far below a value's.
+const LOCATOR_WEIGHT = 1;
 // A diagonal value must be longer than the projection the axis values fix by at least this much to add
 // its row (else the values disagree: the diagonal stays a check, see the header).
 const DIAGONAL_MARGIN_MM = 1;
@@ -307,13 +312,87 @@ export function thicknessPriors(project, derivedRooms) {
     }
   }
   const priors = new Map();
+  const nodes = new Map((project.nodes || []).map((n) => [n.id, n]));
   for (const e of project.edges || []) {
     if (e.kind === 'divider') { priors.set(e.id, 0); continue; }
     if (e.thickness != null && isFinite(e.thickness)) { priors.set(e.id, Number(e.thickness)); continue; }
     const s = sidesWithFace.get(e.id);
-    priors.set(e.id, s && s.left && s.right ? settings.intWall : settings.extWall);
+    const inner = s && s.left && s.right;
+    priors.set(e.id, inner || (s && islandWall(e, s.left ? -1 : 1, nodes, derivedRooms)) ? settings.intWall : settings.extWall);
   }
   return priors;
+}
+
+// A wall with a room on one side only whose other side lies inside another room: the wall of a room
+// standing free inside a room (an island; final review 2026-10-28, C5: the 드레스룸 inside the 안방 was
+// drawn with 150 mm outer walls). It is an inner wall. Not when the room it encloses is one of several
+// rooms joined by their walls (a house standing in a 마당 drawn around it: round 2, 2026-10-31, the house's
+// outer walls were taken as 100 mm inner walls and every room drawn 50 mm small on each side), nor inside
+// a space named like a yard (YARD_NAME: a 창고 standing in the 마당 keeps outer walls). Inside a room with
+// another name (an indoor space: 거실, 방, …) a group of joined rooms is an island too (round 3, 2026-11-01: a
+// 화장실 + 샤워실 pod standing in the 거실 was drawn with 150 mm outer walls, its rooms 4 % large); only an
+// unnamed host or a yard holds a building. sign: the wall's free side (−1: the left of a → b). dims.js
+// rule 2 decides by the same rule. → bool
+// Outdoor spaces (round 4, 2026-11-01: a 옥탑방 house of three rooms drawn on its 옥상, or a house in a
+// 테라스 / 데크 / 바깥 / 골목 …, got 100 mm outer walls and every value printed twice): YARD_NAME, but not a
+// room named after one (INDOOR_NAME: 옥탑방, 바깥방, 뜰방, 실내정원).
+const YARD_NAME = /마당|중정|정원|뜰|외부|옥외|대지|공터|텃밭|주차|담장|울타리|옥상|옥탑|테라스|데크|바깥|밖|골목|도로|화단/;
+const INDOOR_NAME = /실내|방\s*\d*$/;
+function isYardName(name) {
+  const n = String(name || '').trim();
+  return YARD_NAME.test(n) && !INDOOR_NAME.test(n);
+}
+export function islandWall(e, sign, nodes, derivedRooms) {
+  const A = nodes.get(e.a), B = nodes.get(e.b);
+  if (!A || !B) return false;
+  const L = Math.hypot(B.x - A.x, B.y - A.y);
+  if (!(L > EPS)) return false;
+  // The left normal of a → b (y down: (dy, −dx)); the free side is the one without a face.
+  const off = 60;
+  const p = { x: (A.x + B.x) / 2 + sign * ((B.y - A.y) / L) * off, y: (A.y + B.y) / 2 - sign * ((B.x - A.x) / L) * off };
+  const rooms = derivedRooms || [];
+  // The host: the SMALLEST room around that point (round 4, 2026-11-01: a 드레스룸 standing in 방1 of a house
+  // drawn inside its 마당 took the 마당, the first face found around the point, and got 150 mm walls).
+  let host = null, hostArea = Infinity;
+  for (const dr of rooms) {
+    if (!dr.face || !dr.face.points || dr.face.edgeIds.includes(e.id) || !pointInPolygonSimple(p, dr.face.points)) continue;
+    const area = Math.abs(polygonAreaSimple(dr.face.points));
+    if (area < hostArea) { host = dr; hostArea = area; }
+  }
+  if (!host) return false;
+  const hostRoom = host.room || null;
+  if (hostRoom && isYardName(hostRoom.name)) return false;
+  if (hostRoom && String(hostRoom.name || '').trim()) return true;
+  // The rooms joined to this wall's room by shared walls, the host aside: more than one is a building.
+  const own = rooms.find((dr) => dr.face && dr.face.edgeIds.includes(e.id));
+  if (!own) return true;
+  const seen = new Set([own.roomId]);
+  for (const queue = [own]; queue.length;) {
+    const dr = queue.pop();
+    const ids = new Set(dr.face.edgeIds);
+    for (const o of rooms) {
+      if (seen.has(o.roomId) || o.roomId === host.roomId || !o.face || !o.face.edgeIds.some((id) => ids.has(id))) continue;
+      seen.add(o.roomId);
+      if (seen.size > 1) return false;
+      queue.push(o);
+    }
+  }
+  return true;
+}
+
+function polygonAreaSimple(poly) {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) a += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y);
+  return a / 2;
+}
+
+function pointInPolygonSimple(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
 }
 
 // Walls with a room on one side only (the house's outer walls). → Set of edge ids
@@ -434,6 +513,202 @@ function measuredRuns(project, derivedRooms, spans) {
     out.push({ m, parts: [{ dr, i }] });
   }
   return out;
+}
+
+// Values that close a LOOP on one axis (final review 2026-10-28: a −500 / +1000 typo spread over several
+// values passed silently, each value's own share of the wall changes under closureTolerance; a +500 typo
+// named only correct values that happened to take the slack). Every measured h side (or span) ties the
+// x of its two end corners: x_B − x_A = value − (its corner terms with the ASSUMED walls, no finish),
+// and likewise every v side the y of its ends (corners on one v wall share x, on one h wall y). Where these
+// rows form loops, the assumed walls make them close; what does not close is a wrong value (or a wall
+// far thicker than assumed). For every value with another path between its corners the rows without it
+// are fitted (least squares) and give what the others say its value should be: dev = how far it is off.
+// A value off by more than `tol` (plus LOOP_WALL_SLACK_MM for every assumed wall more on one path than on
+// the other: round 2, 2026-10-31, a 고시원 row of 7 rooms with real 150 mm walls against its 복도 differed
+// by 6 × 50 mm and named the correct 복도), plus LOOP_TAPE_SLACK_MM for every value on its two paths (round
+// 3), is in an open loop. The suspects (round 2):
+//  - the values without which the rest closes (within tol / 6): one, that value (D4: the 복도 typo, not the
+//    15 values of the rows); several, they are interchangeable (one path of one loop: any could be wrong);
+//  - else (two mistakes, or walls thicker than assumed): every value off by more than `tol`, the one
+//    without which the rest disagrees least first; when that leaves the rest within tol / 2, the loop is
+//    worded as one wrong value after all (round 3: 예시 세대 A, whose correct values already disagree by 265 mm).
+// A dev of exactly `tol` is not over it (as the 치수 폐합 and 마주 보는 벽 checks: E4's ±300 typo named the
+// correct value facing it, whichever float came out 1e-12 larger).
+// (Two rows wrong the same way look like one wrong row, the correct third one: C3 with 욕실 and 창고 −500
+// names the 방1 · 방2 · 거실 row. Once those are confirmed, the loop no longer explains the others: the wrong
+// 욕실's own '벽 두께로 423mm 맞춤' is 확인필요 again, checks-full loopChecks.)
+// → [{ axis, suspects: [measureId], members: [measureId] (every value off by more than its tolerance),
+//      amount (the largest dev), devs: Map measureId → dev, closes (the suspects alone close the loop),
+//      walls (the most assumed walls between a suspect's two paths), soft? (over the tolerance and the
+//      walls' slack only by the tape slack: see below) }]
+export function valueLoops(project, derivedRooms, spans = null, { tol = 300, priors = null } = {}) {
+  const edgeMap = new Map((project.edges || []).map((e) => [e.id, e]));
+  const pri = priors || thicknessPriors(project, derivedRooms);
+  // Every assumed wall as 1 (its thickness unknown): a row's term in walls.
+  const unit = new Map((project.edges || []).map((e) => [e.id, e.kind === 'divider' || (e.thickness != null && isFinite(e.thickness)) ? 0 : 1]));
+  const runs = measuredRuns(project, derivedRooms, spans);
+  const out = [];
+  let ratios = null;
+  for (const axis of ['x', 'y']) {
+    const along = axis === 'x' ? 'h' : 'v', tie = axis === 'x' ? 'v' : 'h';
+    const uf = new UnionFind();
+    for (const e of project.edges || []) if (e.orient === tie) uf.union(e.a, e.b);
+    const rows = [];
+    for (const { m, parts } of runs) {
+      const side = parts[0].dr.sides[parts[0].i], last = parts[parts.length - 1].dr.sides[parts[parts.length - 1].i];
+      if (side.orient !== along || last.orient !== along) continue;
+      const ga = uf.find(side.from), gb = uf.find(last.to);
+      const sign = Math.sign(side.dir[axis]);
+      if (ga === gb || !sign) continue;
+      const ps = parts.map((p) => ({ sides: p.dr.sides, i: p.i }));
+      const { term } = sketchSpanParts(ps, edgeMap, pri);
+      const walls = sketchSpanParts(ps, edgeMap, unit).term;
+      rows.push({ id: m.id, ga, gb, D: sign * (m.value - term), W: -sign * walls });
+    }
+    if (rows.length < 2) continue;
+    // Components of the groups joined by rows.
+    const comp = new UnionFind();
+    for (const r of rows) comp.union(r.ga, r.gb);
+    const byComp = new Map();
+    for (const r of rows) {
+      const c = comp.find(r.ga);
+      if (!byComp.has(c)) byComp.set(c, []);
+      byComp.get(c).push(r);
+    }
+    for (const list of byComp.values()) {
+      const groups = [...new Set(list.flatMap((r) => [r.ga, r.gb]))];
+      if (list.length < groups.length) continue; // a tree: nothing to compare
+      const all = loopFit(list, groups, null);
+      if (!all || Math.max(...list.map((r) => Math.abs(all.res.get(r.id)))) <= tol / 6) continue;
+      const devs = new Map(), wallsOff = new Map(), closes = new Set(), rests = new Map(), pathVals = new Map();
+      for (const r of list) {
+        const f = loopFit(list, groups, r);
+        if (!f || !f.reached) continue; // a bridge: no other path between its corners
+        devs.set(r.id, r.D - (f.P.get(r.gb) - f.P.get(r.ga)));
+        const fw = loopFit(list, groups, r, 'W');
+        wallsOff.set(r.id, fw ? Math.abs(r.W - (fw.P.get(r.gb) - fw.P.get(r.ga))) : 0);
+        // What the others still disagree by without this value (round 3: the order of split suspects).
+        const rest = f.res.size === 0 ? 0 : Math.max(...[...f.res.values()].map(Math.abs));
+        rests.set(r.id, rest);
+        if (rest <= tol / 6) closes.add(r.id);
+        pathVals.set(r.id, 1 + shortestChain(list, r));
+      }
+      // Tape slack (round 3, 2026-11-01): every value of the loop may be 5–10 mm off by the tape; 예시 세대 A typed
+      // with tape values crossed the limit by 10–25 mm in the middle of the typing (a 확인필요 naming five
+      // correct values came and went). LOOP_TAPE_SLACK_MM for every value on its two paths (the value and the
+      // shortest chain of the others between its corners), not the whole component (a long 고시원 row).
+      const limit = (id, tape = LOOP_TAPE_SLACK_MM) => tol + LOOP_WALL_SLACK_MM * (wallsOff.get(id) || 0) + tape * (pathVals.get(id) || 0) + LOOP_EPS_MM;
+      let bad = [...devs].filter(([id, d]) => Math.abs(d) > limit(id));
+      // Over the tolerance only by what the tape may add (round 4, 2026-11-01): a 'soft' loop. It still says
+      // what the walls had to take (D5 with 화장실 위쪽 벽 2593 typed 2893: 301 mm, under the slack; the walls
+      // took 304 / 303 mm on two correct neighbours, and their 확인필요 named only them): model.js
+      // computeWarnings keeps it as a loop where such a 확인필요 stands on its values, else as 참고.
+      let soft = false;
+      if (!bad.length) {
+        bad = [...devs].filter(([id, d]) => Math.abs(d) > limit(id, 0));
+        if (!bad.length) continue;
+        soft = true;
+      }
+      const top = Math.max(...bad.map(([, d]) => Math.abs(d)));
+      // Several interchangeable suspects: the one the drawing agrees with least first (its value against
+      // the plan's median value / drawn length; a hand sketch is too rough to decide by).
+      ratios = ratios || scaleRatios(project, derivedRooms, pri, spans);
+      const med = median([...ratios.values()]);
+      const off = (id) => (ratios.has(id) && med > 0 ? Math.abs(ratios.get(id) / med - 1) : 0);
+      const closers = bad.filter(([id]) => closes.has(id));
+      // No one value explains it: every value off by more than the plain tolerance (예시 세대 A with 주방 2800 typed
+      // 2500: the 2500 is 308 off, its walls' slack aside, the four correct values the walls had already
+      // put 265 off now 415).
+      const split = closers.length ? null : [...devs].filter(([, d]) => Math.abs(d) > tol + LOOP_EPS_MM);
+      let suspects = (closers.length ? closers : split).map(([id]) => id).sort((a, b) => off(b) - off(a));
+      // Split suspects (round 3, 2026-11-01): the one without which the others disagree least first (in steps
+      // of tol / 6, then as above), and when that leaves the rest within tol / 2 it is one value after all:
+      // a household whose correct values already disagree a little (예시 세대 A 265 mm over its y loop) with one
+      // typo was worded '틀린 값이 둘 이상이거나 …' and the typo could fall outside the ※ line's first names.
+      let rankCloses = false;
+      if (split && suspects.length) {
+        const rk = (id) => (rests.has(id) ? rests.get(id) : Infinity);
+        const step = (id) => Math.floor(rk(id) / (tol / 6));
+        suspects = suspects.slice().sort((a, b) => (step(a) - step(b)) || (off(b) - off(a)));
+        rankCloses = rk(suspects[0]) <= tol / 2;
+      }
+      out.push({
+        axis, suspects, members: bad.map(([id]) => id), amount: top, devs, closes: closers.length > 0 || rankCloses,
+        walls: Math.max(...suspects.map((id) => wallsOff.get(id) || 0)), ...(soft ? { soft: true } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+// valueLoops: what an assumed wall may be off by (mm; 예시 세대 A as measured: 265 mm over its y loop with
+// correct values; 150 mm walls where 100 is assumed), the margin over the tolerance,
+const LOOP_WALL_SLACK_MM = 10;
+// and what every value on a loop's paths may be off by the tape (round 3: 3 mm; 5 mm cleared 예시 세대 A's typing
+// but missed a −400 typo in E3).
+const LOOP_TAPE_SLACK_MM = 3;
+const LOOP_EPS_MM = 0.01;
+// solve() chainTest: only for a diagonal check that misses by more (mm; model.js RESIDUAL_TOLERANCE_MM).
+const CHAIN_TEST_MIN_MM = 5;
+
+// The number of rows on a shortest chain between row `skip`'s two groups without it (0 when none).
+function shortestChain(rows, skip) {
+  const use = rows.filter((r) => r !== skip);
+  const depth = new Map([[skip.ga, 0]]);
+  for (let queue = [skip.ga]; queue.length;) {
+    const next = [];
+    for (const u of queue) {
+      for (const r of use) {
+        if (r.ga !== u && r.gb !== u) continue;
+        const v = r.ga === u ? r.gb : r.ga;
+        if (depth.has(v)) continue;
+        depth.set(v, depth.get(u) + 1);
+        if (v === skip.gb) return depth.get(v);
+        next.push(v);
+      }
+    }
+    queue = next;
+  }
+  return 0;
+}
+
+// Least squares x_b − x_a = D over rows (without row `skip`), one group held at 0 (key: the rows' value to
+// fit, 'D', or 'W' for their assumed walls).
+// → { P: Map group → coordinate, res: Map rowId → residual, reached (skip's two groups still joined) } | null
+function loopFit(rows, groups, skip, key = 'D') {
+  const use = skip ? rows.filter((r) => r !== skip) : rows;
+  const idx = new Map(groups.map((g, k) => [g, k]));
+  const n = groups.length;
+  // Groups reachable from the first one without `skip` (the others are fitted apart, held at 0 each).
+  const adj = new Map(groups.map((g) => [g, []]));
+  for (const r of use) { adj.get(r.ga).push(r.gb); adj.get(r.gb).push(r.ga); }
+  const seen = new Set();
+  const comps = [];
+  for (const g0 of groups) {
+    if (seen.has(g0)) continue;
+    comps.push(g0);
+    seen.add(g0);
+    for (const q = [g0]; q.length;) { const u = q.pop(); for (const v of adj.get(u)) if (!seen.has(v)) { seen.add(v); q.push(v); } }
+  }
+  const N = new Float64Array(n * n), b = new Float64Array(n);
+  for (const r of use) {
+    const i = idx.get(r.ga), j = idx.get(r.gb);
+    N[i * n + i] += 1; N[j * n + j] += 1; N[i * n + j] -= 1; N[j * n + i] -= 1;
+    b[j] += r[key]; b[i] -= r[key];
+  }
+  for (const g of comps) { const k = idx.get(g); N[k * n + k] += 1e6; }
+  const x = solveDense(N, b, n);
+  if (!x) return null;
+  const P = new Map(groups.map((g, k) => [g, x[k]]));
+  const res = new Map(use.map((r) => [r.id, P.get(r.gb) - P.get(r.ga) - r[key]]));
+  let reached = true;
+  if (skip) {
+    // Joined without skip?
+    const s2 = new Set([skip.ga]);
+    for (const q = [skip.ga]; q.length;) { const u = q.pop(); for (const v of adj.get(u)) if (!s2.has(v)) { s2.add(v); q.push(v); } }
+    reached = s2.has(skip.gb);
+  }
+  return { P, res, reached };
 }
 
 // Per-measure scale estimates. → Map measureId → (value − thickness term) / sketch centre length
@@ -590,7 +865,7 @@ export function solve(project, derivedRooms, opts = {}) {
   const byRoom = new Map((derivedRooms || []).map((dr) => [dr.roomId, dr]));
   const measured = measuredRuns(project, derivedRooms, spans).map(({ m, parts }) => {
     const last = parts[parts.length - 1];
-    return { m, dr: parts[0].dr, i: parts[0].i, drB: last.dr, iB: last.i };
+    return { m, dr: parts[0].dr, i: parts[0].i, drB: last.dr, iB: last.i, parts };
   });
 
   const finishWeight = (roomId) => {
@@ -614,6 +889,24 @@ export function solve(project, derivedRooms, opts = {}) {
     return m;
   };
 
+  // From h / v wall e beyond its end nodeId, on along the one wall of its line while only 구역 나누기 lines
+  // meet the corners (openings.js straightRun). → { node, edge }
+  const straightRunEnd = (e, nodeId) => {
+    let cur = e, at = nodeId;
+    const seen = new Set([e.id]);
+    for (let guard = 0; guard < 64; guard++) {
+      const others = (edgesAt.get(at) || []).filter((f) => f !== cur);
+      const walls = others.filter((f) => f.kind !== 'divider');
+      if (walls.length !== 1 || walls.length === others.length || seen.has(walls[0].id)) break;
+      const next = walls[0];
+      if (next.orient !== cur.orient || (next.orient !== 'h' && next.orient !== 'v')) break;
+      seen.add(next.id);
+      cur = next;
+      at = next.a === at ? next.b : next.a;
+    }
+    return { node: at, edge: cur };
+  };
+
   // Current estimates used for the corner coefficients (updated after each pass): positions give the
   // angles of diagonal walls; thickness/finish give the measured side's own inner-face offset, which
   // belongs to the other axis system.
@@ -634,12 +927,103 @@ export function solve(project, derivedRooms, opts = {}) {
     const uf = axis === 'x' ? ufX : ufY;
     return axisTie[axis].find(uf.find(a)) === axisTie[axis].find(uf.find(b));
   };
+  // The diagonal wall pieces of measured diagonal sides (their value fixes them; no opening bound, round 5).
+  const measuredDiagEdges = new Set();
+  for (const { parts } of measured) {
+    for (const p of parts) { const sd = p.dr.sides[p.i]; if (sd && sd.orient === 'd') for (const id of sd.edgeIds || []) measuredDiagEdges.add(id); }
+  }
+  // The axis values on EVERY chain of values between two corners (round 3, 2026-11-01): what a diagonal that
+  // is only a check is compared with, besides its own value. A value in a loop is checked by the loop
+  // (valueLoops); one on every chain only by the diagonal (B6 with 거실 아래쪽 벽 2570 typed 5270: the line's
+  // 확인필요 named only the correct diagonal parts, and once they were confirmed the wrong value printed
+  // silently; B4's corner cut with 거실 아래쪽 벽 +500 the same). → [measureId] along the chain from a
+  const tieRows = { x: [], y: [] };
+  for (const { m, dr, i, drB, iB } of measured) {
+    const side = dr.sides[i], sideB = drB.sides[iB];
+    if (side.orient === 'h') tieRows.x.push({ id: m.id, ga: ufX.find(side.from), gb: ufX.find(sideB.to) });
+    else if (side.orient === 'v') tieRows.y.push({ id: m.id, ga: ufY.find(side.from), gb: ufY.find(sideB.to) });
+  }
+  const chainValues = (axis, a, b) => {
+    const uf = axis === 'x' ? ufX : ufY;
+    const ga = uf.find(a), gb = uf.find(b);
+    const rows = tieRows[axis].filter((r) => r.ga !== r.gb);
+    if (ga === gb || !rows.length) return [];
+    // The rows of a shortest chain from ga to gb without row `skip`, or null.
+    const chain = (skip) => {
+      const via = new Map([[ga, null]]);
+      for (let queue = [ga]; queue.length;) {
+        const next = [];
+        for (const u of queue) {
+          for (const r of rows) {
+            if (r === skip || (r.ga !== u && r.gb !== u)) continue;
+            const v = r.ga === u ? r.gb : r.ga;
+            if (via.has(v)) continue;
+            via.set(v, { r, from: u });
+            next.push(v);
+          }
+        }
+        queue = next;
+      }
+      if (!via.has(gb)) return null;
+      const out = [];
+      for (let at = gb; via.get(at); at = via.get(at).from) out.push(via.get(at).r);
+      return out.reverse();
+    };
+    const path = chain(null);
+    return path ? path.filter((r) => !chain(r)).map((r) => r.id) : [];
+  };
   // [{ m, dr, i, drB, iB, A, B (corner ids), tied: { x, y } }]
   const diagonals = measured.filter(({ dr, i }) => isOblique(dr.sides[i])).map((g) => {
     const A = g.dr.sides[g.i].from, B = g.drB.sides[g.iB].to;
     return { ...g, A, B, tied: { x: axisTied('x', A, B), y: axisTied('y', A, B) } };
   });
   const diagonalRuns = diagonals.filter((g) => !(g.tied.x && g.tied.y)); // those that may add rows
+  // A measured PART of a straight diagonal wall split by T-junctions (straightDiagonalJoints) whose whole
+  // line the axis values fix at both ends (final review 2026-10-28, B6: a diagonal 구역 나누기 선 ending on
+  // the diagonal outer wall; its two parts typed): the parts only place the T along the fixed line, so
+  // their rows are weak (LOCATOR weight) and their sum is a check like a whole diagonal's value. As
+  // value rows, 10 mm of tape rounding in them stretched the plan 235 mm through three correct 4500s.
+  // Not where the T's third wall is itself a MEASURED diagonal (round 2, 2026-10-31, B6 with the 구역
+  // 나누기 선 drawn as a diagonal wall): that value places the T, at about 30° to the line, so 14 mm of tape
+  // at its far end moves the T ~50 mm along the line, past what the weak parts' check allows, and the weak
+  // rows let the passes run away (lastMoved 124–1344 mm in 23 of 66 tape sets). There the parts stay value
+  // rows (as before). A 구역 나누기 선, an unmeasured wall or an h / v wall (whose axis value fixes the T's
+  // coordinate on the line) leaves the T to the parts.
+  {
+    const measuredDiagonalEdges = new Set();
+    for (const g of diagonals) {
+      for (const s of [g.dr.sides[g.i], g.drB.sides[g.iB]]) for (const { edge } of walkSide(s, edgeMap)) measuredDiagonalEdges.add(edge.id);
+    }
+    const placedByLeg = (j) => (edgesAt.get(j.m) || []).some((e) => e.orient === 'd' && e.kind !== 'divider'
+      && measuredDiagonalEdges.has(e.id) && e.a !== j.A && e.b !== j.A && e.a !== j.B && e.b !== j.B);
+    const jointAt = new Map();
+    for (const j of straightDiagonalJoints(project)) if (!jointAt.has(j.m) && !placedByLeg(j)) jointAt.set(j.m, j);
+    const lineEnd = (node, toward) => {
+      let at = node, from = toward;
+      for (let guard = 0; guard < 64; guard++) {
+        const j = jointAt.get(at);
+        if (!j || (j.A !== from && j.B !== from)) break;
+        const next = j.A === from ? j.B : j.A;
+        from = at;
+        at = next;
+      }
+      return at;
+    };
+    for (const g of diagonalRuns) {
+      const first = walkSide(g.dr.sides[g.i], edgeMap)[0];
+      const lastSteps = walkSide(g.drB.sides[g.iB], edgeMap);
+      const last = lastSteps[lastSteps.length - 1];
+      if (!first || !last) continue;
+      const afterA = first.edge.a === g.A ? first.edge.b : first.edge.a;
+      const beforeB = last.from;
+      const A0 = lineEnd(g.A, afterA), B0 = lineEnd(g.B, beforeB);
+      if ((A0 !== g.A || B0 !== g.B) && axisTied('x', A0, B0) && axisTied('y', A0, B0)) {
+        g.locator = true;
+        g.line = [A0, B0].sort().join('|'); // the whole line's two end corners
+        g.lineEnds = [A0, B0];
+      }
+    }
+  }
   // Sketched direction of a diagonal run (A → B), for the sign when the current positions give none.
   const sketchDir = (g) => {
     let x = 0, y = 0;
@@ -754,7 +1138,10 @@ export function solve(project, derivedRooms, opts = {}) {
 
   // Measured sides next to a diagonal wall, diagonal values with rows and straight diagonal joints
   // need more than one pass.
-  const needsPasses = coupled || measured.some(({ dr, i, drB, iB }) => {
+  // A window / door with a typed width on a diagonal wall piece (round 5, below) is bounded from the other axis's
+  // projection as the passes find it.
+  const diagOpenings = measured.length > 0 && typedOpenings.some((o) => { const e = edgeMap.get(o.edge); return !!e && e.orient === 'd'; });
+  const needsPasses = coupled || diagOpenings || measured.some(({ dr, i, drB, iB }) => {
     const { prev } = cornerContext(dr.sides, i, edgeMap);
     const { next } = cornerContext(drB.sides, iB, edgeMap);
     return !isOblique(dr.sides[i]) && (isOblique(prev) || isOblique(next));
@@ -763,6 +1150,7 @@ export function solve(project, derivedRooms, opts = {}) {
 
   let axes = {}, positions = null, thickness = null, finish = null;
   let iterations = 0, orderRows = 0, passes = 0, settled = !needsPasses, lastMoved = 0;
+  let prevStep = null; // the last pass's node moves (relaxation, below)
   for (let pass = 0; pass < maxPasses; pass++) {
     passes++;
     if (jointSolve) {
@@ -793,11 +1181,47 @@ export function solve(project, derivedRooms, opts = {}) {
       const q = posNow.get(id);
       if (q) moved = Math.max(moved, Math.abs(p.x - q.x), Math.abs(p.y - q.y));
     }
-    posNow = positions;
-    tNow = thickness;
-    fNow = finish;
     lastMoved = moved;
-    if (moved < (coupled ? DIAGONAL_SETTLED_MM : ANGLE_SETTLED_MM)) { settled = true; break; }
+    if (moved < (coupled ? DIAGONAL_SETTLED_MM : ANGLE_SETTLED_MM)) {
+      posNow = positions; tNow = thickness; fNow = finish;
+      settled = true;
+      break;
+    }
+    // The next pass's angles and corner offsets come from these estimates. With diagonal rows (coupled),
+    // where the passes turn round without getting shorter, the next estimate is halfway (damped).
+    // (Round 2, 2026-10-31: the extrapolation added in round 1 for passes that creep on the same way, up
+    // to 10 steps ahead, is gone: on plans with several diagonals it ran ahead and did not come back —
+    // 사선 벽 예시 with tape values 22 of 40 with false 확인필요 instead of 16, the plan 342 mm off instead of
+    // 220 — and B6 settles without it once its T parts are locators.)
+    const step = new Map();
+    let dotSum = 0, n1 = 0, n0 = 0;
+    for (const [id, p] of positions) {
+      const q = posNow.get(id);
+      if (!q) continue;
+      const v = { x: p.x - q.x, y: p.y - q.y };
+      step.set(id, v);
+      const u = prevStep && prevStep.get(id);
+      if (u) { dotSum += u.x * v.x + u.y * v.y; n0 += u.x * u.x + u.y * u.y; }
+      n1 += v.x * v.x + v.y * v.y;
+    }
+    let k = 0;
+    if (coupled && pass >= RELAX_FROM_PASS && prevStep && n0 > 0 && n1 > 0) {
+      const cos = dotSum / Math.sqrt(n0 * n1), r = Math.sqrt(n1 / n0);
+      if (cos < 0.5 && r > 0.6) k = -0.5;
+    }
+    prevStep = step;
+    const blend = (cur, prev) => {
+      if (!k) return cur;
+      const out = new Map();
+      for (const [id, v] of cur) {
+        const p = prev.get(id);
+        out.set(id, typeof v === 'number' ? (isFinite(p) ? v + k * (v - p) : v) : p ? { x: v.x + k * (v.x - p.x), y: v.y + k * (v.y - p.y) } : v);
+      }
+      return out;
+    };
+    posNow = blend(positions, posNow);
+    tNow = blend(thickness, tNow);
+    fNow = blend(finish, fNow);
   }
 
   function assemble(ax) {
@@ -941,7 +1365,7 @@ export function solve(project, derivedRooms, opts = {}) {
       if (ga === gb) continue;
       const rowTerms = [[gb, target.c], [ga, -target.c]];
       const rhs = target.rhs;
-      sys.row(rowTerms, rhs, SOLVER_WEIGHTS.measure, 'm');
+      sys.row(rowTerms, rhs, g.locator ? LOCATOR_WEIGHT : SOLVER_WEIGHTS.measure, 'm');
       measureRows.push({ id: g.m.id, terms: rowTerms, rhs, soft: [], ga, gb });
       tied.union(ga, gb);
     }
@@ -959,7 +1383,7 @@ export function solve(project, derivedRooms, opts = {}) {
         addTerm(row, gy[1], target.cy); addTerm(row, gy[0], -target.cy);
         const rowTerms = terms(row).filter(([, c]) => Math.abs(c) > 1e-12);
         if (!rowTerms.length) continue;
-        sys.row(rowTerms, target.rhs, SOLVER_WEIGHTS.measure, 'm');
+        sys.row(rowTerms, target.rhs, g.locator ? LOCATOR_WEIGHT : SOLVER_WEIGHTS.measure, 'm');
         for (const [ga, gb] of [gx, gy]) {
           if (ga === gb) continue;
           measureRows.push({ id: g.m.id, terms: rowTerms, rhs: target.rhs, soft: [], ga, gb });
@@ -1059,13 +1483,31 @@ export function solve(project, derivedRooms, opts = {}) {
     for (const axis of list) {
     const { along, gOf, sk } = AX[axis];
     const sketchAlong = sketchAlongOf(sk);
+    const other = axis === 'x' ? 'y' : 'x';
     for (const o of measured.length ? typedOpenings : []) {
       const e = edgeMap.get(o.edge);
+      // A diagonal wall piece no value measures whose projection on the OTHER axis the axis values fix, and on this
+      // one do not (round 5, 2026-11-08: a window typed wider than an unmeasured chamfer was only '창이 벽보다 김'):
+      // this projection ≥ √(min² − the fixed one²), from the current estimate of the fixed one (as a measured
+      // diagonal's row, again each pass). Both free, or both fixed: nothing, as before.
+      if (e && e.kind !== 'divider' && e.orient === 'd' && nodeMap.has(e.a) && nodeMap.has(e.b) && !measuredDiagEdges.has(e.id)) {
+        const ga = gOf(e.a), gb = gOf(e.b);
+        const sign = Math.sign(sketchAlong(e) || 0);
+        if (ga === gb || !sign || tied.find(ga) === tied.find(gb) || axisTied(axis, e.a, e.b) || !axisTied(other, e.a, e.b)) continue;
+        const A = posNow.get(e.a), B = posNow.get(e.b);
+        const fixed = A && B ? Math.abs(B[other] - A[other]) : NaN;
+        const min = o.width + jambClearance(e, e.a) + jambClearance(e, e.b) + 2 * OPENING_JAMB_MM;
+        if (!isFinite(fixed) || min <= fixed) continue;
+        onePerPair({ type: 'opening', axis, openingId: o.id, edgeId: e.id, terms: [[gb, sign], [ga, -sign]], min: Math.sqrt(min * min - fixed * fixed), fixed, w: SOLVER_WEIGHTS.opening }, ga, gb, sign);
+        continue;
+      }
       if (!e || e.kind === 'divider' || e.orient !== along || !nodeMap.has(e.a) || !nodeMap.has(e.b)) continue;
-      const ga = gOf(e.a), gb = gOf(e.b);
+      // The straight run through corners only 구역 나누기 lines reach (as openings.js edgeFrame).
+      const ra = straightRunEnd(e, e.a), rb = straightRunEnd(e, e.b);
+      const ga = gOf(ra.node), gb = gOf(rb.node);
       const sign = Math.sign(sketchAlong(e) || 0);
       if (ga === gb || !sign || tied.find(ga) === tied.find(gb)) continue;
-      const min = o.width + jambClearance(e, e.a) + jambClearance(e, e.b) + 2 * OPENING_JAMB_MM;
+      const min = o.width + jambClearance(ra.edge, ra.node) + jambClearance(rb.edge, rb.node) + 2 * OPENING_JAMB_MM;
       onePerPair({ type: 'opening', axis, openingId: o.id, edgeId: e.id, terms: [[gb, sign], [ga, -sign]], min, w: SOLVER_WEIGHTS.opening }, ga, gb, sign);
     }
     }
@@ -1206,7 +1648,9 @@ export function solve(project, derivedRooms, opts = {}) {
         const others = new Set(active);
         others.delete(c);
         const x0 = sys.solve(n, nGroups, [...others].map(rowOf));
-        const amount = rowValue(c.terms, x) - rowValue(c.terms, x0);
+        // (A diagonal piece's row bounds one projection: the length it gained, with the other one fixed.)
+        const amount = isFinite(c.fixed) ? Math.hypot(rowValue(c.terms, x), c.fixed) - Math.hypot(rowValue(c.terms, x0), c.fixed)
+          : rowValue(c.terms, x) - rowValue(c.terms, x0);
         if (amount > 0.5) openingFits.push({ openingId: c.openingId, edgeId: c.edgeId, amount, axis: c.axis });
       }
     }
@@ -1247,20 +1691,156 @@ export function solve(project, derivedRooms, opts = {}) {
     }
   }
 
+  // The chain test of a diagonal that is only a check (round 4, 2026-11-01). Its misfit can come from any
+  // axis value on a chain between its two ends, not only from those on EVERY chain (`with`): B1 with 거실
+  // 왼쪽 벽 5100 typed 5300, in a loop with 방1 / 화장실 오른쪽 벽 and 210 mm off (under the loop tolerance),
+  // made the cut corner 157 mm long; '함께 볼 값' named only the three correct values on every chain, after
+  // the diagonal was confirmed they were named again, and 5300 printed silently. With the assumed walls (as
+  // valueLoops) each axis's values are fitted (least squares) with all of them and without each one on a
+  // chain between the ends. res: the diagonal's misfit without that value (one on every chain: 0 whenever
+  // the value can be what the diagonal asks; one in a loop: what the rest of its loop says); rest: what the
+  // loop values on the chains still disagree by without it (B1: the loop's 210 mm spread over its rows
+  // without a value on every chain, ~0 without 5300). model.js computeWarnings names the values that make
+  // the diagonal fit, the one that leaves the least first. Only for a misfit over CHAIN_TEST_MIN_MM.
+  // → { chain: [{ id, bridge, res, rest }], rest (with every value), res (the misfit with every value) } | null
+  let modelRows = null, modelGroups = null;
+  const buildModelRows = () => {
+    modelRows = { x: [], y: [] };
+    for (const { m, parts } of measured) {
+      const s0 = parts[0].dr.sides[parts[0].i], s1 = parts[parts.length - 1].dr.sides[parts[parts.length - 1].i];
+      if ((s0.orient !== 'h' && s0.orient !== 'v') || s1.orient !== s0.orient) continue;
+      const axis = s0.orient === 'h' ? 'x' : 'y';
+      const uf = axis === 'x' ? ufX : ufY;
+      const ga = uf.find(s0.from), gb = uf.find(s1.to);
+      const sign = Math.sign(s0.dir[axis]);
+      if (ga === gb || !sign) continue;
+      const { term } = sketchSpanParts(parts.map((p) => ({ sides: p.dr.sides, i: p.i })), edgeMap, priors);
+      modelRows[axis].push({ id: m.id, ga, gb, D: sign * (m.value - term) });
+    }
+    modelGroups = { x: [...new Set(modelRows.x.flatMap((r) => [r.ga, r.gb]))], y: [...new Set(modelRows.y.flatMap((r) => [r.ga, r.gb]))] };
+  };
+  const joinedWithout = (rows, skip, ga, gb) => {
+    if (ga === gb) return true;
+    const seen = new Set([ga]);
+    for (const queue = [ga]; queue.length;) {
+      const u = queue.pop();
+      for (const r of rows) {
+        if (r === skip || (r.ga !== u && r.gb !== u)) continue;
+        const v = r.ga === u ? r.gb : r.ga;
+        if (v === gb) return true;
+        if (!seen.has(v)) { seen.add(v); queue.push(v); }
+      }
+    }
+    return false;
+  };
+  const r2 = (v) => Math.round(v * 100) / 100;
+  // a, b: the diagonal's (or its whole line's) end corners; runs: its measured run(s) (a line: every part).
+  const chainTest = (a, b, runs) => {
+    if (!modelRows) buildModelRows();
+    const P = positions.get(a), Q = positions.get(b);
+    if (!P || !Q) return null;
+    const L = Math.hypot(Q.x - P.x, Q.y - P.y);
+    let inner = 0, cover = 0, value = 0;
+    for (const g of runs) {
+      const li = innerLengthBetween({ sides: g.dr.sides, i: g.i, roomId: g.dr.roomId }, { sides: g.drB.sides, i: g.iB, roomId: g.drB.roomId },
+        edgeMap, positions, priors, null);
+      const A1 = positions.get(g.A), B1 = positions.get(g.B);
+      if (!isFinite(li) || !A1 || !B1) return null;
+      inner += li;
+      value += g.m.value;
+      cover += Math.hypot(B1.x - A1.x, B1.y - A1.y);
+    }
+    // A line with a part not measured: the sum of its parts is no check of the whole line.
+    if (!(L > EPS) || Math.abs(cover - L) > 1) return null;
+    const want = value - (inner - L); // the centre length the value(s) ask for, with the assumed walls
+    // The misfit for centre projections p ({ x, y }; null: free, the diagonal fixes it).
+    const misfit = (p) => {
+      if (p.x != null && p.y != null) return Math.hypot(p.x, p.y) - want;
+      const q = p.x != null ? p.x : p.y;
+      return q == null ? 0 : Math.max(0, Math.abs(q) - want);
+    };
+    const proj = { x: null, y: null }, fits = { x: null, y: null }, onChain = { x: [], y: [] };
+    for (const axis of ['x', 'y']) {
+      if (!axisTied(axis, a, b)) continue;
+      const uf = axis === 'x' ? ufX : ufY;
+      const ga = uf.find(a), gb = uf.find(b);
+      const list = modelRows[axis];
+      if (!joinedWithout(list, null, ga, gb)) continue;
+      const all = loopFit(list, modelGroups[axis], null);
+      if (!all) return null;
+      proj[axis] = all.P.get(gb) - all.P.get(ga);
+      fits[axis] = all;
+      for (const r of list) {
+        if (!joinedWithout(list, r, ga, gb)) { onChain[axis].push({ r, p: null, f: null }); continue; }
+        const f = loopFit(list, modelGroups[axis], r);
+        if (!f) continue;
+        const p = f.P.get(gb) - f.P.get(ga);
+        // A value in a loop on a chain between the ends: leaving it out moves the ends.
+        if (Math.abs(p - proj[axis]) > 0.5) onChain[axis].push({ r, p, f });
+      }
+    }
+    const loopIds = { x: onChain.x.filter((c) => c.p != null).map((c) => c.r.id), y: onChain.y.filter((c) => c.p != null).map((c) => c.r.id) };
+    const disagree = (axis, f, skipId) => {
+      let mx = 0;
+      if (f) for (const id of loopIds[axis]) if (id !== skipId) mx = Math.max(mx, Math.abs(f.res.get(id) || 0));
+      return mx;
+    };
+    const rest = Math.max(disagree('x', fits.x), disagree('y', fits.y));
+    const chain = [];
+    for (const axis of ['x', 'y']) {
+      const other = axis === 'x' ? 'y' : 'x';
+      for (const c of onChain[axis]) {
+        chain.push({
+          id: c.r.id, bridge: c.p == null, res: r2(misfit({ ...proj, [axis]: c.p })),
+          rest: r2(c.p == null ? rest : Math.max(disagree(axis, c.f, c.r.id), disagree(other, fits[other]))),
+        });
+      }
+    }
+    return { chain, rest: r2(rest), res: r2(misfit(proj)) };
+  };
+
   // What each measured diagonal value did (contract C2): tied = the projections the axis values fix;
   // rows = the axes it fixed itself ('' = a check only: both were fixed, or it is not longer than the
-  // fixed projection).
+  // fixed projection). with: for a check (and a locator: its whole line), the axis values on every chain
+  // between its two ends on the axes they tie (chainValues); chain / chainRest / chainRes: chainTest's (when it
+  // misses).
   const diagonalRows = new Map();
+  const lineRuns = new Map(); // a locator's line → its measured parts
+  for (const g of diagonals) {
+    if (!g.locator || !g.line) continue;
+    if (!lineRuns.has(g.line)) lineRuns.set(g.line, []);
+    lineRuns.get(g.line).push(g);
+  }
+  const tested = new Map(); // line | measure id → chainTest
   for (const g of diagonals) {
     const both = diagTargets.xy.has(g);
     const rows = (both || diagTargets.x.has(g) ? 'x' : '') + (both || diagTargets.y.has(g) ? 'y' : '');
-    diagonalRows.set(g.m.id, { tied: { ...g.tied }, rows });
+    let withIds = [];
+    let test = null;
+    if (!rows || g.locator) {
+      const [a, b] = g.locator && g.lineEnds ? g.lineEnds : [g.A, g.B];
+      withIds = [...new Set(['x', 'y'].filter((axis) => axisTied(axis, a, b)).flatMap((axis) => chainValues(axis, a, b)))];
+      const runs = g.locator && g.line ? lineRuns.get(g.line) : [g];
+      const key = g.locator && g.line ? `line:${g.line}` : g.m.id;
+      const miss = runs.reduce((s, q) => s + (measureResiduals.get(q.m.id) || 0), 0);
+      if (!tested.has(key)) tested.set(key, Math.abs(miss) > CHAIN_TEST_MIN_MM ? chainTest(a, b, runs) : null);
+      test = tested.get(key);
+    }
+    diagonalRows.set(g.m.id, {
+      tied: { ...g.tied }, rows, ...(g.locator ? { locator: true, line: g.line } : {}), ...(withIds.length ? { with: withIds } : {}),
+      ...(test ? { chain: test.chain, chainRest: test.rest, chainRes: test.res } : {}),
+    });
   }
 
   const both = (key) => [...axes.x[key], ...axes.y[key]];
   return {
     positions, thickness, finish, scale, measureResiduals, absorbed, softTerms,
-    // Map measureId → { tied: { x, y }, rows: '' | 'x' | 'y' | 'xy' } for every measured diagonal side
+    // Map measureId → { tied: { x, y }, rows: '' | 'x' | 'y' | 'xy', locator?, line? (a locator's whole
+    // straight line: its end corner ids), with? ([measureId]: the axis values on every chain between its
+    // ends), chain? ([{ id, bridge, res, rest }]: every axis value on a chain between them, with what the
+    // check misses by and what the chains disagree by without it), chainRest? / chainRes? (what the chains
+    // disagree by and the check misses by in that fit with every value) }
+    // for every measured diagonal side
     diagonalRows,
     // h/v edges the measures pushed below their minimum (they would have folded there): amount = mm
     // the walls and values took instead; measureIds = the values that had to give, most first.

@@ -4,6 +4,9 @@
 .checks-popover.ck-host {
   width: min(600px, calc(100vw - 24px));
   max-height: calc(100vh - var(--topbar-h, 60px) - 24px);
+  /* The screen as seen (dvh): in a Chrome tab on Android 100vh is taller than it (the toolbar counted as hidden), and
+     the last 73.7 px of a long list lay below the screen, out of reach (round 4 part B check). */
+  max-height: calc(100dvh - var(--banner-h, 0px) - var(--topbar-h, 60px) - 24px);
   padding: 0;
   overscroll-behavior: contain;
 }

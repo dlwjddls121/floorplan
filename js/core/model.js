@@ -12,7 +12,7 @@ import {
   findPlanarityProblem, snapPoint, joinStrokeEnds, dropLooseEnd, shortStroke, passedCorner, cornerDiagonal,
 } from './graph.js';
 import { roomSides, matchRooms, sidesForEdge, sidesByNode, sideRun, measureSideKey, TWIN_SUFFIX } from './rooms.js';
-import { solve, solutionAt, thicknessPriors, scaleRatios, median, sketchInnerLength, innerLengthOf, innerLengthBetween } from './solver.js';
+import { solve, solutionAt, thicknessPriors, scaleRatios, median, sketchInnerLength, innerLengthOf, innerLengthBetween, valueLoops } from './solver.js';
 import { installOpenings, reconcileOpenings, sanitizeOpenings } from './openings.js';
 import { installFixtures, normalizeFixture } from './fixtures.js';
 import { installMemo, validMemo } from './memo.js';
@@ -20,6 +20,7 @@ import { installDims } from './dims.js';
 import { installRotate } from './rotate.js';
 import { installErase, carryMerged } from './erase.js';
 import { installExterior, withExteriorMarksOnly } from './exterior.js';
+import { twoSideKey } from './checkkeys.js';
 
 export const DEFAULT_SETTINGS = Object.freeze({ extWall: 150, intWall: 100, twoSideTolerance: 300, closureTolerance: 300 });
 export const UNDO_LIMIT = 100;
@@ -141,6 +142,8 @@ export function validateProject(obj) {
     labelOffsets: obj.labelOffsets && typeof obj.labelOffsets === 'object' ? obj.labelOffsets : {},
   };
   if (typeof obj.id !== 'string' || !obj.id) errors.push('세대 번호가 없어 새로 만들었습니다.');
+  // The quarter turns made since the plan was drawn (core/rotate.js; derive readingOrder): 1–3, else none.
+  if (!(Number.isInteger(p.quarterTurns) && p.quarterTurns >= 1 && p.quarterTurns <= 3)) delete p.quarterTurns;
   // Info fields are text. A file edited by hand (or in Excel) may hold numbers or objects there; the
   // list screen and file names expect strings.
   let badInfo = false;
@@ -246,6 +249,11 @@ export function validateProject(obj) {
       };
       if (Array.isArray(r.nodeIds) && r.nodeIds.length === r.polygon.length && r.nodeIds.every((id) => typeof id === 'string')) {
         out.nodeIds = r.nodeIds.slice();
+      }
+      if (typeof r.mergedInto === 'string' && typeof r.keptName === 'string') {
+        out.mergedInto = r.mergedInto;
+        out.keptName = r.keptName;
+        out.keptHeight = isNum(r.keptHeight) ? r.keptHeight : null;
       }
       return out;
     })
@@ -401,15 +409,23 @@ function derive(project, prevDerived, opts = {}) {
     const prevRoom = prevDerived && prevDerived.rooms.find((x) => x.roomId === id);
     const poly = prevRoom && prevRoom.face.points;
     if (!r || !poly || poly.length < 3) continue;
+    // Merged: the room it went into and that room's name and H now (rooms.js matchRooms gives them back
+    // when this room comes back and the kept room has taken this one's name).
+    const into = match.merged.find((x) => x.removed === id);
+    const K = into && match.rooms.find((x) => x.id === into.kept);
     newlyDetached.push({
       id, name: r.name || '', height: isNum(r.height) ? r.height : null, notRoom: !!r.notRoom,
       polygon: poly.map((q) => ({ x: round2(q.x), y: round2(q.y) })),
       nodeIds: prevRoom.face.nodeIds.slice(),
+      ...(K ? { mergedInto: K.id, keptName: K.name || '', keptHeight: isNum(K.height) ? K.height : null } : {}),
     });
   }
   const goneSet = new Set(newlyDetached.map((r) => r.id));
-  const detachedRooms = detachedRooms0.filter((r) => !revived.has(r.id) && !goneSet.has(r.id)).concat(newlyDetached)
-    .slice(-MAX_DETACHED_ROOMS);
+  // A record whose kept room's name came from an earlier merge takes that merge's own name (rooms.js matchRooms
+  // relinked).
+  const relinked = new Map((match.relinked || []).map((r) => [r.id, r]));
+  const detachedRooms = detachedRooms0.filter((r) => !revived.has(r.id) && !goneSet.has(r.id)).map((r) => relinked.get(r.id) || r)
+    .concat(newlyDetached).slice(-MAX_DETACHED_ROOMS);
 
   // Keep measures whose side (or span) still exists; follow merges and splits; keep the others detached.
   const att = attachMeasures(project, dRooms0, match);
@@ -498,7 +514,10 @@ function derive(project, prevDerived, opts = {}) {
     room.seed = { x: labelPoint.x, y: labelPoint.y };
     return { roomId, room, face, faceIndex: fi, sides: roomSides(face, solved), labelPoint, area: face.area };
   });
-  solved.rooms = rooms;
+  // Rooms came or went (a wall drawn or erased): they are put in reading order (readingOrder; '이름 없는 실 N').
+  const roomsChanged = ['created', 'dropped', 'merged', 'revived'].some((k) => Array.isArray(match[k]) && match[k].length);
+  const holders = new Set(dRooms.filter((dr) => (holesOf[dr.faceIndex] || []).length).map((dr) => dr.roomId));
+  solved.rooms = roomsChanged ? readingOrder(rooms, dRooms, project.quarterTurns, holders) : rooms;
 
   // Spans and their computed parts on the solved geometry; anchors of the attached measures; outlines
   // of the detached rooms follow the corners that still exist.
@@ -528,12 +547,26 @@ function derive(project, prevDerived, opts = {}) {
   const folds = foldsOf(project, solved, sol, prevDerived, opts.prevProject, outlierIds, prevDerived ? null : project.folds);
   if (folds.length) solved.folds = folds.map((f) => ({ measureIds: f.measureIds.slice(), edgeIds: f.edgeIds.slice() }));
   else delete solved.folds;
-  const { warnings, twoSidePairs } = computeWarnings(solved, dRooms, sol, { edgeFaces: ef, spans, computedMeasures, solverSpans, folds, outliers });
+  // The residuals of every value on the plan the other values give without these (computeWarnings: the values a loop
+  // names alone). → Map measureId → residual | null
+  const solveWithout = (ids) => {
+    try {
+      const drop = new Set(ids);
+      const alt = solve({ ...pre, measures: (pre.measures || []).filter((m) => !drop.has(m.id)) }, dRooms0, { spans: solverSpans });
+      return solutionAt(pre, dRooms0, alt, alt.positions, { spans: solverSpans }).measureResiduals;
+    } catch (_) { return null; }
+  };
+  const { warnings, twoSidePairs } = computeWarnings(solved, dRooms, sol, { edgeFaces: ef, spans, computedMeasures, solverSpans, folds, outliers, solveWithout });
   const computedBySide = new Map(computedMeasures.map((c) => [`${c.room}|${sideKeyOf(c)}`, c]));
   const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const derived = {
     graphKey: key,
     faces, rooms: dRooms, edgeFaces: ef, solve: sol, warnings, twoSidePairs,
+    // The rooms' ids in the household's own order (project.rooms: kept in place by every edit, a turn and the
+    // file; put in reading order when rooms come or go, round 5), unlike `rooms` above, which follows the faces as
+    // found: '이름 없는 실 N' is numbered by it (checks-full.js roomLabels; round 4 part B check: a turn found the faces
+    // in another order and renumbered an unnamed room 1 → 2).
+    roomOrder: solved.rooms.map((r) => r.id),
     roomChanges: { created: match.created, merged: match.merged, dropped: match.dropped, revived: match.revived || [] },
     spans, computedMeasures, computedBySide,
     notes: { splitComputed: computedMeasures.length > 0 },
@@ -551,12 +584,134 @@ function derive(project, prevDerived, opts = {}) {
 // opening, at the cost of three derives each time): it then opens as stored, its corners kept exactly
 // (derive opts.keepCorners) with the numbers solved for them, the same on every device; the next edit
 // solves it from there.
+// When it opens in a shape other than stored (r, shifted), what follows the plan on an edit follows it here
+// too (the derive hooks, against the plan as stored: texts moved by hand, fixtures on their walls; round 2,
+// 2026-10-31: a 0.6.8 file of B6 opened 32 mm different in the new version, and the 방1 name moved by hand
+// was written 380 mm from where it had stood, since only an edit ran the hooks).
+// A household this version saved (its savedWith record, below) opens as it was saved, without the re-solve
+// above (round 5, 2026-11-08): its corners are this version's solve, kept with the walls and the notes of
+// that solve. With few values beside a diagonal wall or a typed window width the solve has more than one
+// plan, and opening it again (here or on another device) moved the plan 5–110 mm until the next value
+// (DESIGN §7.19; fuzz seeds 24, 124, 130 at 55 edits). A file of another version is solved as above.
+// When it opens without the derive hooks, DocStore.openHooks follow (texts moved by hand at this version's
+// print scale: ui/wiring.js). The records of the file are read here and not kept in the open document.
 function deriveOpened(project) {
+  if (savedHere(project)) return openedFile(project, openedAsSaved(project));
   const r = derive(project, null, { holdPlace: true, opened: true });
-  if (r.held !== 'shifted') return r;
+  if (r.held !== 'shifted') return openedFile(project, r);
   const again = derive(r.project, null, { holdPlace: true, opened: true });
-  if (again.held !== 'shifted') return r;   // r opens as itself
-  return derive(project, null, { holdPlace: true, keepCorners: true });
+  if (again.held !== 'shifted') {
+    // r opens as itself
+    if (!DocStore.deriveHooks.length) return withoutFileRecords(r);
+    const stored = derive(project, null, { holdPlace: true, keepCorners: true });
+    const hooked = runDeriveHooks(stored.project, r.project, r.derived, stored.derived);
+    return withoutFileRecords(hooked === r.project ? r : { ...r, project: hooked });
+  }
+  return openedFile(project, derive(project, null, { holdPlace: true, keepCorners: true }));
+}
+
+// Records a save adds to the household's file and its copy on the device (io/fileio.js stampForWrite, filled
+// in by ui/wiring.js stampFile from the open household; nothing is added to a copy that was never opened):
+//   savedWith: { app: APP_VERSION, corners: cornersKey(nodes), inputs: solveInputsKey(project), walls }: the
+//     corners are a plan this version solved from those inputs; walls = the thickness and finishes solved with
+//     them (as project.solvedWalls; left out when the household carries solvedWalls itself) and what that solve
+//     noted (SOLVE_NOTES): the numbers the plan was drawn with, which a re-solve of the stored corners does not
+//     give back (round 5: dimension chains 0.2 mm off, '벽 길이를 890mm 늘렸습니다' became 887mm, two more 검사
+//     items).
+//   labelScale: { scale, key }: the automatic print scale the texts moved by hand were written at (wiring.js).
+// 0.6.8.1 keeps both unread and writes them back; an edit there changes the corners, the inputs or the
+// offsets, so the key no longer matches and the record is not used (tests/upgrade-0681.html).
+export const FILE_RECORDS = Object.freeze(['savedWith', 'labelScale']);
+// A 64-bit text key (two FNV-1a passes) for those records. → 16 hex digits
+export function fileRecordKey(text) {
+  const s = String(text);
+  return hashKey(s) + hashKey(`${s.length}:${s}`);
+}
+export function cornersKey(nodes) {
+  return fileRecordKey((nodes || []).map((n) => `${n.id}:${n.x}:${n.y}`).join('|'));
+}
+// What the solve of those corners was made from besides them: the walls (their typed thickness), the values,
+// the waiting values, the settings (default thicknesses), the typed window widths, the rooms that are not
+// rooms. 0.6.8.1 keeps savedWith unread: a wall thickness typed there on a plan without values left every
+// corner where it was, and the file then opened with the thickness of the record (round 5 check, fuzz seed
+// 56 at 25 edits: typed 250, shown 150 until a value). The anchors of the values (at) follow the corners.
+// → 16 hex digits
+export function solveInputsKey(project) {
+  const p = project || {};
+  const canon = (v) => {
+    if (Array.isArray(v)) return `[${v.map((x) => (x === undefined ? 'null' : canon(x))).join(',')}]`;
+    if (v && typeof v === 'object') return `{${Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`;
+    return JSON.stringify(v === undefined ? null : v);
+  };
+  const values = (list) => (Array.isArray(list) ? list.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    const { at, ...rest } = m;
+    return rest;
+  }) : null);
+  return fileRecordKey(canon({
+    edges: p.edges || [], measures: values(p.measures), detachedMeasures: values(p.detachedMeasures),
+    settings: p.settings || null, wallChecks: p.wallChecks || [], widths: openingBoundsKey(p),
+    rooms: (p.rooms || []).map((r) => (r ? [r.id, !!r.notRoom] : null)),
+    sketchScale: isNum(p.sketchScale) ? p.sketchScale : null, solvedWalls: p.solvedWalls || null, folds: p.folds || null,
+  }));
+}
+export function savedWithRecord(project, derived = null) {
+  const out = { app: APP_VERSION, corners: cornersKey(project && project.nodes), inputs: solveInputsKey(project) };
+  const sol = derived && derived.solve;
+  if (sol && sol.thickness && sol.finish) {
+    // (A household that keeps solvedWalls itself — a solve that did not settle — has them there.)
+    out.walls = project && project.solvedWalls ? {} : solvedWallsOf(sol);
+    // What the solve noted with them (computeWarnings: walls lengthened for a typed window, stretches the
+    // drawn order placed, squeezed edges): a re-solve of the stored corners notes other amounts and items.
+    for (const k of SOLVE_NOTES) if (Array.isArray(sol[k])) out.walls[k] = JSON.parse(JSON.stringify(sol[k]));
+  }
+  return out;
+}
+const SOLVE_NOTES = ['openingFits', 'gaps', 'conflicts'];
+function savedHere(project) {
+  const w = project && project.savedWith;
+  return !!(w && typeof w === 'object' && w.app === APP_VERSION && typeof w.corners === 'string' && w.corners === cornersKey(project.nodes)
+    && typeof w.inputs === 'string' && w.inputs === solveInputsKey(project));
+}
+// A household this version saved, opened as stored: its corners kept, with the walls they were solved with
+// (derive takes them as it takes project.solvedWalls; the open document keeps no solvedWalls it did not have),
+// and its waiting values still waiting: an edit tries them on the corners before its solve, an opening on the
+// solved ones, and one taken back on opening changed what the plan showed (fuzz seed 124 at 55 edits); the
+// next edit tries them again on both devices alike.
+function openedAsSaved(project) {
+  const w = project.savedWith.walls;
+  const isMap = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  let walls = null;
+  if (isMap(w)) {
+    const notes = {};
+    for (const k of SOLVE_NOTES) if (Array.isArray(w[k])) notes[k] = w[k].filter(isMap);
+    if (project.solvedWalls) walls = { ...project.solvedWalls, ...notes };
+    else if (isMap(w.thickness) && isMap(w.finish)) walls = { thickness: w.thickness, finish: w.finish, ...notes };
+  }
+  const input = { ...project, detachedMeasures: [], ...(walls ? { solvedWalls: walls } : {}) };
+  const r = derive(input, null, { holdPlace: true, keepCorners: true });
+  const opened = { ...r.project, detachedMeasures: project.detachedMeasures || [] };
+  const sw = r.project.solvedWalls;
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (walls && !project.solvedWalls && sw && same(sw.thickness, walls.thickness) && same(sw.finish, walls.finish)) delete opened.solvedWalls;
+  return { ...r, project: opened };
+}
+function withoutFileRecords(r) {
+  if (!r || !r.project || !FILE_RECORDS.some((k) => k in r.project)) return r;
+  const project = { ...r.project };
+  for (const k of FILE_RECORDS) delete project[k];
+  return { ...r, project };
+}
+function openedFile(file, r) {
+  let project = r.project;
+  for (const h of DocStore.openHooks || []) {
+    try {
+      project = h(file, { project, derived: r.derived }) || project;
+    } catch (err) {
+      console.error('[model] open hook failed', err);
+    }
+  }
+  return withoutFileRecords(project === r.project ? r : { ...r, project });
 }
 
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -586,7 +741,10 @@ function storedSolvedWalls(project, sol) {
     if (!isNum(f)) return null;
     finish.set(k, f);
   }
-  return { thickness, finish };
+  // A household this version saved (savedWith.walls, deriveOpened) also brings what its solve noted.
+  const notes = {};
+  for (const k of SOLVE_NOTES) if (Array.isArray(sw[k])) notes[k] = sw[k];
+  return { thickness, finish, ...notes };
 }
 
 // derive opts.holdPlace: the solved positions (Map id → { x, y }, changed in place) stay where the corners
@@ -686,6 +844,46 @@ function reusedFaces(project, prevDerived) {
     if (!f.nodeIds.every((id) => nodeMap.has(id))) return null;
     const points = f.nodeIds.map((id) => ({ x: nodeMap.get(id).x, y: nodeMap.get(id).y }));
     out.push({ nodeIds: f.nodeIds, edgeIds: f.edgeIds, points, area: polygonArea(points) });
+  }
+  return out;
+}
+
+// '이름 없는 실 N' is the room's place in project.rooms (checks-full.js roomLabels). Numbered in the order the rooms came
+// about, the top-left room could be '이름 없는 실 3' (round 5, 2026-11-08, the manager). So whenever rooms come or go (a
+// wall drawn or erased splits, merges, closes or opens rooms), derive puts them in reading order: top to bottom, then
+// left to right, on the plan as first drawn (project.quarterTurns undone: rotate.js counts the quarter turns, so a turn
+// before the next wall does not change the order). A row: the topmost room not placed yet and every other one whose top
+// lies in its upper half, left to right (whole mm, then the older room). A room other rooms stand inside (holders: a
+// 옥상 / 마당 around a house, a 거실 around an island) is a row of its own when it comes first, else its upper half took
+// in the rooms inside it as one row (round 5 check: a 2 × 2 house on a 옥상 was numbered top-left, bottom-left,
+// top-right, bottom-right). Names, values, ↶ / ↷, turns and the file keep the order; only rooms coming or going change
+// it. rooms: match.rooms copies; dRooms: their faces; holders: Set of room ids. → rooms reordered
+function readingOrder(rooms, dRooms, quarterTurns, holders = new Set()) {
+  const t = Number.isInteger(quarterTurns) ? ((quarterTurns % 4) + 4) % 4 : 0;
+  const unturn = (p) => {
+    let x = p.x, y = p.y;
+    for (let k = 0; k < t; k++) [x, y] = [y, -x]; // undo one clockwise quarter turn (y down)
+    return { x, y };
+  };
+  const box = new Map();
+  for (const dr of dRooms) {
+    const pts = ((dr.face && dr.face.points) || []).map(unturn);
+    if (!pts.length) continue;
+    const ys = pts.map((q) => q.y), xs = pts.map((q) => q.x);
+    box.set(dr.roomId, { top: Math.round(Math.min(...ys)), bottom: Math.round(Math.max(...ys)), left: Math.round(Math.min(...xs)) });
+  }
+  if (rooms.some((r) => !box.has(r.id))) return rooms;
+  const age = (r) => { const k = Number(String(r.id).replace(/^\D+/, '')); return Number.isFinite(k) ? k : Infinity; };
+  const older = (a, b) => age(a) - age(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  let rest = rooms.slice().sort((a, b) => box.get(a.id).top - box.get(b.id).top || box.get(a.id).left - box.get(b.id).left || older(a, b));
+  const out = [];
+  while (rest.length) {
+    const b0 = box.get(rest[0].id);
+    const half = (b0.top + b0.bottom) / 2;
+    const row = holders.has(rest[0].id) ? [rest[0]] : rest.filter((r, i) => i === 0 || box.get(r.id).top < half);
+    row.sort((a, b) => box.get(a.id).left - box.get(b.id).left || box.get(a.id).top - box.get(b.id).top || older(a, b));
+    out.push(...row);
+    rest = rest.filter((r) => !row.includes(r));
   }
   return out;
 }
@@ -1067,7 +1265,19 @@ function spanResults(project, dRooms, spanParts, sol) {
       const turn = sides[(parts[k].i + 1) % sides.length];
       const edgeId = turn && turn.edgeIds.length ? turn.edgeIds[0] : null;
       if (kind === 'wall' && !priors) priors = thicknessPriors(project, dRooms);
-      const thickness = kind === 'wall' && edgeId ? (priors.get(edgeId) || 0) : 0;
+      let thickness = kind === 'wall' && edgeId ? (priors.get(edgeId) || 0) : 0;
+      // A SLANTED wall across the side leaves more than its thickness along the side: t / |sin θ| between
+      // the two faces' crossings (final review 2026-10-28, B3: a diagonal cut across the measured 주방
+      // bottom computed its parts with 100 taken off, 26–104 mm off the drawn ones). Its assumed walls'
+      // gap along this line, as the drawing makes it.
+      const wallEdge = edgeId && edgeMap.get(edgeId);
+      if (kind === 'wall' && wallEdge && wallEdge.orient === 'd') {
+        const none = new Map();
+        const along = innerLengthBetween(at(parts[k]), at(parts[k + 1]), edgeMap, positions, priors, none)
+          - innerLengthOf(parts[k].dr.sides, parts[k].i, parts[k].dr.roomId, edgeMap, positions, priors, none)
+          - innerLengthOf(parts[k + 1].dr.sides, parts[k + 1].i, parts[k + 1].dr.roomId, edgeMap, positions, priors, none);
+        if (isNum(along) && along > 0) thickness = round2(along);
+      }
       joints.push({ kind, edgeId, thickness, gap: round2(gap) });
     }
     const wallGap = joints.reduce((s, j) => s + j.thickness, 0);
@@ -1343,6 +1553,39 @@ function computeWarnings(project, dRooms, sol, extra = {}) {
     const a = sol.absorbed.get(m.id);
     if (a != null && a > settings.closureTolerance) warnings.push({ type: 'absorbed', measureId: m.id, amount: a });
   }
+  // Loop: values tied together on one axis that do not close with the assumed walls (solver.valueLoops;
+  // final review 2026-10-28). measureIds: the suspects (one = that value; several = one of them, the one
+  // the drawing agrees with least first); members: every value of the loop off by more than the
+  // tolerance. A loop through a 다시 확인 value is that value's (outlier). closes: the suspects alone close
+  // it (else several values or the walls are off); walls: assumed walls more on one of its paths.
+  // A loop over the tolerance only by the tape slack (solver valueLoops `soft`; round 4, 2026-11-01) is one
+  // like any other where the walls had to take more than the tolerance for one of its values (an absorbed
+  // above): that 확인필요 would otherwise name the correct value whose walls took it (D5 with 화장실 위쪽 벽
+  // +300: 계단실 / 창고 위쪽 벽 '벽 두께를 304mm 바꿨습니다', and 2893 never named). Else it is soft: 참고.
+  const outlierSet = new Set((extra.outliers || []).flatMap((w) => (w.measureId ? [w.measureId] : w.measureIds || [])));
+  const absorbedIds = new Set(warnings.filter((w) => w.type === 'absorbed').map((w) => w.measureId));
+  // The one value a loop names, where the others close without it (not soft): measureId → loop. It decides a
+  // room's two facing values that contradict each other (`opposite` below).
+  const loopSole = new Map();
+  for (const l of valueLoops(project, dRooms, extra.solverSpans || null, { tol: settings.closureTolerance })) {
+    if (l.suspects.some((id) => outlierSet.has(id))) continue;
+    const soft = !!l.soft && ![...l.devs.keys()].some((id) => absorbedIds.has(id));
+    // Named alone against exactly two values that agree (each carrying about half its misfit: one width
+    // measured three times): the same mistake made twice on those two cannot be told from this one by the values (round
+    // 5, 2026-11-08: one wall's two faces typed with the same wrong value had the loop name the correct third value).
+    // `alt`: those two, which the item names as the other possibility ('이 값이 맞다면 …').
+    let alt = null;
+    if (!soft && l.closes && l.suspects.length === 1) {
+      const d0 = l.devs.get(l.suspects[0]);
+      const two = [...l.devs].filter(([id, d]) => id !== l.suspects[0] && Math.abs(d) >= 0.4 * Math.abs(d0));
+      if (two.length === 2) alt = two.map(([id]) => id);
+    }
+    warnings.push({
+      type: 'loop', axis: l.axis, measureIds: l.suspects, members: l.members, amount: round2(l.amount), closes: l.closes, walls: round2(l.walls),
+      ...(soft ? { soft: true } : {}), ...(alt ? { alt } : {}),
+    });
+    if (!soft && l.closes && l.suspects.length === 1) loopSole.set(l.suspects[0], l);
+  }
 
   // Residual: the drawn inner length does not equal the measured value (plan §5-1 "잰 값은 그대로
   // 지킵니다"). This happens when measures contradict each other in a way no assumed wall can absorb
@@ -1372,7 +1615,10 @@ function computeWarnings(project, dRooms, sol, extra = {}) {
       const a = resid[i], b = resid[j];
       if (a.m.room !== b.m.room || a.side.orient !== b.side.orient || Math.sign(a.r) === Math.sign(b.r)) continue;
       if (dot(a.side.inwardNormal, b.side.inwardNormal) > -0.5) continue;
-      if (Math.min(a.ext[1], b.ext[1]) - Math.max(a.ext[0], b.ext[0]) <= 1) continue;
+      // Facing sides between the SAME two wall lines only (final review 2026-10-28, A3: an L-shaped 주방
+      // zone's right side 1300..3800 and left side 2300..3800 overlap but differ by design; '마주 보는 왼쪽
+      // 벽: 1450 (3750mm 차이)' read as if they had to be equal).
+      if (Math.abs(a.ext[0] - b.ext[0]) > 1 || Math.abs(a.ext[1] - b.ext[1]) > 1) continue;
       const amount = Math.abs(a.r - b.r);
       for (const [x, y] of [[a, b], [b, a]]) {
         const cur = opposite.get(x.m.id);
@@ -1380,18 +1626,218 @@ function computeWarnings(project, dRooms, sol, extra = {}) {
       }
     }
   }
+  // A pair the loop on its axis decides (round 4 part B, 2026-11-02, the tablet: 거실 위쪽 벽 4325 typed 5325;
+  // its row and the facing 4325's hold the same unknowns, so the solve drew 4825 with 500 mm on each, both were
+  // '안 맞음' alike, and 방2's correct 4315 / 1260 behind the other face of that wall took 396 mm of wall): where
+  // the loop names one of the two alone and the others close without it, the other one agrees with them and
+  // its misfit is only its share of the named value's. → 'named' (this one is the loop's) | 'agrees' | null
+  const pairByLoop = (m, opp) => {
+    if (!opp) return null;
+    const mine = loopSole.get(m.id), theirs = loopSole.get(opp.measureId);
+    if (mine && !theirs && mine.devs.has(opp.measureId)) return 'named';
+    if (theirs && !mine && theirs.devs.has(m.id)) return 'agrees';
+    return null;
+  };
+  // The key of the loop's own 안 맞는 값 item about the named value (checks-full.js loopChecks: 'loop:<id>=<value>').
+  // Once the surveyor confirms that value there ([확인 완료]: the value is right), the pair turns round: the value
+  // facing it is the one to measure again (checkkeys.js residualCheckNow; round 4 part B check: the next
+  // 확인필요 asked about the confirmed 5325 again, '마주 보는 아래쪽 벽: 4325').
+  const validById = new Map(valid.map((x) => [x.id, x]));
+  const loopKeyOf = (id) => {
+    const x = validById.get(id);
+    return x && isNum(x.value) ? `loop:${id}=${String(Math.round(Math.round(x.value * 100) / 100))}` : null;
+  };
+  // The two faces of one wall that differ (a twoSide pair over the tolerance) where the loop on their axis names one of
+  // them alone and the other is among its values: the loop decides, as for a room's facing pair (round 5, 2026-11-08, the
+  // tablet: 방2 위쪽 벽 4315 typed 5315; the 양쪽 값 차이 item named the correct 거실 4325 first and hid the loop that named
+  // 5315 alone). checks-full twoSideChecks then calls that value alone (the item keeps both values, plan §5-4).
+  // → the pair's .byLoop { measureId, loopKey }; twoSideCalls: called id → [its pairs' twoSide keys]
+  const twoSideCalls = new Map();
+  for (const p of twoSidePairs) {
+    if (!((p.diagonal || p.faces ? p.excess : p.diff) > settings.twoSideTolerance)) continue;
+    const [x, y] = p.measureIds;
+    const lx = loopSole.get(x), ly = loopSole.get(y);
+    const named = lx && !ly && lx.devs.has(y) ? x : ly && !lx && ly.devs.has(x) ? y : null;
+    if (!named || !validById.has(x) || !validById.has(y)) continue;
+    // Only where the called value clearly stands out: its loop puts it at least 1.2 times as far off as the other face,
+    // or more than 1.5 times the tolerance off (a real household with a +300 typo at the limit: the loop called the
+    // correct face, barely further off than the typo).
+    const l = loopSole.get(named), dn = Math.abs(l.devs.get(named)), dOther = Math.abs(l.devs.get(named === x ? y : x));
+    if (!(dn >= 1.2 * dOther || dn > 1.5 * settings.closureTolerance)) continue;
+    const loopKey = loopKeyOf(named);
+    p.byLoop = { measureId: named, ...(loopKey ? { loopKey } : {}) };
+    if (!twoSideCalls.has(named)) twoSideCalls.set(named, []);
+    twoSideCalls.get(named).push(twoSideKey([validById.get(x), validById.get(y)]));
+  }
+  // '안 맞음' follows the loop too (round 5): a value a loop names alone is marked where the plan the other values give
+  // without it (derive solveWithout) misses it by more than the tolerance, whether the drawing kept it or not (방2 위쪽
+  // 벽 5315 was drawn 5315 with 거실's walls 1105 mm thicker, and the correct diagonal 4240 was marked instead). A value
+  // whose misfit is gone on that plan misses only because of the called ones: not '안 맞음' while they are called.
+  // `loopCall` { keys: the items that ask about the called values, after: the mark once one of them is confirmed
+  // ([확인 완료]: that value is right) } — checkkeys.js residualCheckNow.
+  // Only where the loop's value clearly stands out: at least 1.2 times as far off as any other of its values, or more
+  // than 1.5 times the tolerance off (as the 양쪽 값 차이 above; a real household with a +300 typo at the limit had the
+  // loop name a correct value barely further off than the typo).
+  const standsOut = (id, l) => {
+    const d0 = Math.abs(l.devs.get(id));
+    const top = Math.max(0, ...[...l.devs].filter(([x]) => x !== id).map(([, d]) => Math.abs(d)));
+    return d0 >= 1.2 * top || d0 > 1.5 * settings.closureTolerance;
+  };
+  const called = [...loopSole].filter(([id, l]) => standsOut(id, l)).map(([id]) => id);
+  const altRes = called.length && typeof extra.solveWithout === 'function' ? extra.solveWithout(called) : null;
+  const altAt = (id) => {
+    const v = altRes && altRes.get(id);
+    return isNum(v) ? v : null;
+  };
+  const callKeysOf = (id) => [loopKeyOf(id), ...(twoSideCalls.get(id) || [])].filter(Boolean);
+  const markCalled = new Set(called.filter((id) => altAt(id) != null && Math.abs(altAt(id)) > settings.closureTolerance + RESIDUAL_EPS_MM));
+  const allCallKeys = [...new Set(called.flatMap(callKeysOf))];
+  // The measured parts of one straight diagonal line that only place T's on it (solver locator) are one
+  // check, like a diagonal the axis values fix: the drawn line against the sum of its parts (round 2,
+  // 2026-10-31, B6: an h value 100–500 off slid the T and moved the line's ends, and BOTH correct parts got
+  // a 확인필요 and a ※ line of 25–129 mm each). A part alone on its line: half the tolerance (a wrong
+  // part shows half its difference on each of two parts).
+  const lineParts = new Map(); // line → [measureId]
+  for (const m of valid) {
+    const dg = diagRows.get(m.id);
+    if (!dg || !dg.locator || !dg.line) continue;
+    if (!lineParts.has(dg.line)) lineParts.set(dg.line, []);
+    lineParts.get(dg.line).push(m.id);
+  }
+  const residualAt = (id) => {
+    const r = sol.measureResiduals && sol.measureResiduals.get(id);
+    return r != null && isFinite(r) ? r : 0;
+  };
+  // The axis values a diagonal that is only a check also compares (solver diagonalRows `with`: those on
+  // every chain between its ends), the one the drawing agrees with least first: its value against the
+  // median value / drawn length of the values along the same axis (a sketch drawn 8 % wider than high
+  // put a correct v value before the h value 500 mm off, B4), in mm (round 4, 2026-11-01: by the ratio
+  // alone a short correct side, 400 drawn 12 % off, came before a long one typed 100–200 mm off).
+  let withRatios = null;
+  const orientOf = (id) => {
+    const m = valid.find((q) => q.id === id);
+    const at = m && sideOfMeasure(m);
+    return at ? at.dr.sides[at.i].orient : null;
+  };
+  const withOrder = (ids) => {
+    if (!withRatios) {
+      priorT = priorT || thicknessPriors(project, dRooms);
+      const ratios = scaleRatios(project, dRooms, priorT, extra.solverSpans || null);
+      const all = median([...ratios.values()]);
+      const med = new Map();
+      for (const o of ['h', 'v']) {
+        const list = [...ratios].filter(([id]) => orientOf(id) === o).map(([, r]) => r);
+        med.set(o, list.length >= 3 ? median(list) : all);
+      }
+      withRatios = { ratios, med };
+    }
+    const { ratios, med } = withRatios;
+    const off = (id) => {
+      const k = med.get(orientOf(id));
+      const m = valid.find((q) => q.id === id);
+      return ratios.has(id) && k > 0 && m ? Math.abs(ratios.get(id) / k - 1) * m.value : 0;
+    };
+    return ids.filter((id) => validIds.has(id)).sort((a, b) => off(b) - off(a));
+  };
+  // The values a check-only diagonal's misfit may come from (solver diagonalRows `chain`; round 4,
+  // 2026-11-01): every axis value on every chain between its ends, and a value in a loop on a chain when
+  // leaving it out makes the diagonal fit (within its tolerance and half its misfit `miss`: a diagonal just
+  // over its tolerance, 52 mm, came within it without a correct loop value whose tape the fit spread) AND
+  // closes the loops, which were open (what the chains disagree by: at least half the tolerance with every
+  // value, without it within the tolerance and at most half as much; the fit with the assumed walls spreads
+  // a typo over a loop's paths, so without it most other values of the loop would let the diagonal fit too,
+  // B5 with 방1 오른쪽 벽 +300). The one
+  // that leaves the least first (in steps of WITH_STEP_MM), then as withOrder. B1 with 거실 왼쪽 벽 5300:
+  // 5300, which also closes its own loop, before the three correct values on every chain (they leave the
+  // loop 210 mm open); its correct loop mates are not named. No chain test (no positions, a line with a part
+  // not measured): the values on every chain.
+  // → { ids, loop (one of them is in a loop: its own loop points at it too) } | null
+  const WITH_STEP_MM = DIAGONAL_TOLERANCE_MM / 2;
+  const withList = (dg, tol, miss) => {
+    if (dg.chain) {
+      // A value in a loop only where the loops on the chains are open by half a tolerance or more with every
+      // value (they point at a value too; with consistent loops a check thrown off by a typo elsewhere, or
+      // by its own tape, would name whichever loop value the fit leans on).
+      const loopsOpen = (dg.chainRest || 0) >= tol / 2 - RESIDUAL_EPS_MM;
+      const closes = (c) => c.bridge || (loopsOpen && c.rest <= Math.min(tol, (dg.chainRest || 0) / 2) + RESIDUAL_EPS_MM);
+      const fits = (c) => Math.abs(c.res) <= (c.bridge ? tol : Math.min(tol, miss / 2)) + RESIDUAL_EPS_MM;
+      const ok = dg.chain.filter((c) => validIds.has(c.id) && fits(c) && closes(c));
+      if (!ok.length) return null;
+      const rank = new Map(withOrder(ok.map((c) => c.id)).map((id, k) => [id, k]));
+      const step = (c) => Math.floor(Math.max(Math.abs(c.res), c.rest) / WITH_STEP_MM);
+      return { ids: ok.slice().sort((p, q) => step(p) - step(q) || rank.get(p.id) - rank.get(q.id)).map((c) => c.id), loop: ok.some((c) => !c.bridge) };
+    }
+    const ids = dg.with && dg.with.length ? withOrder(dg.with) : [];
+    return ids.length ? { ids, loop: false } : null;
+  };
+  const validIds = new Set(valid.map((m) => m.id));
   for (const m of valid) {
     const r = sol.measureResiduals && sol.measureResiduals.get(m.id);
     if (r == null || !isFinite(r) || Math.abs(r) <= RESIDUAL_TOLERANCE_MM + RESIDUAL_EPS_MM) continue;
     const dg = diagRows.get(m.id);
-    const checkOnly = !!dg && !dg.rows;
-    const tol = checkOnly ? Math.min(settings.closureTolerance, DIAGONAL_TOLERANCE_MM) : settings.closureTolerance;
+    // A part of a straight diagonal whose ends the axis values fix only places the T on it (solver
+    // locator): checked like a diagonal the axis values fix.
+    const checkOnly = !!dg && (!dg.rows || !!dg.locator);
+    const line = dg && dg.locator && dg.line && lineParts.get(dg.line).length > 1 ? lineParts.get(dg.line) : null;
+    const diagTol = Math.min(settings.closureTolerance, DIAGONAL_TOLERANCE_MM);
+    const tol = checkOnly ? diagTol / (dg.locator && !line ? 2 : 1) : settings.closureTolerance;
+    const lineR = line ? line.reduce((a, id) => a + residualAt(id), 0) : null;
     const opp = opposite.get(m.id) || null;
+    // byLoop: the loop decides the pair (pairByLoop); the side that agrees is not 확인필요 (nor '안 맞음').
+    const decided = pairByLoop(m, opp);
+    const withSel = checkOnly ? withList(dg, line ? diagTol : tol, line ? Math.abs(lineR) : Math.abs(r)) : null;
+    const withIds = withSel ? withSel.ids : [];
+    const misfit = Math.abs(r) > tol + RESIDUAL_EPS_MM || (!!opp && opp.amount > settings.closureTolerance + RESIDUAL_EPS_MM);
+    // side: which one of the pair this is; loopKey: the loop's item about the named value; against: this (agreeing)
+    // value's flag once that value is confirmed (checkkeys.js residualCheckNow).
+    const loopKey = decided ? loopKeyOf(decided === 'named' ? m.id : opp.measureId) : null;
+    const byLoop = decided ? {
+      byLoop: true, side: decided, ...(loopKey ? { loopKey } : {}), ...(decided === 'agrees' && !line ? { against: misfit } : {}),
+    } : {};
+    // loopKey: this value is the one its loop names alone; confirmed there, its own 안 맞는 값 item is not asked again.
+    const ownLoopKey = !line && loopSole.has(m.id) ? loopKeyOf(m.id) : null;
+    let check = line ? Math.abs(lineR) > tol + RESIDUAL_EPS_MM
+      : decided === 'agrees' ? false
+        : misfit;
+    // loopCall (round 5, see markCalled above): the called value is '안 맞음'; the side of a decided pair that agrees, and
+    // a value that fits once the called ones are left out, are not.
+    let loopCall = null;
+    if (markCalled.has(m.id)) {
+      check = true;
+      loopCall = { keys: callKeysOf(m.id), after: false };
+    } else if (decided === 'agrees' && !line) {
+      loopCall = { keys: callKeysOf(opp.measureId), after: misfit };
+    } else if (check && altRes && !loopSole.has(m.id)) {
+      const a = altAt(m.id), aOpp = opp ? altAt(opp.measureId) : null;
+      const aLine = line ? line.reduce((s, id) => (s == null || altAt(id) == null ? null : s + altAt(id)), 0) : null;
+      const fits = line ? aLine != null && Math.abs(aLine) <= tol + RESIDUAL_EPS_MM
+        : a != null && Math.abs(a) <= tol + RESIDUAL_EPS_MM
+          && (!opp || (aOpp != null && Math.abs(a - aOpp) <= settings.closureTolerance + RESIDUAL_EPS_MM));
+      if (fits) {
+        check = false;
+        loopCall = { keys: allCallKeys, after: true };
+      }
+    }
     warnings.push({
       type: 'residual', measureId: m.id, amount: Math.abs(r), drawn: m.value + r,
-      check: Math.abs(r) > tol + RESIDUAL_EPS_MM || (!!opp && opp.amount > settings.closureTolerance + RESIDUAL_EPS_MM),
-      ...(opp ? { opposite: { measureId: opp.measureId, amount: round2(opp.amount) } } : {}),
+      check,
+      ...(ownLoopKey ? { loopKey: ownLoopKey } : {}),
+      ...(loopCall ? { loopCall } : {}),
+      ...(opp ? { opposite: { measureId: opp.measureId, amount: round2(opp.amount), ...byLoop } } : {}),
       ...(dg ? { diagonal: checkOnly ? 'check' : 'rows' } : {}),
+      ...(line ? { line: { measureIds: line.slice(), amount: round2(Math.abs(lineR)) } } : {}),
+      ...(withIds.length ? { withIds } : {}),
+      ...(withSel && withSel.loop ? { withLoop: true } : {}),
+    });
+  }
+  // A called value the drawing kept (no residual above, so no item): only its mark.
+  for (const id of markCalled) {
+    if (warnings.some((w) => w.type === 'residual' && w.measureId === id)) continue;
+    const m = validById.get(id), r = m ? residualOf(m) : null;
+    if (r == null) continue;
+    warnings.push({
+      type: 'residual', measureId: id, amount: Math.abs(r), drawn: m.value + r, check: true,
+      loopKey: loopKeyOf(id), loopCall: { keys: callKeysOf(id), after: false },
     });
   }
 
@@ -1465,7 +1911,21 @@ function outlierWarnings(project, dRooms, spans) {
 
 // ---- store ---------------------------------------------------------------------------------------
 
+const DERIVED_BY_NODES = new WeakMap();
+
 export class DocStore {
+  // Every state of a store passes here: the derived snapshot of a project it holds or held is then known by
+  // the project's corners (DocStore.derivedOf: every derive makes a new nodes array, an edit without one keeps
+  // both), so a save can add the records only the open household knows (FILE_RECORDS, ui/wiring.js).
+  get _state() { return this._current; }
+  set _state(s) {
+    this._current = s;
+    if (s && s.project && s.derived && Array.isArray(s.project.nodes)) DERIVED_BY_NODES.set(s.project.nodes, s.derived);
+  }
+  static derivedOf(project) {
+    return (project && Array.isArray(project.nodes) && DERIVED_BY_NODES.get(project.nodes)) || null;
+  }
+
   constructor(project) {
     this._listeners = new Set();
     this._undo = [];
@@ -1580,7 +2040,12 @@ export class DocStore {
   // solved plan stays where the move put its corners (derive holdPlace). prevProject: the project before
   // the move. → { project, derived, dropped, detached }
   _deriveMoved(project, movedPrev, prevProject) {
-    const r = derive(project, movedPrev, { reuseFaces: false, prevProject, holdPlace: true, sameGraph: true });
+    const opts = { reuseFaces: false, prevProject, holdPlace: true, sameGraph: true };
+    let r = derive(project, movedPrev, opts);
+    // A plan whose solve does not give its turned corners back (values contradicting the walls, a solve that never
+    // settles, a wall 0 mm long): the corners stay as turned, with the numbers solved for them (derive keepCorners,
+    // as a household that opens as stored), so four turns give the plan back (round 5: they moved its corners).
+    if (r.held === 'shifted') r = derive(project, movedPrev, { ...opts, keepCorners: true });
     const hooked = runDeriveHooks(project, r.project, r.derived, null);
     return { project: reconcileOpenings(project, hooked, null), derived: r.derived, dropped: r.dropped, detached: r.detachedNow };
   }
@@ -1720,13 +2185,20 @@ export class DocStore {
       }
     }
     const open = segs.length > 1 && Math.hypot(segs[0].p.x - segs[segs.length - 1].q.x, segs[0].p.y - segs[segs.length - 1].q.y) > 1e-6;
+    // A one-piece h / v stroke: the pen points its ends were straightened from (graph.addSegment `pen`: an end
+    // costs how far the pen end is from where it goes, not the straightened end): its first and last pen
+    // points, or where a short return at an end that the straightening dropped begins (sketch.js penStart /
+    // penEnd; a short stroke from graph.shortStroke has none).
+    const penPts = (worldPoints || []).filter((pt) => pt && isFinite(pt.x) && isFinite(pt.y));
+    const pen = segs.length === 1 && segs[0].orient !== 'd' && penPts.length > 1
+      ? [segs[0].penStart || penPts[0], segs[0].penEnd || penPts[penPts.length - 1]] : null;
     this._commit('addStroke', (p) => {
       let doc = p;
       let first = null, last = null;
       for (let k = 0; k < segs.length; k++) {
         const s = segs[k];
         const feet = open && s.orient === 'd' ? [k === 0, k === segs.length - 1] : null;
-        const r = addSegment(doc, s.p, s.q, { orient: s.orient, kind: 'wall', snap: snapMM, sketchScale: p.sketchScale, feet });
+        const r = addSegment(doc, s.p, s.q, { orient: s.orient, kind: 'wall', snap: snapMM, sketchScale: p.sketchScale, feet, pen });
         doc = withSplits(r.doc, r.splits, edgeIds);
         edgeIds.push(...r.edgeIds);
         if (r.ends.length) {
@@ -1808,8 +2280,9 @@ export class DocStore {
   // A stroke drawn past an outer wall (further than the snap distance) leaves a loose end outside the
   // house; such new divider pieces outside every room are removed (they divide nothing and would print
   // as a dashed stub sticking out of the plan).
-  // Loose ends around the new divider are joined as after a wall stroke (graph.joinStrokeEnds), except
-  // that a divider never moves a wall: a wall end near a divider is waiting for its own wall.
+  // Loose ends around the new divider are joined as after a wall stroke (graph.joinStrokeEnds): a wall end
+  // within a snap of the new divider across its line (short of it or past it) is joined to it; the
+  // divider's own free ends do not pull walls (round 2, 2026-10-31: before, only an end past it was).
   addDivider(p, q, { snapMM = 200 } = {}) {
     const { orient } = classifyDirection({ x: q.x - p.x, y: q.y - p.y }, true);
     let edgeIds = [];
@@ -2126,6 +2599,9 @@ export class DocStore {
 // Hooks run after every re-derive: fn(prevProject, nextProject, nextDerived, prevDerived) → project (or null for
 // "unchanged"). The fixtures package registers one that keeps wall-snapped fixtures on their walls.
 DocStore.deriveHooks = [];
+// Hooks run when a household is opened without the derive hooks (deriveOpened): fn(file, { project, derived })
+// → project (or null for "unchanged"); file: the project as it came, with its FILE_RECORDS.
+DocStore.openHooks = [];
 
 function runDeriveHooks(prevProject, nextProject, nextDerived, prevDerived = null) {
   let proj = nextProject;

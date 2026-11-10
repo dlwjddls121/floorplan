@@ -7,6 +7,7 @@
 //     storage  localStorage-like object for the per-device surveyor default (default localStorage)
 // Only changed fields (trimmed) are sent to setInfo; nothing is sent when nothing changed.
 import { el } from './panel.js';
+import { fieldFocusOk } from './input.js';
 
 // Same key main.js uses for new households (newProject reads it).
 export const SURVEYOR_KEY = 'floorplan.surveyor';
@@ -84,10 +85,16 @@ export function openInfoForm({ store, command = (fn) => { fn(); return true; }, 
         const fill = el('button', {
           type: 'button',
           class: 'btn btn-small info-fill',
-          onclick: () => {
+          onclick: (e) => {
             const t = titleSuggestion(values());
-            if (t) { inputs.title.value = t; inputs.title.focus(); }
-            else if (toast) toast('먼저 세대명이나 주소를 넣어 주세요.');
+            if (t) {
+              inputs.title.value = t;
+              // The keyboard comes to the title only after a mouse or a key (input.js fieldFocusOk): after a pen or a
+              // finger it came up by itself over the form (round 4 part B check), as the form keeps it down when it
+              // opens on a tablet (below).
+              const kind = e && (e.pointerType === 'pen' || e.pointerType === 'touch') ? e.pointerType : 'mouse';
+              if (fieldFocusOk(kind)) inputs.title.focus();
+            } else if (toast) toast('먼저 세대명이나 주소를 넣어 주세요.');
           },
         }, '세대명·주소로 채우기');
         grid.append(field, el('div', { class: 'info-fill-row' }, fill));

@@ -15,7 +15,8 @@
 //           overlayHost: element over the canvas for the chip bar (e.g. #canvasWrap),
 //           beforePanelOpen(): close the other bottom panel (PanelController.close),
 //           onPanelChange(): selection / panel height changed (redraw) }
-import { el, Numpad } from './panel.js';
+import { el, Numpad, closeButton } from './panel.js';
+import { fieldFocusOk, penWroteInto, penOverMark } from './input.js';
 import { formatMM, FONT_STACK } from './theme.js';
 import {
   FIXTURE_TYPES, fixtureAt, fixtureLabel, fixtureTypeInfo, normalizeFixture, placeFixture,
@@ -24,9 +25,6 @@ import {
   isWidthOnly, canGoInWall, OTHER_TYPE,
 } from '../core/fixtures.js';
 import { drawFixtureGhost, FIXTURE_STYLE } from './draw-fixtures.js';
-
-// Two lines at most on a landscape tablet (the 설비 chip bar sits right under the hint, main.js).
-export const FIXTURE_HINT = '설비: 위에서 종류를 고르고 놓을 곳을 누르세요. 벽이나 모서리 가까이 놓으면 붙습니다. 놓은 설비를 끌면 옮겨지고, 누른 설비의 네모 점을 끌면 크기가 바뀝니다.';
 
 const DRAG_SLOP_PX = 8;
 const SNAP_PX = 28;        // wall snapping distance on screen
@@ -209,7 +207,7 @@ export class FixtureTool {
   }
 
   // Open the panel for a fixture (also used by other tools when a tap hits a fixture).
-  // opts.focusName: put the keyboard on a 기타's name box.
+  // opts.focusName: put the keyboard on a 기타's name box (with a mouse or a key: FixturePanel._nameRow).
   openFixture(id, opts = {}) {
     this.panel.open(id, null, opts);
   }
@@ -338,7 +336,7 @@ export class FixtureTool {
     let id = null;
     const ok = this.ctx.command(() => { id = store.addFixture(this.type, at.x, at.y, { snapMM }); }, '설비 놓기');
     if (ok && id) this._diagonalHint(id, at, snapMM);
-    // A new 기타 asks for its name first (the keyboard opens on its name box).
+    // A new 기타 asks for its name first (its name box; the keyboard opens there by itself after a mouse or a key).
     if (ok && id) this.openFixture(id, { focusName: this.type === OTHER_TYPE });
   }
 
@@ -419,8 +417,8 @@ function drawResizePreview(ctx, fixture, opts) {
 }
 
 // Where the '450 × 400' pill (pw × ph px) goes next to the fixture's screen box p0..p1: above it,
-// else below, right, left — the first spot inside the canvas that no floating element (hint, tool
-// bar, view buttons, bottom panel: `blocked`, canvas px rects) covers; above when none is free.
+// else below, right, left — the first spot inside the canvas that no floating element (tool bar, view
+// buttons, S펜 chip, bottom panel: `blocked`, canvas px rects) covers; above when none is free.
 // → { left, top }
 export function readoutSpot(p0, p1, pw, ph, viewW, viewH, blocked = []) {
   const gap = HANDLE.offset + HANDLE.size + 4;
@@ -522,7 +520,8 @@ export class FixturePanel {
     return raw ? normalizeFixture(raw) : null;
   }
 
-  // opts.focusName: a 기타 — the name box takes the focus (the tablet keyboard opens).
+  // opts.focusName: a 기타 — the name box takes the focus (the keyboard opens) after a mouse or a key; after a
+  // pen or a finger it waits for a tap on it (_nameRow).
   open(id, field = null, opts = {}) {
     if (this.state && this.state.nameDraft != null && this.state.id !== id) this.close();
     // A size typed for the fixture shown so far (no [다음 ▶] / [확인]) goes into it first.
@@ -776,6 +775,7 @@ export class FixturePanel {
     if (type === OTHER_TYPE && this.state) {
       this.state.focusName = true;
       this.state.nameDraft = null;
+      this.state.nameOwn = false;
     }
     this.refresh();
   }
@@ -868,7 +868,7 @@ export class FixturePanel {
       this.openEdge && this._wallEdge(f)
         ? el('button', { type: 'button', class: 'btn fx-wall-length', onclick: () => this.openWall() }, '벽 길이 ▶') : null,
       el('button', { type: 'button', class: 'btn btn-danger', onclick: () => this.deleteFixture() }, '지우기'),
-      el('button', { type: 'button', class: 'btn btn-ghost panel-close', 'aria-label': '닫기', onclick: () => this.close() }, '✕ 닫기'));
+      closeButton(() => this.close()));
     const shown = fixtureLabel(f);
     const typed = typeof f.label === 'string' ? f.label.trim() : '';
     const title = el('div', { class: 'panel-title' },
@@ -901,8 +901,11 @@ export class FixturePanel {
   }
 
   // The name box of a 기타: '이름 [수납장] [적용]' (keyboard). Enter applies, Esc leaves it unchanged.
-  // The focus moves into it only when asked (a new 기타), never on a re-render (a numpad tap must not
-  // pop the tablet keyboard up over the panel).
+  // The focus moves into it only when asked (a new 기타, a type turned into 기타), never on a re-render (a numpad
+  // tap must not pop the tablet keyboard up over the panel), and only after a mouse or a key (input.js
+  // fieldFocusOk), as the room's name field (panel.js openRoom): after a pen or a finger the box waits for a tap
+  // on it. A 기타 put down with the pen focused it by itself, Samsung's S Pen handwriting bar came up, a stray 'ㅣ'
+  // went into it and [✕ 닫기] named the fixture 'ㅣ' (round 4 part B check).
   _nameRow(f) {
     const s = this.state;
     const cur = typeof f.label === 'string' ? f.label : '';
@@ -912,7 +915,18 @@ export class FixturePanel {
       placeholder: '예: 수납장', 'aria-label': '기타 설비 이름', enterkeyhint: 'done', maxlength: '30',
     });
     const apply = () => { s.nameDraft = null; this.setName(input.value); };
-    input.addEventListener('input', () => { s.nameDraft = input.value; });
+    // What close() puts in without [적용] is only what was typed in a box the surveyor gave the focus (s.nameOwn):
+    // a tap on it, the app's focus after a mouse or a key, a real key (Tab) right before the focus, or the S Pen
+    // writing straight into it (input.js penWroteInto). Text reaching it otherwise is shown but not kept.
+    const kind = () => (typeof this.ctx.inputKind === 'function' ? this.ctx.inputKind() : 'mouse');
+    const penOver = (e) => { if (e.pointerType === 'pen') s.penOverName = penOverMark(); };
+    input.addEventListener('pointerover', penOver);
+    input.addEventListener('pointermove', penOver);
+    input.addEventListener('pointerdown', () => { s.nameOwn = true; });
+    input.addEventListener('focus', () => {
+      if (kind() === 'key' || penWroteInto(input, s.penOverName)) s.nameOwn = true;
+    });
+    input.addEventListener('input', () => { if (s.nameOwn) s.nameDraft = input.value; });
     input.addEventListener('keydown', (e) => {
       if (e.isComposing) return;   // Korean input: Enter ends the syllable first
       if (e.key === 'Enter') { e.preventDefault(); apply(); }
@@ -920,7 +934,10 @@ export class FixturePanel {
     });
     if (s.focusName) {
       s.focusName = false;
-      setTimeout(() => { if (input.isConnected) { input.focus(); input.select(); } }, 0);
+      if (fieldFocusOk(kind())) {
+        s.nameOwn = true;
+        setTimeout(() => { if (input.isConnected) { input.focus(); input.select(); } }, 0);
+      }
     }
     return el('div', { class: 'custom-row fx-name-row' },
       el('span', { class: 'chip-label' }, '이름'), input,

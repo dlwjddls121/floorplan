@@ -9,7 +9,7 @@
 // The panel shares the editor's single bottom panel host with PanelController; the integrator closes
 // one before opening the other (ctx.onOpen is called when this panel opens).
 
-import { el, Numpad } from './panel.js';
+import { el, Numpad, closeButton } from './panel.js';
 import { HIT, formatMM } from './theme.js';
 import {
   MIN_WIDTH,
@@ -726,7 +726,7 @@ export class OpeningPanel {
       el('button', { type: 'button', class: `btn ${o.check ? 'btn-on' : ''}`, 'aria-pressed': o.check ? 'true' : 'false', onclick: () => this._toggleCheck() }, '확인필요'),
       this.ctx.openEdge ? el('button', { type: 'button', class: 'btn op-wall-length', onclick: () => this._openWall() }, '벽 길이 ▶') : null,
       el('button', { type: 'button', class: 'btn btn-danger', onclick: () => this.deleteOpening() }, '지우기'),
-      el('button', { type: 'button', class: 'btn btn-ghost panel-close', 'aria-label': '닫기', onclick: () => this.close() }, '✕ 닫기'));
+      closeButton(() => this.close()));
   }
 }
 

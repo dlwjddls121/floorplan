@@ -22,7 +22,8 @@
 //     highlight: { fixtureId } — the fixture selected in the fixture panel (screen only)
 //     excludeId: fixture id left out (screen: the one whose size is being dragged)
 // Paper sizes are in paper mm / pt and converted with paper.pxPerPaperMM; screen sizes are px.
-import { FONT_STACK, COLORS, LINES } from './theme.js';
+import { FONT_STACK, COLORS, LINES, canvasFont } from './theme.js';
+import { paperTextWidth } from './paperfont.js';
 import {
   normalizeFixture, fixtureLabel, fixtureTypeInfo, localToWorld, fixturePolygon, fixtureFrame,
   isColumn, fixtureBounds, fixtureFlushSides, isStair, stairTreads, stairArrowLocal,
@@ -75,8 +76,11 @@ function innerOutline(ctx, f, box, sz, text, fontPx = sz.font, place = null) {
   let tw = 0;
   if (text) {
     ctx.save();
-    ctx.font = `normal ${fontPx}px ${FONT_STACK}`;
-    tw = ctx.measureText(text).width;
+    // Paper: measured in the bundled output font, as draw-labels.js measures and writes the label.
+    ctx.font = canvasFont(fontPx, 'normal', !sz.screen);
+    // (Paper, round 5: from the output font's own advances, the same on every device; paperfont.js.)
+    const w = !sz.screen ? paperTextWidth(text, fontPx, 'normal') : null;
+    tw = w != null ? w : ctx.measureText(text).width;
     ctx.restore();
   }
   // The label layers measure the same text at another canvas size (치수선 없이: at the pt size under a

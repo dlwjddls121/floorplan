@@ -4,16 +4,18 @@
 //   - the [외벽] switch of a wall (core/exterior.js: on / off for this wall piece, marked by hand only)
 //   - room panel (the current name with [이름 바꾸기] (on-screen keyboard), name presets with
 //     auto-numbering, H with the numpad, [실 아님(설비)]); a tap on a room's name on the plan opens it
-//     with the name field already open
+//     with the name field already open (with the mouse focused, after a pen or a finger not: openRoom)
 //   - rectangle-size panel for the 실 추가 tool (가로 × 세로, [그대로])
 // The file also hosts small DOM helpers shared by the UI: el(), Toaster and openDialog().
 //
 // PanelController keeps the editor selection (which wall / room / side is active), because the
 // selection is exactly what the open panel is about. The editor reads `highlight` when drawing.
 import { sidesForEdge, measureSideKey } from '../core/rooms.js';
+import { resolvedKeys, residualCheckNow } from '../core/checkkeys.js';
 import { wallThickness } from '../core/openings.js';
 import { exteriorInfo } from '../core/exterior.js';
 import { ROOM_PRESETS, formatMM, TIMING } from './theme.js';
+import { fieldFocusOk, penWroteInto, penOverMark } from './input.js';
 
 // A length typed but not confirmed is put in on a tap elsewhere only from this size up (smaller: a number
 // not finished, see _flushNumberDraft).
@@ -38,6 +40,14 @@ export function el(tag, attrs = {}, ...children) {
     node.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
   return node;
+}
+
+// [✕ 닫기] of the bottom panels (length / room / thickness, window / door, fixture): framed and larger than the
+// other buttons there, with a big ✕ (tablet test 2026-10-29: "길이 창의 닫기 버튼을 조금 크게"; app.css
+// .panel-close). Its text stays '✕ 닫기'.
+export function closeButton(onclick) {
+  return el('button', { type: 'button', class: 'btn panel-close', 'aria-label': '닫기', onclick },
+    el('span', { class: 'panel-close-x', 'aria-hidden': 'true' }, '✕'), ' 닫기');
 }
 
 export class Toaster {
@@ -222,6 +232,8 @@ export class PanelController {
   //   roomLabel(roomId)     -> display name for a room
   //   holdView(anchor, run) -> optional: run() (a command that re-solves the plan) while the view keeps
   //                            the world point anchor() on the same screen spot (main.js)
+  //   inputKind()           -> optional: 'mouse' | 'pen' | 'touch' | 'key', the last input on the page
+  //                            (input.js lastInputKind; without it: 'mouse', the PC's behaviour)
   // }
   constructor(host, ctx) {
     this.host = host;
@@ -302,24 +314,55 @@ export class PanelController {
     this._render();
   }
 
-  // opts.editName: open the name field right away (prefilled, selected, keyboard up).
+  // opts.editName (a tap on the room's name on the plan): open the name field right away, prefilled. With a
+  // mouse (a PC) it also takes the focus with the name selected, for the keyboard. After a pen or a finger it
+  // does not (input.js fieldFocusOk): the S Pen handwriting bar or the on-screen keyboard would come up by
+  // itself over the name buttons, and the next pen tap there was written into the field ('ㅣ', and [✕ 닫기]
+  // then named the room 'ㅣ': simulation on the Galaxy Tab, 2026-11-01). A tap on the field (or [이름 바꾸기])
+  // brings the keyboard / handwriting by the surveyor's own choice; the name buttons stay usable meanwhile.
   openRoom(roomId, { editName = false } = {}) {
     this._leaveDrafts();
-    this.state = { mode: 'room', roomId, customOpen: !!editName, focusCustom: !!editName };
+    const focus = !!editName && fieldFocusOk(this._inputKind());
+    this.state = { mode: 'room', roomId, customOpen: !!editName, focusCustom: focus };
     const room = this._room(roomId);
     this.buffer.reset('');
     if (!room) return this.close();
     this._render();
   }
 
-  // [이름 바꾸기]: open (or close) the name field.
+  // [이름 바꾸기]: open (or close) the name field. Opening it is asking for the keyboard: it takes the focus
+  // (with any pointer). On a field already open but not being typed in (a pen or finger tap on the name opened
+  // it without the focus: openRoom) it asks for the keyboard too, instead of closing the field; on the field
+  // being typed in (focused when the button was pressed: s.renameTyping) it closes it, as a 취소.
   _toggleNameField() {
     const s = this.state;
     if (!s || s.mode !== 'room') return;
+    const input = this._nameInput;
+    // (Still focused at the click: a press that did not take the focus, e.g. one the panel's palm guard held back.)
+    const typing = !!s.renameTyping || (!!input && document.activeElement === input);
+    s.renameTyping = false;
+    if (s.customOpen && !typing && input && input.isConnected && this.host.contains(input)) {
+      s.nameOwn = true;
+      input.focus();
+      input.select();
+      return;
+    }
     s.customOpen = !s.customOpen;
     s.focusCustom = s.customOpen;
     s.nameDraft = null;   // closing the field with [이름 바꾸기] is a 취소
+    s.nameOwn = false;
     this._render();
+  }
+
+  _inputKind() {
+    return typeof this.ctx.inputKind === 'function' ? this.ctx.inputKind() : 'mouse';
+  }
+
+  // An unnamed room's label as the plan shows it (ctx.roomLabel: '이름 없는 실 4'); '이름 없음' without it.
+  _unnamedLabel(roomId) {
+    let label = '';
+    try { label = typeof this.ctx.roomLabel === 'function' ? this.ctx.roomLabel(roomId) : ''; } catch (_) { label = ''; }
+    return label && label !== '실' ? label : '이름 없음';
   }
 
   // rect = { a, b } world corners as drawn; onConfirm(w, h, typed: { w, h }) creates the room
@@ -334,7 +377,10 @@ export class PanelController {
   }
 
   // A room name typed but not applied yet is kept when the panel closes or moves on (the surveyor
-  // typed it and tapped elsewhere instead of [적용]). An empty draft changes nothing.
+  // typed it and tapped elsewhere instead of [적용]). An empty draft changes nothing. Only what was typed
+  // while the field had a focus the surveyor gave it is a draft (s.nameOwn, _renderRoom): never text that
+  // reached a field the app or the browser focused by itself (simulation 2026-11-01: the S Pen's handwriting
+  // wrote 'ㅣ' there, and [✕ 닫기] named the room 'ㅣ'). [적용] / Enter still put in what the field shows.
   _flushNameDraft() {
     const s = this.state;
     if (!s || s.mode !== 'room' || !s.customOpen || s.nameDraft == null) return;
@@ -1028,7 +1074,7 @@ export class PanelController {
   // MIN_FLUSH_LENGTH_MM is refused with a toast (recheck 2026-10-25: '27' typed and ✕ stored a 27 mm wall);
   // [확인 ▶] still takes it. Esc (PC) throws the number away.
   _closeButton() {
-    return el('button', { type: 'button', class: 'btn btn-ghost panel-close', 'aria-label': '닫기', onclick: () => this.close() }, '✕ 닫기');
+    return closeButton(() => this.close());
   }
 
   _valueBox(text, { active = false, placeholder = '', sub = '', onclick = null, flag = '', computed = false } = {}) {
@@ -1084,9 +1130,15 @@ export class PanelController {
         if (m.parts && m.parts.length > 1) sub = m.parts.map(formatMM).join('+');
         // Computed from where a 구역 나누기 선 cuts a measured side: typing a value replaces it.
         // A real wall across a measured side (DESIGN.md §7.9): its assumed thickness is taken off.
+        // A slanted wall across it leaves more than its thickness along the side (core/model.js spanResults:
+        // its gap along the side, e.g. 264 for a 100 wall): no '벽 두께' figure for the parts right next to
+        // it (final review round 2); a part between straight walls of that span names their thickness (round 3).
         if (m.computed) {
+          const joint = m.byWall ? computedJoint(store, m) : null;
           sub = m.byWall
-            ? `벽 위치로 계산한 값${m.wallGap > 0 ? ` (벽 두께 ${formatMM(m.wallGap)} 뺌)` : ''} · 재면 바꾸세요`
+            ? (joint.slanted
+              ? '사선 벽 자리로 계산한 값 · 재면 바꾸세요'
+              : `벽 위치로 계산한 값${joint.gap > 0 ? ` (벽 두께 ${formatMM(joint.gap)} 뺌)` : ''} · 재면 바꾸세요`)
             : '나눈 위치로 계산한 값 · 재면 바꾸세요';
         }
       }
@@ -1101,11 +1153,12 @@ export class PanelController {
       }
       const outlier = m && isOutlier(store, m.id);
       const residual = m && residualOf(store, m.id);
-      if (residual && !(active && this.buffer.edited)) {
+      // (A value its loop calls is '안 맞음' even where the drawing kept it, 차이 0: no '그림' figure then; round 5.)
+      if (residual && residual.amount > 5 && !(active && this.buffer.edited)) {
         sub = `그림 ${formatMM(Math.round(residual.drawn))} (차이 ${formatMM(Math.round(residual.amount))})`;
       }
       const flag = [m && m.check ? '! 확인필요' : '', outlier ? '다시 확인' : '',
-        residual && residual.check ? '다른 값과 안 맞음' : ''].filter(Boolean).join(' · ');
+        residual && residualCheckNow(residual, resolvedKeys(store.project)) ? '다른 값과 안 맞음' : ''].filter(Boolean).join(' · ');
       row.append(el('div', { class: 'field-wrap' },
         el('span', { class: 'field-label' }, `${this.ctx.roomLabel(f.roomId)} 쪽`),
         this._valueBox(text, {
@@ -1197,9 +1250,12 @@ export class PanelController {
     // e.g. '안방'). A tap on the room's name on the plan opens this panel with the field already open.
     const nameRow = el('div', { class: 'room-name-row' },
       el('span', { class: 'room-name-label' }, '실 이름'),
-      el('span', { class: `room-name-big ${room.name ? '' : 'room-name-empty'}` }, room.name || '이름 없음'),
+      // An unnamed room: the label the plan, the checks and the other panels give it ('이름 없는 실 4'), greyed.
+      el('span', { class: `room-name-big ${room.name ? '' : 'room-name-empty'}` }, room.name || this._unnamedLabel(s.roomId)),
       el('button', {
         type: 'button', class: `btn room-rename ${s.customOpen ? 'btn-on' : ''}`, 'aria-pressed': s.customOpen ? 'true' : 'false',
+        // Before the press moves the focus: was the name field being typed in (_toggleNameField)?
+        onpointerdown: () => { s.renameTyping = !!this._nameInput && document.activeElement === this._nameInput; },
         onclick: () => this._toggleNameField(),
       }, '이름 바꾸기'));
 
@@ -1225,15 +1281,41 @@ export class PanelController {
     }
 
     let custom = null;
+    this._nameInput = null;
     if (s.customOpen) {
       const input = el('input', {
         class: 'text-input room-name-input', type: 'text', value: room.name || '', placeholder: '실 이름 (예: 안방)',
         'aria-label': '실 이름', enterkeyhint: 'done', maxlength: 40, autocomplete: 'off',
       });
+      this._nameInput = input;
       // A name typed but not applied yet survives re-renders (a numpad tap for H) and is applied when
-      // the panel closes ([✕ 닫기], a tap elsewhere); only [취소] / Esc throw it away.
+      // the panel closes ([✕ 닫기], a tap elsewhere); only [취소] / Esc throw it away. It counts only when
+      // typed in a field the surveyor gave the focus (s.nameOwn): a tap on the field itself (pen, finger,
+      // mouse), [이름 바꾸기] or the PC's click on the name (the app focuses it then, below), a real key
+      // (Tab) right before the focus, or the S Pen over the field when it took the focus (writing straight
+      // into it, input.js penWroteInto). Text reaching the field otherwise is shown but not kept (_flushNameDraft).
       if (s.nameDraft != null) input.value = s.nameDraft;
-      input.addEventListener('input', () => { s.nameDraft = input.value; });
+      const penOver = (e) => { if (e.pointerType === 'pen') s.penOverName = penOverMark(); };
+      input.addEventListener('pointerover', penOver);
+      input.addEventListener('pointermove', penOver);
+      // The pen or finger tap that brings the keyboard to a field a tap on the name opened without the focus (openRoom),
+      // still showing the room's name: the name is selected, as that tap selected it before, so what is written
+      // replaces it (round 4 part B check: '안방' written after the tap made '방2안방', and [✕ 닫기] put it in). A
+      // tap on the field being typed in places the caret as usual; the mouse (a PC) is left as it was.
+      input.addEventListener('pointerdown', (e) => {
+        s.nameOwn = true;
+        s.selectOnTap = (e.pointerType === 'pen' || e.pointerType === 'touch') && document.activeElement !== input
+          && !!input.value && input.value === (room.name || '');
+      });
+      input.addEventListener('click', () => {
+        if (!s.selectOnTap) return;
+        s.selectOnTap = false;
+        input.select();
+      });
+      input.addEventListener('focus', () => {
+        if (this._inputKind() === 'key' || penWroteInto(input, s.penOverName)) s.nameOwn = true;
+      });
+      input.addEventListener('input', () => { s.selectOnTap = false; if (s.nameOwn) s.nameDraft = input.value; });
       input.addEventListener('keydown', (e) => {
         if (e.isComposing) return;   // Korean input: Enter ends the syllable first
         if (e.key === 'Enter') { e.preventDefault(); this._applyCustomName(input.value); }
@@ -1243,9 +1325,11 @@ export class PanelController {
         el('button', { type: 'button', class: 'btn btn-primary', onclick: () => this._applyCustomName(input.value) }, '적용'),
         el('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { s.customOpen = false; s.nameDraft = null; this._render(); } }, '취소'));
       // focusCustom: focus (and select the current name) only when the field opens, not on later
-      // re-renders (a numpad tap for H must not bring up the tablet keyboard again).
+      // re-renders (a numpad tap for H must not bring up the tablet keyboard again); only when the
+      // surveyor asked for the keyboard ([이름 바꾸기], or a click on the name with the mouse: openRoom).
       if (s.focusCustom) {
         s.focusCustom = false;
+        s.nameOwn = true;
         setTimeout(() => {
           if (!input.isConnected) return;
           input.focus();
@@ -1349,6 +1433,27 @@ function sideMid(store, roomId, sideKey) {
   const side = store && findSide(store.derived, roomId, sideKey);
   const pts = side ? sidePoints(store.project, side) : [];
   return pts.length === 2 ? { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 } : null;
+}
+
+// What lies next to a computed part m (derived.computedMeasures, id 'computed:<span>:<room>:<side>') in its
+// measured span (derived.spans[].joints: joints[k - 1] before part k, joints[k] after it).
+// → { slanted: a DIAGONAL wall (orient 'd') is right before or after this part,
+//     gap: the straight walls' assumed thickness taken off the span (its wallGap when no wall is slanted) }
+// Only the part's own joints count (final review round 3: a span cut by a slanted AND a straight wall
+// said '사선 벽 자리' for every part, also for the one between the outer wall and the straight wall, in a
+// room with no slanted side; core/dims.js's tap text should use the same rule).
+function computedJoint(store, m) {
+  const out = { slanted: false, gap: m && m.wallGap > 0 ? m.wallGap : 0 };
+  const spans = (store && store.derived && store.derived.spans) || [];
+  const sp = m && m.spanId != null ? spans.find((x) => x && x.measureId === m.spanId) : null;
+  if (!sp || !Array.isArray(sp.joints)) return out;
+  const isSlanted = (j) => !!j && j.kind === 'wall' && store.project.edges.some((e) => e.id === j.edgeId && e.orient === 'd');
+  if (!sp.joints.some(isSlanted)) return out;
+  const parts = Array.isArray(sp.parts) ? sp.parts : [];
+  const k = parts.findIndex((p) => p && `computed:${sp.measureId}:${p.roomId}:${p.sideKey}` === m.id);
+  out.slanted = k < 0 ? true : isSlanted(sp.joints[k - 1]) || isSlanted(sp.joints[k]);
+  out.gap = sp.joints.reduce((s, j) => s + (j && !isSlanted(j) && j.thickness > 0 ? j.thickness : 0), 0);
+  return out;
 }
 
 // True when the room has a diagonal side (orient 'd').

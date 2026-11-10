@@ -115,6 +115,8 @@ export function straightenStroke(points, opts = {}) {
     anchorLine(pts, lines, 0, pieces[0], opts.anchorStart, n === 1 ? opts.anchorEnd : null, 'start');
     if (n > 1) anchorLine(pts, lines, n - 1, pieces[n - 1], opts.anchorEnd, null, 'end');
   }
+  alignSameLines(pts, pieces, lines, closed ? [] : [[0, opts.anchorStart], [n - 1, opts.anchorEnd]],
+    opts.sameLineTolerance != null ? opts.sameLineTolerance : SAME_LINE_CT * ct);
   const corners = []; // corners[i] = point between piece i and piece i+1 (cyclic when closed)
   for (let i = 0; i < n; i++) {
     if (!closed && i === n - 1) break;
@@ -135,7 +137,12 @@ export function straightenStroke(points, opts = {}) {
       q = i === n - 1 ? (lines[n - 1].endAt || projectToLine(pts[pieces[n - 1].end], lines[n - 1])) : corners[i];
     }
     if (dist(p, q) < EPS) continue;
-    out.push({ p: { x: p.x, y: p.y }, q: { x: q.x, y: q.y }, orient: pieces[i].orient });
+    const seg = { p: { x: p.x, y: p.y }, q: { x: q.x, y: q.y }, orient: pieces[i].orient };
+    // The pen points an open stroke's ends were straightened from (addStroke's `pen`): the stroke's first and
+    // last pen points, or where a short return at an end that the straightening dropped begins.
+    if (!closed && i === 0) seg.penStart = { x: pts[pieces[0].start].x, y: pts[pieces[0].start].y };
+    if (!closed && i === n - 1) seg.penEnd = { x: pts[pieces[n - 1].end].x, y: pts[pieces[n - 1].end].y };
+    out.push(seg);
   }
   return out;
 }
@@ -391,6 +398,67 @@ function mergeRuns(pts, pieces, allowDiagonal, snapRad) {
 
 // Raw sub-polylines covered by a piece (several when merged).
 function partsOf(pc) { return pc.parts || [pc]; }
+
+// Two h (v) pieces of ONE stroke that do not overlap along their line and lie at most `tol` apart across
+// it are one wall line drawn a little off: they get one coordinate (an anchored end's, else their
+// length-weighted mean). Final review 2026-10-28: a T outline drawn in one stroke had its shoulders 22 mm
+// apart (1.3 px), the wall under the T then met one shoulder's corner and the other's wall 22 mm beside it
+// (a hidden jog, the room below with six sides, a value typed on the wrong part squeezed a door to 291 mm);
+// D3's ten-corner outline kept a 63 mm jog on its right wall. The default tolerance is SAME_LINE_CT × the
+// corner tolerance (0.4 of the app's snap, graph.js SAME_LINE). Mutates `lines`.
+const SAME_LINE_CT = 0.8;
+function alignSameLines(pts, pieces, lines, anchored, tol) {
+  const n = pieces.length;
+  if (n < 3 || !(tol > 0)) return;
+  const spanOf = (i) => {
+    const key = pieces[i].orient === 'h' ? 'x' : 'y';
+    let lo = Infinity, hi = -Infinity;
+    for (const part of partsOf(pieces[i])) {
+      for (let k = part.start; k <= part.end; k++) { lo = Math.min(lo, pts[k][key]); hi = Math.max(hi, pts[k][key]); }
+    }
+    return { lo, hi };
+  };
+  for (const kind of ['h', 'v']) {
+    const key = kind === 'h' ? 'y' : 'x';
+    const idx = [];
+    for (let i = 0; i < n; i++) if (lines[i].kind === kind) idx.push(i);
+    if (idx.length < 2) continue;
+    const spans = new Map(idx.map((i) => [i, spanOf(i)]));
+    // Groups by union-find over the pairs that qualify.
+    const parent = new Map(idx.map((i) => [i, i]));
+    const find = (i) => (parent.get(i) === i ? i : find(parent.get(i)));
+    for (let a = 0; a < idx.length; a++) {
+      for (let b = a + 1; b < idx.length; b++) {
+        const i = idx[a], j = idx[b];
+        if (Math.abs(lines[i][key] - lines[j][key]) > tol) continue;
+        const si = spans.get(i), sj = spans.get(j);
+        if (Math.min(si.hi, sj.hi) - Math.max(si.lo, sj.lo) > -tol) continue; // overlapping or touching
+        parent.set(find(j), find(i));
+      }
+    }
+    const groups = new Map();
+    for (const i of idx) {
+      const r = find(i);
+      if (!groups.has(r)) groups.set(r, []);
+      groups.get(r).push(i);
+    }
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      const fix = kind === 'h' ? 'fixY' : 'fixX';
+      const fixed = g.filter((i) => anchored.some(([k, a]) => k === i && a && a[fix]));
+      let c;
+      if (fixed.length) c = lines[fixed[0]][key];
+      else {
+        let sw = 0, s = 0;
+        for (const i of g) { sw += pieces[i].length; s += pieces[i].length * lines[i][key]; }
+        c = sw > EPS ? s / sw : lines[g[0]][key];
+      }
+      // An anchored group keeps every member within tol of the anchor (else it is left as drawn).
+      if (g.some((i) => Math.abs(lines[i][key] - c) > tol)) continue;
+      for (const i of g) lines[i][key] = c;
+    }
+  }
+}
 
 // Straight line for a piece: { kind:'h', y } | { kind:'v', x } | { kind:'d', p, d (unit), q }
 function fitLine(pts, pc) {

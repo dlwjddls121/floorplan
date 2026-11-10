@@ -110,6 +110,11 @@ export function rotationOf(project, dir = 1, opts = {}) {
 
   const edgesById = new Map((project.edges || []).map((e) => [e.id, e]));
   const out = { ...project };
+  // The net clockwise quarter turns since the plan was drawn, 1–3 (none: 0): '이름 없는 실 N' follows the reading order
+  // of the plan as drawn (model.js readingOrder; round 5). 0.6.8.1 keeps the key as it is and does not count.
+  const q = ((((Number.isInteger(project.quarterTurns) ? project.quarterTurns : 0) + s) % 4) + 4) % 4;
+  if (q) out.quarterTurns = q;
+  else delete out.quarterTurns;
   out.nodes = project.nodes.map(ptObj);
   out.edges = (project.edges || []).map((e) => {
     const next = { ...e };

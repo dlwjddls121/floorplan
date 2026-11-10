@@ -5,15 +5,19 @@
 //                                                     text: { x, y, rot, w, h, mode }, box }]  (canvas px)
 //     A measured diagonal side (core/dims.js rule 7) is an item with aligned: true, side 'aligned', its
 //     line parallel to the wall, text.rot along it (upright), textPoly / linePoly (px corners), parts
-//     (small px boxes along the turned number, for other texts to keep clear of), drag: null (only
-//     chain numbers are dragged across rows); box = textBox = the number's px bounding box.
+//     (small px boxes along the turned number, for other texts to keep clear of), drag: { aligned: true,
+//     rows: 0, base, offsetPx } (round 5: the number is dragged anywhere, its line stays; never across rows);
+//     box = textBox = the number's px bounding box. A plan of separately drawn parts (core/printlayout.js separateParts):
+//     the items of each part's own chains, one after the other.
 //   dimHitBoxes(ctx, project, derived, opts)      → [{ dim, box: { x, y, w, h } }] for taps / drags
 //   dimDragTarget(item, dx, dy)                   → { row, rowFloat, offset } where a dragged number goes
 //
 // A number moved by hand (project.labelOffsets['dim:<key>'], PAPER mm) is placed from the middle of its
 // dimension line along the line (not from its automatic spot), so the screen (converted with the print
 // scale, opts.worldPerPaperMM) and the print put it at the same place. Its row comes from
-// project.dimOverrides (core/dims.js assignRows).
+// project.dimOverrides (core/dims.js assignRows). A diagonal side's number (round 5, survey S2) moved by hand: its
+// middle at the middle of the side's face (dim A–B) plus { dx, dy } paper mm on the plan's x / y axes, so that a turn
+// of the plan (core/rotate.js turns every offset) turns it with the plan; its line stays where the layout put it.
 //
 // opts: { toPx(world) → canvas point, pxPerMM, paper: { pxPerPaperMM } | null, dims (optional result of
 //         buildDimensions), worldPerPaperMM (screen only: print scale used to convert label offsets,
@@ -21,12 +25,14 @@
 //
 // Paper sizes (plan §1-2): lines #4472C4 0.44 pt with filled triangle arrowheads, numbers #0070C0 15.8 pt
 // on the outer side of the line (left chain reads bottom→top, right chain top→bottom). The first row
-// sits 8 mm outside the outer wall faces, rows 9 mm apart. Extension lines (보조선) run from just
+// sits 8 mm outside the outer wall faces (on paper farther on a side where a door opens outward past it:
+// printlayout.js chainFirstRows), rows 9 mm apart. Extension lines (보조선) run from just
 // outside the wall to just past the dimension line. On screen the same layout uses fixed pixel sizes.
 
-import { buildDimensions, placeRowTexts, layoutAlignedDims, wallPolygons, boxOf, rotatedRectParts } from '../core/dims.js';
-import { PAPER_STYLE, PT_MM, dimObstacles } from '../core/printlayout.js';
+import { buildDimensions, placeChainTexts, layoutAlignedDims, wallPolygons, boxOf, rotatedRect, rotatedRectParts } from '../core/dims.js';
+import { PAPER_STYLE, PT_MM, dimObstacles, chainFirstRows, separateParts } from '../core/printlayout.js';
 import { canvasFont, COLORS } from './theme.js';
+import { paperTextWidth } from './paperfont.js';
 
 export const DIM_COLORS = { line: '#4472C4', text: '#0070C0', highlight: COLORS.activeSide, note: '#C5221F' };
 
@@ -41,13 +47,14 @@ export function dimStyle(opts) {
       arrow: PAPER_STYLE.dimArrowMM * u, arrowHalf: PAPER_STYLE.dimArrowHalfMM * u,
       first: PAPER_STYLE.dimLineMM * u, row: PAPER_STYLE.dimRowMM * u, textGap: PAPER_STYLE.dimTextGapMM * u,
       extGap: PAPER_STYLE.dimExtGapMM * u, extOver: PAPER_STYLE.dimExtOverMM * u, clear: PAPER_STYLE.dimClearMM * u, offsetPx: u * offK,
+      paper: true,   // numbers in the bundled output font (theme.js PAPER_FONT_STACK)
     };
   }
   const wppm = (opts && opts.worldPerPaperMM) || 60;
   return {
     line: 1, ext: 0.75, text: 14, arrow: 8, arrowHalf: 3,
     first: 26, row: 26, textGap: 3, extGap: 5, extOver: 5, clear: 4,
-    offsetPx: wppm * ((opts && opts.pxPerMM) || 0.06),
+    offsetPx: wppm * ((opts && opts.pxPerMM) || 0.06), paper: false,
   };
 }
 
@@ -59,6 +66,11 @@ function optionsOf(opts) {
 }
 
 export function layoutDimensions(ctx, project, derived, opts = {}) {
+  // Each separately drawn part has its own chains (core/printlayout.js separateParts; on paper output.js draws part by part).
+  if (!opts.dims) {
+    const several = separateParts(project, derived);
+    if (several.length) return several.flatMap((q) => layoutDimensions(ctx, q.project, q.derived, opts));
+  }
   const o = optionsOf(opts);
   const res = opts.dims || buildDimensions(project, derived, { bothValues: o.bothValues, showUnknown: o.showUnknown });
   const b = res.bounds;
@@ -67,22 +79,40 @@ export function layoutDimensions(ctx, project, derived, opts = {}) {
   const tl = opts.toPx({ x: b.minX, y: b.minY }), br = opts.toPx({ x: b.maxX, y: b.maxY });
   const k = opts.pxPerMM > 0 ? opts.pxPerMM : Math.abs(opts.toPx({ x: 1000, y: 0 }).x - opts.toPx({ x: 0, y: 0 }).x) / 1000;
   const offsets = (project && project.labelOffsets) || {};
+  // Paper: each side's first row past an outward door's swing (printlayout.js chainFirstRows, which the
+  // print box counts too; final review 2026-10-28, A3–A6: the 현관문's leaf and arc crossed the chain).
+  let firsts = null;
+  if (opts.paper && opts.paper.scale > 0 && opts.paper.pxPerPaperMM > 0) {
+    try { firsts = chainFirstRows(project, derived, opts.paper.scale, b); } catch (_) { firsts = null; }
+  }
   ctx.save();
-  ctx.font = canvasFont(S.text);
-  const textWidth = (d) => ctx.measureText(d.text).width;
+  ctx.font = canvasFont(S.text, 'normal', S.paper);
+  // (Paper, round 5: from the output font's own advances, the same on every device; paperfont.js.)
+  const textWidth = (d) => {
+    const w = S.paper ? paperTextWidth(d.text, S.text, 'normal') : null;
+    return w != null ? w : ctx.measureText(d.text).width;
+  };
   const items = [];
+  const firstOf = (side) => (firsts && firsts[side] > 0 ? firsts[side] * opts.paper.pxPerPaperMM : S.first);
+  // Every chain's numbers at once (core/dims.js placeChainTexts: world coordinates along the axis, k = px per
+  // mm; px = along(world)), each row clear of the numbers the chains before it put past the plan's corners.
+  // Only the row next to the plan may put a number on the plan side of its line (the band up to the wall is
+  // free there; further out it holds the inner row's numbers).
+  // (A separately drawn part on paper keeps the numbers of a row in the order of its spans: placeRowTexts keepOrder.)
+  const keepOrder = !!(S.paper && opts.layout && opts.layout.ofPart);
+  const texts = placeChainTexts(res, {
+    k, textWidth, arrow: S.arrow, gap: S.clear, row: S.row, textGap: S.textGap, text: S.text,
+    first: Object.fromEntries(res.chains.map((c) => [c.side, firstOf(c.side)])), allowFlip: (r) => r === 0, keepOrder,
+  });
   for (const chain of res.chains) {
     const side = chain.side, sign = SIGN[side];
+    const first = firstOf(side);
     const horizontal = side === 'top' || side === 'bottom';
     const face = side === 'top' ? tl.y : side === 'bottom' ? br.y : side === 'left' ? tl.x : br.x;
     const along = (v) => (horizontal ? opts.toPx({ x: v, y: 0 }).x : opts.toPx({ x: 0, y: v }).y);
     const P = (t, s) => (horizontal ? { x: t, y: s } : { x: s, y: t });
     chain.rows.forEach((row, r) => {
-      const s = face + sign * (S.first + r * S.row);
-      // placeRowTexts works in world coordinates along the axis (k = px per mm); px = along(world).
-      // Only the row next to the plan may put a number on the plan side of its line (the band up to
-      // the wall is free there; further out it holds the inner row's numbers).
-      const texts = placeRowTexts(row, { k, textWidth, arrow: S.arrow, gap: S.clear, allowFlip: r === 0 });
+      const s = face + sign * (first + r * S.row);
       for (const d of row) {
         // drawA / drawB: neighbours that overlap a little meet at one point (core/dims.js).
         const t1 = along(d.drawA != null ? d.drawA : d.a), t2 = along(d.drawB != null ? d.drawB : d.b);
@@ -127,7 +157,7 @@ export function layoutDimensions(ctx, project, derived, opts = {}) {
         items.push({
           dim: d, side, row: r, p1: P(lo, s), p2: P(hi, s), arrowsOutside, ext, text, box: unionBox(tb, lineBox), textBox: tb, horizontal,
           // For dragging the number (main.js): where the rows are and where the number sits.
-          drag: { face, sign, first: S.first, rowStep: S.row, textOff, rows: chain.rows.length, midAlong, textAlong: tc, perp, offsetPx: S.offsetPx },
+          drag: { face, sign, first, rowStep: S.row, textOff, rows: chain.rows.length, midAlong, textAlong: tc, perp, offsetPx: S.offsetPx },
           moved: !!off || rowFixed,
         });
       }
@@ -138,21 +168,26 @@ export function layoutDimensions(ctx, project, derived, opts = {}) {
     let walls = [], obstacles = [];
     try { walls = wallPolygons(project, derived); } catch (_) { walls = []; }
     try { obstacles = dimObstacles(project, derived); } catch (_) { obstacles = []; }
-    for (const pl of layoutAlignedDims(res, { wpu: 1 / k, S, textWidth, walls, obstacles })) {
+    // (The chains' first rows as drawn above: past an outward door's swing on paper.)
+    const rowFirsts = firsts ? Object.fromEntries(Object.entries(firsts).map(([side, mm]) => [side, mm * opts.paper.pxPerPaperMM])) : null;
+    for (const pl of layoutAlignedDims(res, { wpu: 1 / k, S, textWidth, walls, obstacles, firsts: rowFirsts, keepOrder })) {
       const p1 = opts.toPx(pl.p1), p2 = opts.toPx(pl.p2);
-      const c = opts.toPx({ x: pl.text.x, y: pl.text.y });
-      const textPoly = pl.textPoly.map((p) => opts.toPx(p));
+      const w = textWidth(pl.dim);
+      // (Round 5: moved by hand, from the middle of the side's face; see the header.)
+      const base = opts.toPx({ x: (pl.dim.A.x + pl.dim.B.x) / 2, y: (pl.dim.A.y + pl.dim.B.y) / 2 });
+      const off = offsets[`dim:${pl.dim.key}`];
+      const c = off ? { x: base.x + (Number(off.dx) || 0) * S.offsetPx, y: base.y + (Number(off.dy) || 0) * S.offsetPx } : opts.toPx({ x: pl.text.x, y: pl.text.y });
+      const textPoly = off ? rotatedRect(c, pl.text.angle, w, S.text) : pl.textPoly.map((p) => opts.toPx(p));
       const bb = boxOf(textPoly);
       const tb = { x: bb.minX, y: bb.minY, w: bb.maxX - bb.minX, h: bb.maxY - bb.minY };
-      const w = textWidth(pl.dim);
       items.push({
-        dim: pl.dim, side: 'aligned', aligned: true, row: pl.row, mode: pl.mode, p1, p2,
+        dim: pl.dim, side: 'aligned', aligned: true, row: pl.row, mode: off ? 'moved' : pl.mode, p1, p2,
         arrowsOutside: Math.hypot(p2.x - p1.x, p2.y - p1.y) < 2 * S.arrow + 2,
         ext: o.extensionLines ? pl.ext.map(([p, q]) => [opts.toPx(p), opts.toPx(q)]) : [],
-        text: { x: c.x, y: c.y, rot: pl.text.angle, w, h: S.text, mode: pl.mode },
+        text: { x: c.x, y: c.y, rot: pl.text.angle, w, h: S.text, mode: off ? 'moved' : pl.mode },
         textBox: tb, box: tb, textPoly, linePoly: pl.linePoly.map((p) => opts.toPx(p)),
         parts: rotatedRectParts(c, pl.text.angle, w, S.text).map((b) => ({ x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY })),
-        horizontal: false, drag: null, moved: false,
+        horizontal: false, drag: { aligned: true, rows: 0, base, offsetPx: S.offsetPx }, moved: !!off,
       });
     }
   }
@@ -300,14 +335,14 @@ export function drawDimensions(ctx, project, derived, opts = {}) {
     ctx.save();
     ctx.translate(it.text.x, it.text.y);
     ctx.rotate(it.text.rot);
-    ctx.font = canvasFont(S.text);
+    ctx.font = canvasFont(S.text, 'normal', S.paper);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = hl ? DIM_COLORS.highlight : (it.dim.unknown ? COLORS.unmeasured : DIM_COLORS.text);
     ctx.fillText(it.dim.text, 0, 0);
     if (it.dim.note) {
       // Small ※: the two faces differ by more than the tolerance (plan §5-4).
-      ctx.font = canvasFont(S.text * 0.55);
+      ctx.font = canvasFont(S.text * 0.55, 'normal', S.paper);
       ctx.fillStyle = DIM_COLORS.note;
       ctx.textAlign = 'left';
       ctx.fillText('※', it.text.w / 2 + S.text * 0.1, -S.text * 0.25);
@@ -333,6 +368,11 @@ export function dimHitBoxes(ctx, project, derived, opts = {}) {
 //     (the number keeps its place along the line) }
 export function dimDragTarget(item, dx, dy) {
   const g = item.drag;
+  // A diagonal side's number (round 5): anywhere, its middle from the middle of the side's face; its row stays.
+  if (g.aligned) {
+    const offset = Math.hypot(dx, dy) >= 6 ? { dx: (item.text.x + dx - g.base.x) / g.offsetPx, dy: (item.text.y + dy - g.base.y) / g.offsetPx } : undefined;
+    return { row: item.row, rowFloat: item.row, offset };
+  }
   const along = item.horizontal ? dx : dy;
   const across = item.horizontal ? dy : dx;
   // The number's distance from the plan face → the row whose number band is nearest.

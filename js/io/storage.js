@@ -12,6 +12,8 @@
 // 'failed'). Nothing here ever touches the in-memory document, so a failed save never loses work.
 
 import { FILE_FORMAT_VERSION } from '../version.js';
+// The records a write adds to a household open in the editor (fileio.js writeHooks; core/model.js FILE_RECORDS).
+import { stampForWrite } from './fileio.js';
 
 // ---------------------------------------------------------------------------------------------------------
 // Schema versioning. To change the schema: bump DB_VERSION and append one migration step. Each step runs
@@ -407,6 +409,7 @@ export async function loadProject(id) {
 // value is kept. This keeps the "마지막 내보내기 이후 수정됨" badge correct whatever the save order.
 export async function saveProject(project) {
   checkSavable(project);
+  project = stampForWrite(project);
   return withStores(['projects'], 'readwrite', 'save', async (s) => {
     const existing = await promisifyRequest(s.projects.get(project.id));
     let record = project;
@@ -434,7 +437,7 @@ export function saveProjectNow(project) {
     const tx = db.transaction(['projects'], 'readwrite', { durability: 'strict' });
     tx.onerror = () => {};
     tx.onabort = () => {};
-    tx.objectStore('projects').put(project);
+    tx.objectStore('projects').put(stampForWrite(project, { quick: true }));
     if (typeof tx.commit === 'function') tx.commit();
     return true;
   } catch (_) {
@@ -490,6 +493,7 @@ async function putInTrash(s, project) {
 // in saveProject. → { record (as stored), trashed: bool }
 export async function replaceProject(project) {
   checkSavable(project);
+  project = stampForWrite(project);
   return withStores(['projects', 'trash'], 'readwrite', 'save', async (s) => {
     const existing = await promisifyRequest(s.projects.get(project.id));
     let record = project;

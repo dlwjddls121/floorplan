@@ -24,6 +24,10 @@
 //   current tool stays). Also when the button is pressed while the pen hovers (pointerdown without
 //   contact: the rub starts when the tip touches) or right after the tip touched (the first moves of a
 //   press carry the button). The tip leaving the screen while the button is still held ends the gesture.
+//   The Galaxy Tab S9 FE's Chrome never reports the S Pen's side button (device test v3, 2026-10-29: no
+//   button 2 / buttons 32 in any pen event, no rub; once a context menu, and pen moves with buttons 1 and
+//   pressure 0, which a light tip also gives): nothing tells a rub with it from drawing there, so the app
+//   no longer mentions it on screen; this stays for pens and tablets that report it.
 // - Recovery from missed pointerup events: a new mouse/pen press, a mouse/pen move with no button down,
 //   a primary touch (no other touch is really down), window blur and the page going to the background
 //   all drop stale gesture state.
@@ -31,6 +35,11 @@
 // - DOM buttons and the numpad are outside the canvas and accept touch, except on the bottom panel while
 //   the pen is in use (installPalmGuard below: the pen hand rests on the numpad, bottom right).
 // - The canvas never shows a context menu (a long press, or the S Pen side button).
+// - The kind of the last input on the page (lastInputKind: 'mouse' | 'pen' | 'touch' | 'key', from every
+//   pointerdown and every real key, anywhere on the page): after a pen or a finger a text field never takes
+//   the focus by itself (fieldFocusOk). On the Galaxy Tab (simulation 2026-11-01) a pen tap on a room's name
+//   focused the name field by itself: Samsung's S Pen handwriting bar (☺ ⌫ ⌨ 완료) came up over the name
+//   buttons (a finger: the on-screen keyboard), and the next pen tap there was written into the field as 'ㅣ'.
 //
 // The controller does not know about tools. It reports single-pointer "gestures" to the handlers:
 //   onGestureStart(g) -> may return 'pan' to turn this gesture into a view pan instead
@@ -50,6 +59,70 @@ const WHEEL_ZOOM = 0.0015;
 export const PEN_DOWN_HOLD_MS = 5000;
 const PEN_ERASE_BUTTONS = 2 | 32;   // barrel (side) button, eraser end
 const PEN_DOC_EVENTS = ['pointerover', 'pointermove', 'pointerdown', 'pointerup', 'pointercancel', 'pointerout'];
+
+// A text field may take the focus by itself (the app focusing it) after this kind of input: a mouse or a
+// keyboard (a PC: typing there is real keys). After a pen or a finger it waits for a tap on the field itself,
+// which brings the on-screen keyboard or the S Pen handwriting bar by the surveyor's own choice.
+export function fieldFocusOk(kind) {
+  return kind !== 'pen' && kind !== 'touch';
+}
+
+// A text field taking the focus within this long after the S Pen was over it (hovering) is the surveyor writing in
+// it: Samsung's S Pen to text writes straight into a field the pen hovers over, and the browser may focus it
+// without a pointerdown reaching the page (panel.js room name, fixtures-ui.js 기타 name).
+export const PEN_OVER_FIELD_MS = 1500;
+
+// The last pointerdown anywhere on the page (InputController keeps it): { seq, target }; seq orders it among the pen's
+// visits over a text field (penOverMark), whatever the clock says.
+let order = 0;
+let lastDown = { seq: 0, target: null };
+
+// The S Pen over a text field now (its pointerover / pointermove there): → { at: performance.now(), seq }.
+export function penOverMark() {
+  return { at: performance.now(), seq: ++order };
+}
+
+// The field takes the focus now as the S Pen writing straight into it: the pen was over it (over: its last
+// penOverMark()) within PEN_OVER_FIELD_MS, and pressed nothing else on the page since (round 4 part B check: the
+// name buttons and the numpad lie right under the name field, so a pen passing over the field on its way there left
+// the field 'written into' for 1.5 s, and a focus the browser gave it then, with a stray 'ㅣ', was put in by
+// [✕ 닫기]).
+export function penWroteInto(field, over, now = performance.now()) {
+  if (!over || !(over.at > 0) || now - over.at >= PEN_OVER_FIELD_MS) return false;
+  const d = lastDown;
+  const onField = !!d.target && !!field && (d.target === field || (typeof field.contains === 'function' && field.contains(d.target)));
+  return !(d.seq > over.seq && !onField);
+}
+
+// ---- clicks on the bottom panel that a tap elsewhere left behind --------------------------------------------
+// A tap on the plan opens a bottom panel right away (the room panel for a tap in a room, at the press or the lift);
+// the browser then gives that tap's click to whatever lies under the finger by now: a name chip of the room panel
+// that has just opened there, which renamed the room ('보일러실': a finger tap low in E1's unnamed 화장실; 0.6.8 and
+// round 4 part B, CDP check). On the panel a pointer's click counts only when its press was on the panel too. A
+// script or keyboard click (detail 0: el.click(), Enter / Space, the palm guard's own) is left alone. → remove()
+export function installGhostClickGuard(host) {
+  if (!host) return () => {};
+  const doc = host.ownerDocument || document;
+  let downInside = false;
+  const onDown = (e) => { downInside = !!e.target && host.contains(e.target); };
+  const onClick = (e) => {
+    if (e.detail === 0 || downInside) return;
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  doc.addEventListener('pointerdown', onDown, true);
+  host.addEventListener('click', onClick, true);
+  return () => {
+    doc.removeEventListener('pointerdown', onDown, true);
+    host.removeEventListener('click', onClick, true);
+  };
+}
+
+// A key event of a real key (a PC keyboard, Tab included), not an on-screen keyboard's or an IME's
+// (Android keyboards report most keys as keyCode 229 'Unidentified', a Korean IME 'Process').
+function realKey(e) {
+  return !!e && e.keyCode !== 229 && e.key !== 'Unidentified' && e.key !== 'Process' && !e.isComposing;
+}
 
 // The S Pen side button or the eraser end is pressed (pointerdown / pointermove / pointerup of a pen).
 export function penEraseButtons(e) {
@@ -78,6 +151,8 @@ export class InputController {
     this.penDown = new Set();       // pen pointerIds between pointerdown and pointerup (page-wide)
     this._lastPenType = '';         // type of the last pen event (pointerout of the page excluded)
     this._armed = null;             // { id }: the S Pen side button pressed while hovering over the canvas
+    // 'mouse' | 'pen' | 'touch' | 'key': the last pointerdown or real key anywhere on the page (fieldFocusOk).
+    this.lastInputKind = 'mouse';
     this._penNearReported = false;
     this._penTimer = 0;
     this._holdTimer = 0;
@@ -103,6 +178,14 @@ export class InputController {
     canvas.addEventListener('mousedown', this._onMouseDown);
     // Pen proximity is tracked on the whole document: a pen hovering over the panel is still "near".
     for (const type of PEN_DOC_EVENTS) document.addEventListener(type, this._onDocPen, true);
+    // The kind of the last input (capture: seen before any handler, also on the canvas, which prevents defaults).
+    this._onDocInput = (e) => {
+      if (e.type === 'keydown') { if (realKey(e)) this.lastInputKind = 'key'; return; }
+      this.lastInputKind = e.pointerType === 'pen' || e.pointerType === 'touch' ? e.pointerType : 'mouse';
+      lastDown = { seq: ++order, target: e.target };
+    };
+    document.addEventListener('pointerdown', this._onDocInput, true);
+    document.addEventListener('keydown', this._onDocInput, true);
     // Pointer events can be lost when the window loses focus or the app goes to the background.
     this._onBlur = () => this.reset();
     this._onVisibility = () => { if (document.visibilityState === 'hidden') this.reset(); };
@@ -121,6 +204,8 @@ export class InputController {
     c.removeEventListener('contextmenu', this._onContextMenu);
     c.removeEventListener('mousedown', this._onMouseDown);
     for (const type of PEN_DOC_EVENTS) document.removeEventListener(type, this._onDocPen, true);
+    document.removeEventListener('pointerdown', this._onDocInput, true);
+    document.removeEventListener('keydown', this._onDocInput, true);
     window.removeEventListener('blur', this._onBlur);
     document.removeEventListener('visibilitychange', this._onVisibility);
     clearTimeout(this._penTimer);
@@ -136,6 +221,13 @@ export class InputController {
   // When "pen near" runs out if no pen event comes (performance.now() time; -Infinity: not near).
   get penNearUntil() {
     return this.lastPenTime + (this.penDown.size ? PEN_DOWN_HOLD_MS : TIMING.penNear);
+  }
+
+  // "Pen near" with a longer window: a pen event within the last `ms` (at least TIMING.penNear), or a pen
+  // counted as down. Ended at once like penNear (a pen pointerout leaving the page, not right after a lift).
+  penWithin(ms) {
+    const until = this.lastPenTime + (this.penDown.size ? PEN_DOWN_HOLD_MS : Math.max(ms, TIMING.penNear));
+    return performance.now() < until;
   }
 
   _onDocPen(e) {
@@ -545,7 +637,7 @@ export class InputController {
 // 2026-10-25: a palm typed '5' while the pen hovered, and pressed [확인 ▶] while the pen tip was on the plan,
 // storing a 5 mm wall). The numpad keys act on pointerdown, so on the panel:
 //   - while a pen pointer is down, a touch does nothing (not even its click);
-//   - while the pen is only near (hovering, or within TIMING.penNear of a pen event), a touch is held back
+//   - while the pen is only near (hovering, or within PANEL_PEN_NEAR_MS of a pen event), a touch is held back
 //     and counts as a tap when it lifts, unless it was a palm: a contact larger than PALM_CONTACT_PX (its
 //     reported width / height), one that moved past the touch slop, or one during which the pen tip came
 //     down. A finger-sized contact (its size reported, as Android does) acts however slowly it is pressed
@@ -553,30 +645,69 @@ export class InputController {
 //     PANEL_PRESS_MS (a hand resting there); a contact of unknown size only within PANEL_TAP_MS. A numpad key
 //     then acts when the finger lifts (shown pressed meanwhile: .key-held), another button gets its click
 //     as usual. A resting palm never acts;
-//   - pen away: touches act at once, as before. Text fields are left alone (a finger may focus them).
+//   - held-back taps act in the order they would with the pen away, where a numpad key acts on its press and
+//     another button on its click: a tap that lifts while an earlier key press is still held waits for it
+//     (round 4: two rolling finger taps on '5' and '6' typed '65' when '6' lifted first, and [확인 ▶] lifted
+//     before '4' stored the value without the 4). An earlier press holds the others up only while it may still
+//     be a quick tap (tapMs: a press resting longer does not), and not once it is taken for a palm. A button's
+//     waiting click is given again afterwards (a script click, like a keyboard's);
+//   - pen away: touches act at once, as before (but after an earlier press still held back). Text fields are
+//     left alone (a finger may focus them).
 // The pen itself, the mouse and the keyboard are never held back.
+// "Pen near" here lasts PANEL_PEN_NEAR_MS after the last pen event, longer than on the plan (TIMING.penNear):
+// on the Galaxy Tab S9 FE a pen held still above the screen sends nothing for up to 2.4 s (device test v3,
+// 2026-10-29; palm contacts there were at most 17 px, so their size never tells), and a palm landing on the
+// numpad then typed at once. A finger loses nothing by it (its tap still acts, on the lift), unlike on the
+// plan, where a touch taken for a palm is dropped. A pen leaving the page still ends it at once (penWithin).
 export const PANEL_TAP_MS = 700;
 export const PANEL_PRESS_MS = 3000;
 export const PALM_CONTACT_PX = 40;
+export const PANEL_PEN_NEAR_MS = 3000;
 
-export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = PANEL_PRESS_MS, palmPx = PALM_CONTACT_PX } = {}) {
+export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = PANEL_PRESS_MS, palmPx = PALM_CONTACT_PX, nearMs = PANEL_PEN_NEAR_MS } = {}) {
   if (!host || !input) return () => {};
-  const held = new Map();    // pointerId → { t0, x, y, target, key, palm, sized }
+  const held = new Map();    // pointerId → { t0, seq, pd, x, y, target, key, palm, sized }
   let swallow = [];          // { x, y, until }: the click a held-back touch would still produce
+  let seq = 0;               // touches held back so far: their press order
+  let queue = [];            // taps that lifted while an earlier key press was still held: { rank, run }, by rank
+  let timer = 0;
   const isField = (t) => !!(t && t.closest && t.closest('input, textarea, select'));
   const block = (x, y) => { swallow.push({ x, y, until: performance.now() + 1000 }); };
   // The contact's size in css px (Chrome reports 1 × 1 when the device does not tell).
   const contact = (e) => Math.max(Number(e.width) || 0, Number(e.height) || 0);
   const show = (h, on) => { if (h.key) h.key.classList.toggle('key-held', on && !h.palm); };
+  const penNear = () => (typeof input.penWithin === 'function' ? input.penWithin(nearMs) : input.penNear);
+  // Held key presses that act before a tap of this rank (a key's rank: its press; another button's: its lift,
+  // after every press so far): pressed before it, still able to be a tap (not taken for a palm, the pen tip not
+  // down since), and down for less than tapMs (a press resting longer is a palm or a slow press: it no longer
+  // holds the others up).
+  const earlier = (rank, now) => [...held.values()].filter((o) => o.key && !o.palm && o.seq < rank && now - o.t0 < tapMs
+    && (input.penDowns || 0) === o.pd);
+  // Act the waiting taps whose earlier presses are done, in order; check again when the next one runs out.
+  const flush = () => {
+    clearTimeout(timer);
+    timer = 0;
+    const now = performance.now();
+    while (queue.length && !earlier(queue[0].rank, now).length) queue.shift().run();
+    if (!queue.length) return;
+    const until = Math.min(...earlier(queue[0].rank, now).map((o) => o.t0 + tapMs));
+    timer = setTimeout(flush, Math.max(10, until - now + 5));
+  };
+  const act = (rank, run) => {
+    queue.push({ rank, run });
+    queue.sort((a, b) => a.rank - b.rank);
+    flush();
+  };
   const onDown = (e) => {
     if (e.pointerType !== 'touch' || isField(e.target)) return;
-    if (!input.penNear) return;
+    // Pen away: at once, unless an earlier press held back may still act (this one then comes after it).
+    if (!penNear() && !queue.length && !earlier(Infinity, performance.now()).length) return;
     e.stopPropagation();
     e.preventDefault();
     const size = contact(e);
     const key = e.target && e.target.closest ? e.target.closest('.key') : null;
-    const h = { t0: performance.now(), pd: input.penDowns || 0, x: e.clientX, y: e.clientY, target: e.target, key: key && host.contains(key) ? key : null,
-      palm: input.penIsDown || size > palmPx, sized: size > 1.5 };
+    const h = { t0: performance.now(), seq: ++seq, pd: input.penDowns || 0, x: e.clientX, y: e.clientY, target: e.target,
+      key: key && host.contains(key) ? key : null, palm: input.penIsDown || size > palmPx, sized: size > 1.5 };
     held.set(e.pointerId, h);
     show(h, true);
   };
@@ -584,9 +715,10 @@ export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = 
     const h = held.get(e.pointerId);
     if (!h) return;
     e.stopPropagation();
-    if (Math.hypot(e.clientX - h.x, e.clientY - h.y) >= TAP_SLOP_PX.touch || contact(e) > palmPx || input.penIsDown) {
+    if (!h.palm && (Math.hypot(e.clientX - h.x, e.clientY - h.y) >= TAP_SLOP_PX.touch || contact(e) > palmPx || input.penIsDown)) {
       h.palm = true;
       show(h, false);
+      flush();   // a palm holds no tap up
     }
   };
   const onUp = (e) => {
@@ -595,14 +727,31 @@ export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = 
     held.delete(e.pointerId);
     show(h, false);
     e.stopPropagation();
-    const dt = performance.now() - h.t0;
+    const now = performance.now();
+    const dt = now - h.t0;
     const penCame = (input.penDowns || 0) !== h.pd;   // the pen tip came down while this touch was held
     const tap = !h.palm && !penCame && !input.penIsDown && dt <= (h.sized ? pressMs : tapMs);
     const key = h.key;
-    if (!tap || key) block(h.x, h.y);
-    // A finger tap while the pen hovers: the numpad key acts now (a script click: detail 0, which the
-    // Numpad takes like a keyboard activation); the touch's own click is swallowed.
-    if (tap && key && !key.disabled) key.click();
+    if (tap && key) {
+      // A finger tap while the pen hovers: the numpad key acts now, or after the keys pressed before it (a
+      // script click: detail 0, which the Numpad takes like a keyboard activation); the touch's own click is
+      // swallowed.
+      block(h.x, h.y);
+      act(h.seq, () => { if (!key.disabled && key.isConnected) key.click(); });
+    } else if (tap && (queue.length || earlier(seq + 0.5, now).length)) {
+      // Another button (a value field, [✕ 닫기] …) while an earlier key press waits: its click comes after it, on
+      // what is under the finger then (each key draws the panel anew), as its own click would with the pen away.
+      block(h.x, h.y);
+      const x = e.clientX, y = e.clientY;
+      act(seq + 0.5, () => {
+        const el = (host.ownerDocument || document).elementFromPoint(x, y);
+        if (el && host.contains(el) && typeof el.click === 'function') el.click();
+      });
+    } else {
+      // Another button's tap gets its own click as usual; a palm's is swallowed.
+      if (!tap) block(h.x, h.y);
+      flush();
+    }
   };
   const onCancel = (e) => {
     const h = held.get(e.pointerId);
@@ -610,6 +759,7 @@ export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = 
     held.delete(e.pointerId);
     show(h, false);
     block(h.x, h.y);
+    flush();
   };
   const onClick = (e) => {
     if (e.detail === 0) return;   // a script or keyboard click (el.click(), Enter / Space)
@@ -627,6 +777,8 @@ export function installPalmGuard(host, input, { tapMs = PANEL_TAP_MS, pressMs = 
   host.addEventListener('pointercancel', onCancel, true);
   host.addEventListener('click', onClick, true);
   return () => {
+    clearTimeout(timer);
+    queue = [];
     host.removeEventListener('pointerdown', onDown, true);
     host.removeEventListener('pointermove', onMove, true);
     host.removeEventListener('pointerup', onUp, true);

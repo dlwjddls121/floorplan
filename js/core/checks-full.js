@@ -16,7 +16,8 @@
 //             openingLabel(opening) → string (the window/door label used in messages and ※ notes) }
 //
 //   notesForPrint(items, options) → [string]   ※ lines for the bottom of the printed drawing.
-//   installChecks(DocStore)                    adds resolveCheck(key), unresolveCheck(key), checkItems().
+//   installChecks(DocStore)                    adds resolveCheck(key), unresolveCheck(key), checkItems(),
+//                                              roomLabel(roomId) (roomLabels: '이름 없는 실 N' by place).
 //   drawCheckMarkers(ctx, project, derived, opts)  screen markers for problems the plan does not show.
 //
 // What is checked:
@@ -77,12 +78,13 @@
 //   aligned dimension per diagonal wall, dims.js rule 7 merging like rule 1). Closure and 전체 치수 use
 //   axis sides only; the 다시 확인 median includes diagonal values.
 
-import { DEFAULT_SETTINGS } from './model.js';
+import { DEFAULT_SETTINGS, DIAGONAL_TOLERANCE_MM } from './model.js';
 import { fixtureRoomSide, normalizeFixture, isColumn, isStair, fixtureBounds, depthInRoom, freeColumnSticksOut, fixtureExtents, freeFixturesOutside, fixtureCrossesWalls, keepsInRoom } from './fixtures.js';
 import { sidesForEdge, measureSideKey } from './rooms.js';
 import { thicknessPriors, sketchInnerLength, straightDiagonalJoints } from './solver.js';
 import { pointInPolygon, segmentIntersection } from './geom.js';
-import { twoSideKey, resolvedKeys, isKeyResolved, legacyKeyPattern } from './checkkeys.js';
+import { twoSideKey, resolvedKeys, isKeyResolved, legacyKeyPattern, residualCheckNow } from './checkkeys.js';
+import { partDimensions } from './printlayout.js';
 
 export const LEVEL_CHECK = 'check';
 export const LEVEL_INFO = 'info';
@@ -90,6 +92,7 @@ export const LEVEL_INFO = 'info';
 // Short Korean names of the categories (panel chips).
 export const CATEGORY_LABELS = Object.freeze({
   closure: '치수 폐합',
+  loop: '안 맞는 값',
   overall: '전체 치수',
   twoSide: '양쪽 값 차이',
   twoSidePair: '양쪽 값',
@@ -112,6 +115,7 @@ export const CATEGORY_LABELS = Object.freeze({
   fixtureWall: '벽에 걸친 설비',
   columnOpening: '기둥과 창·문 겹침',
   stairFit: '계단이 실보다 김',
+  detached: '떨어진 건물',
   userMeasure: '확인필요',
   userWall: '확인필요',
   userOpening: '확인필요',
@@ -121,13 +125,15 @@ export const CATEGORY_LABELS = Object.freeze({
 
 export const UNMEASURED_NOTE = '※ 치수 미입력 벽은 축척이 맞지 않습니다.';
 export const BOTH_VALUES_NOTE = '※ 괄호 안은 반대쪽 실에서 잰 값입니다.';
+// (Round 2, 2026-10-31: '부분(건물·층)', since one household may also hold its 1층 and 2층 drawn side by side.)
+export const DETACHED_NOTE = '※ 떨어져 그린 부분(건물·층) 사이의 거리는 재지 않았습니다(축척과 다를 수 있음).';
 
 // Order of the categories inside a level (most important first).
 const CATEGORY_ORDER = [
-  'closure', 'overall', 'twoSide', 'outlier', 'fold', 'residual', 'absorbed', 'conflict',
+  'closure', 'overall', 'twoSide', 'outlier', 'loop', 'fold', 'residual', 'absorbed', 'conflict',
   'userMeasure', 'userWall', 'userOpening', 'userFixture', 'userRoom',
   'openingWide', 'openingOverlap', 'columnOpening', 'fixtureLong', 'fixtureDeep', 'fixtureOutside', 'fixtureWall', 'stairFit', 'overlap', 'cross', 'dangling',
-  'twoSidePair', 'openingFit', 'gapPlaced', 'unmeasured',
+  'twoSidePair', 'openingFit', 'gapPlaced', 'unmeasured', 'detached',
 ];
 
 const RESIDUAL_MIN_MM = 5;     // same as model.RESIDUAL_TOLERANCE_MM
@@ -169,14 +175,27 @@ class UnionFind {
   union(a, b) { const ra = this.find(a), rb = this.find(b); if (ra !== rb) this.parent.set(ra, rb); }
 }
 
-// Room labels as the editor shows them: the name, or "이름 없는 실 N" numbered in derived order.
+// Room labels as the editor shows them everywhere (plan, panels, checks, [열림 방향], ※ lines): the name, or
+// "이름 없는 실 N" with N the room's place among ALL rooms of the household (derived.roomOrder: the order of
+// project.rooms, which every edit, a turn and the file keep; a new room comes last). Numbered among the unnamed
+// rooms only, naming one room renumbered the others ('이름 없는 실 2' became '이름 없는 실 1' on the tablet,
+// round 4 part B, 2026-11-02); numbered by the faces' order (derived.rooms), a turn renumbered them (the faces
+// are found again on the turned plan, in another order: rt-diagonal's only unnamed room 1 → 2 on the second
+// turn, E1's 3 → 4 on the first; round 4 part B check). The place stays while the rooms do not change, and two
+// rooms never share it. → Map roomId → label (shared per derived: read it, do not change it)
+const ROOM_LABELS = new WeakMap();
 export function roomLabels(derived) {
+  const memo = derived && typeof derived === 'object' ? ROOM_LABELS.get(derived) : null;
+  if (memo) return memo;
   const labels = new Map();
-  let unnamed = 0;
-  for (const r of (derived && derived.rooms) || []) {
+  const order = derived && Array.isArray(derived.roomOrder) ? derived.roomOrder : [];
+  const place = new Map(order.map((id, i) => [id, i + 1]));
+  ((derived && derived.rooms) || []).forEach((r, k) => {
     const name = r.room && r.room.name;
-    labels.set(r.roomId, name || `이름 없는 실 ${++unnamed}`);
-  }
+    // (A derived made without roomOrder, by hand in a test: the faces' order, after every listed room.)
+    labels.set(r.roomId, name || `이름 없는 실 ${place.get(r.roomId) || order.length + k + 1}`);
+  });
+  if (derived && typeof derived === 'object') ROOM_LABELS.set(derived, labels);
   return labels;
 }
 
@@ -417,9 +436,12 @@ export function runChecks(project, derived, opts = {}) {
   const twoSideIds = twoSideChecks(ctx, push);
   // The items that point at a wrong value come first; what they explain is then only 참고.
   const outlierIds = valueWarningChecks(ctx, push);
-  const explain = explainers(ctx, items, { closure, twoSideIds, overallIds, outlierIds });
+  let loopIds = new Set();
+  try { loopIds = loopChecks(ctx, push, { closure, twoSideIds, overallIds, outlierIds }); } catch (err) { console.error('[checks] loop failed', err); }
+  const explain = explainers(ctx, items, { closure, twoSideIds, overallIds, outlierIds, loopIds });
   engineWarningChecks(ctx, push, explain, opts);
   userFlagChecks(ctx, push, opts);
+  try { detachedChecks(ctx, push); } catch (err) { console.error('[checks] detached failed', err); }
   drawingChecks(ctx, push, explain);
   openingChecks(ctx, push, opts, explain);
   fixtureChecks(ctx, push, explain);
@@ -520,6 +542,7 @@ export function notesForPrint(items, options = {}) {
     && (items || []).some((it) => it && (it.category === 'twoSide' || it.category === 'twoSidePair'))) {
     add(BOTH_VALUES_NOTE);
   }
+  if ((items || []).some((it) => it && it.category === 'detached' && !it.resolved)) add(DETACHED_NOTE);
   return lines;
 }
 
@@ -1064,9 +1087,18 @@ function twoSideChecks(ctx, push) {
   // model.js twoSidePairs entries of h / v walls whose two faces differ because one ends at a diagonal
   // wall (`faces`, fixer 2026-10-20). → Map 'idA|idB' → pair
   const facePairs = new Map();
+  // Pairs the loop on their axis decides (model.js computeWarnings twoSidePairs `byLoop`; round 5, 2026-11-08: 방2 위쪽
+  // 벽 4315 typed 5315 called the correct 거실 4325 first): the item calls that value alone, with both values as
+  // before (plan §5-4), until the loop's own item about it is confirmed.
+  const loopPairs = new Map();
+  const resolved = resolvedKeys(ctx.project);
   for (const p of (ctx.derived && ctx.derived.twoSidePairs) || []) {
     if (p && p.faces && Array.isArray(p.measureIds)) facePairs.set(p.measureIds.slice().sort().join('|'), p);
+    if (p && p.byLoop && Array.isArray(p.measureIds) && !(p.byLoop.loopKey && isKeyResolved(resolved, p.byLoop.loopKey))) {
+      loopPairs.set(p.measureIds.slice().sort().join('|'), p.byLoop.measureId);
+    }
   }
+  let dims = null;
   for (const list of byKey.values()) {
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
@@ -1086,29 +1118,46 @@ function twoSideChecks(ctx, push) {
         // Within the tolerance: a 참고 item when the two values differ, because the print (dims.js rule 1 /
         // rule 7) shows ONE dimension per wall with the larger value, for a diagonal wall too.
         if (!check && (rawDiff < 1 || faces)) continue;
+        // What the print really writes for this wall (final review 2026-10-28, A1: '도면에는 큰 값 1800만
+        // 적습니다' while dims.js rule 3 hid the 1800 under the 현관's 1675 beside it): the larger value,
+        // or, when that dimension is hidden behind another one on the same stretch, that one's value.
+        let printed = `도면에는 큰 값 ${plain(Math.max(a.m.value, b.m.value))}만 적습니다.`;
+        if (!check) {
+          dims = dims || (() => { try { return { hidden: partDimensions(ctx.project, ctx.derived, {}).flatMap((r) => r.hidden) }; } catch (_) { return { hidden: [] }; } })();
+          const h = (dims.hidden || []).find((x) => (x.measureIds || []).includes(a.m.id) || (x.measureIds || []).includes(b.m.id));
+          const by = h && (h.by || []).map((id) => ctx.measureInfo.get(id)).find((x) => x && x.valid);
+          if (by) printed = `도면에는 이 벽 값 대신 같은 구간인 ${by.spanLoc || ctx.sideLocation(by.m.room, by.side.key)}의 값(${plain(by.m.value)})만 적습니다.`;
+        }
         // Located at the plain side when there is one (a span's first part may be anywhere).
         const at = a.span && !b.span ? b : a;
         const loc = at.spanLoc || ctx.sideLocation(at.m.room, at.side.key);
         const vals = `${nameOf(a)} 쪽 ${plain(a.m.value)} / ${nameOf(b)} 쪽 ${plain(b.m.value)}`;
         const where = sideWhere(ctx, at.m.room, at.side);
         where.sides = sidesOf(a).concat(sidesOf(b));
-        where.measureIds = [a.m.id, b.m.id];
-        if (check) for (const x of [a, b]) twoSideIds.add(x.m.id);
+        // The value the loop calls (loopPairs): named alone, first.
+        const callId = check ? loopPairs.get([a.m.id, b.m.id].sort().join('|')) : null;
+        const callX = callId === a.m.id ? a : callId === b.m.id ? b : null;
+        where.measureIds = callX ? [callX.m.id] : [a.m.id, b.m.id];
+        if (callX) where.measureId = callX.m.id;
+        if (check) for (const x of callX ? [callX] : [a, b]) twoSideIds.add(x.m.id);
+        const callAt = callX ? `${nameOf(callX)} 쪽 ${plain(callX.m.value)}` : '';
+        const loopW = callX ? ((ctx.derived && ctx.derived.warnings) || []).find((w) => w && w.type === 'loop' && (w.measureIds || []).length === 1 && w.measureIds[0] === callX.m.id) : null;
+        const again = callX ? ` 다른 길이들과 맞지 않는 쪽은 ${callAt}입니다. 그 값을 다시 재 보세요.${altText(ctx, loopW)}` : ' 다시 재 보세요.';
         push({
           key: twoSideKey([a.m, b.m]),
           level: check ? LEVEL_CHECK : LEVEL_INFO,
           category: check ? 'twoSide' : 'twoSidePair',
           message: diagonal
             ? (check
-              ? `${loc}: ${vals} — 같은 사선 벽의 양쪽 면인데, 그림의 두 면 길이와 ${plain(diff)}mm 맞지 않습니다. 다시 재 보세요.`
-              : `${loc}: ${vals} (같은 사선 벽의 양쪽 면). 도면에는 큰 값 ${plain(Math.max(a.m.value, b.m.value))}만 적습니다.`)
+              ? `${loc}: ${vals} — 같은 사선 벽의 양쪽 면인데, 그림의 두 면 길이와 ${plain(diff)}mm 맞지 않습니다.${again}`
+              : `${loc}: ${vals} (같은 사선 벽의 양쪽 면). ${printed}`)
             : faces
-              ? `${loc}: ${vals} — 같은 벽의 양쪽 면인데(한쪽 면은 사선 벽에서 끝납니다), 그림의 두 면 길이와 ${plain(diff)}mm 맞지 않습니다. 다시 재 보세요.`
+              ? `${loc}: ${vals} — 같은 벽의 양쪽 면인데(한쪽 면은 사선 벽에서 끝납니다), 그림의 두 면 길이와 ${plain(diff)}mm 맞지 않습니다.${again}`
             : check
-              ? `${loc}: ${vals} — ${plain(diff)}mm 차이가 납니다. 다시 재 보세요.`
-              : `${loc}: ${vals} (차이 ${plain(diff)}mm). 도면에는 큰 값 ${plain(Math.max(a.m.value, b.m.value))}만 적습니다.`,
+              ? `${loc}: ${vals} — ${plain(diff)}mm 차이가 납니다.${again}`
+              : `${loc}: ${vals} (차이 ${plain(diff)}mm). ${printed}`,
           where,
-          note: check ? `※ ${loc}: ${vals} — 확인필요` : null,
+          note: check ? `※ ${loc}: ${vals} — ${callX ? `${callAt} ` : ''}확인필요` : null,
         });
       }
     }
@@ -1142,6 +1191,7 @@ const OWN_REASON = {
   closure: ' 위의 치수 폐합 문제 때문입니다.',
   overall: ' 위의 전체 치수와 구간 합계 차이 때문입니다.',
   outlier: ' 위의 다시 확인 값 때문입니다.',
+  loop: ' 위의 안 맞는 값 때문일 수 있습니다.',
 };
 const AXIS_REASON = {
   outlier: ' 위의 다시 확인 값 때문일 수 있습니다.',
@@ -1149,15 +1199,16 @@ const AXIS_REASON = {
   twoSide: ' 위의 양쪽 값 차이 때문일 수 있습니다.',
   overall: ' 위의 전체 치수와 구간 합계 차이 때문일 수 있습니다.',
   closure: ' 위의 치수 폐합 문제 때문일 수 있습니다.',
+  loop: ' 위의 안 맞는 값 때문일 수 있습니다.',
 };
-const AXIS_PRIORITY = ['outlier', 'fold', 'twoSide', 'overall', 'closure'];
+const AXIS_PRIORITY = ['outlier', 'fold', 'twoSide', 'overall', 'closure', 'loop'];
 // An absorbed / conflict item before other values tie both ends of its run (review 0.5.1): with only a
 // few values the assumed walls give to the sketch's proportions, not to a contradiction between values.
 const EARLY_REASON = ' 아직 이 벽의 양 끝을 잇는 다른 값이 없어, 그림 비율 때문일 수 있습니다. 값을 더 넣으면 다시 확인합니다.';
 
 // → { own(measureId, order) → reason | null, axis(axes) → reason | null,
 //     outlierOpen: an open (not 확인 완료) 다시 확인 item — outlier or outlierPair — exists }
-function explainers(ctx, items, { closure, twoSideIds, overallIds, outlierIds }) {
+function explainers(ctx, items, { closure, twoSideIds, overallIds, outlierIds, loopIds = new Set() }) {
   const resolved = resolvedKeys(ctx.project);
   const byAxis = { x: new Set(), y: new Set() };
   let outlierOpen = false;
@@ -1181,7 +1232,7 @@ function explainers(ctx, items, { closure, twoSideIds, overallIds, outlierIds })
     }
     for (const a of axes) if (byAxis[a]) byAxis[a].add(as);
   }
-  const sets = { twoSide: twoSideIds, closure: closure && closure.explained, overall: overallIds, outlier: outlierIds };
+  const sets = { twoSide: twoSideIds, closure: closure && closure.explained, overall: overallIds, outlier: outlierIds, loop: loopIds };
   return {
     own: (id, order) => order.find((r) => sets[r] && sets[r].has(id)) || null,
     axis: (axes) => AXIS_PRIORITY.find((r) => axes.some((a) => byAxis[a] && byAxis[a].has(r))) || null,
@@ -1236,6 +1287,82 @@ function valueWarningChecks(ctx, push) {
     }
   }
   return outlierIds;
+}
+
+// Values on one axis that do not close (model.js computeWarnings 'loop', solver.valueLoops; final review
+// 2026-10-28: a -500 / +1000 typo spread over several values passed silently, and a +500 typo named only
+// CORRECT values '벽 두께를 469mm 바꿨습니다' while the wrong one was hidden on the print). One 확인필요 that
+// names the value the others disagree with, or, when the values are interchangeable (one loop: any of
+// them could be the wrong one), all of them; when no one value explains it (two mistakes, or walls
+// thicker than assumed), every value off (round 2, 2026-10-31). Where its values' paths cross several
+// assumed walls more on one side, it says the walls may be thicker. Not when other open items already name
+// all its values (다시 확인, 양쪽 값 차이, 전체 치수, 치수 폐합). -> Set of the measure ids it names while it
+// is open (not 확인 완료): they are then explained (their own 벽 두께로 맞춤 / 안 맞는 값 items are 참고).
+// Not the loop's other values, nor once it is confirmed (round 2, 2026-10-31, C3 with two values wrong the
+// same way: the loop named the correct row, and the wrong 욕실 2950's own '벽 두께로 423mm 맞춤' stayed 참고
+// for good, even after the named values were confirmed; now it is 확인필요 again then).
+const LOOP_NOTE_NAMES = 3;
+const LOOP_PANEL_NAMES = 5;
+const LOOP_WALL_HINT = 2; // assumed walls more on one path from which the walls are mentioned
+function loopChecks(ctx, push, { closure, twoSideIds, overallIds, outlierIds }) {
+  const ids = new Set();
+  const resolved = resolvedKeys(ctx.project);
+  const named = new Set([...(twoSideIds || []), ...(overallIds || []), ...(outlierIds || []), ...((closure && closure.explained) || [])]);
+  // Two facing sides of one room that contradict each other are named by their own 안 맞는 값 items, unless
+  // the loop names one of them alone (model.js computeWarnings `opposite.byLoop`; round 4 part B, 2026-11-02:
+  // 거실 위쪽 벽 5325 and the correct 4325 facing it were both 확인필요 alike, and the loop that named 5325 alone
+  // was hidden). Then this item names it, and their own items and the walls' are 참고 (explainers).
+  for (const w of (ctx.derived && ctx.derived.warnings) || []) {
+    if (w && w.type === 'residual' && w.check && w.opposite && !w.opposite.byLoop) { named.add(w.measureId); named.add(w.opposite.measureId); }
+  }
+  for (const w of (ctx.derived && ctx.derived.warnings) || []) {
+    if (!w || w.type !== 'loop') continue;
+    const xs = [...new Set(w.measureIds || [])].map((id) => ctx.measureInfo.get(id)).filter((x) => x && x.valid);
+    if (!xs.length || xs.every((x) => named.has(x.m.id))) continue;
+    const at = (x) => `${x.spanLoc || ctx.sideLocation(x.m.room, x.side.key)} ${plain(x.m.value)}`;
+    const amount = plain(w.amount);
+    const base = sideWhere(ctx, xs[0].m.room, xs[0].side);
+    const one = xs.length === 1;
+    const split = w.closes === false;
+    const list = xs.map(at);
+    const short = list.length > LOOP_NOTE_NAMES ? `${list.slice(0, LOOP_NOTE_NAMES).join(' / ')} 외 ${list.length - LOOP_NOTE_NAMES}개` : list.join(' / ');
+    const panel = list.length > LOOP_PANEL_NAMES ? `${list.slice(0, LOOP_PANEL_NAMES).join(', ')} 외 ${list.length - LOOP_PANEL_NAMES}개` : list.join(', ');
+    const walls = w.walls >= LOOP_WALL_HINT ? ' 값이 맞다면 벽이 그림보다 두꺼울 수 있습니다.' : '';
+    const key = `loop:${xs.map((x) => `${x.m.id}=${plain(x.m.value)}`).sort().join(',')}`;
+    // Over the tolerance only by what the tape may add, and no wall had to take more for its values (model.js
+    // computeWarnings `soft`; round 4): 참고, it explains nothing and is not printed.
+    const soft = !!w.soft;
+    if (!soft && !isKeyResolved(resolved, key)) for (const x of xs) ids.add(x.m.id);
+    const tape = soft ? ' 값이 맞다면 줄자로 잰 작은 차이가 쌓인 것일 수 있습니다.' : '';
+    // The other possibility where only two values outvote it (model.js `alt`; round 5): both wrong the same way.
+    const other = one ? altText(ctx, w) : '';
+    push({
+      key,
+      level: soft ? LEVEL_INFO : LEVEL_CHECK, category: 'loop',
+      message: one
+        ? `${list[0]}: 같은 벽 사이를 잰 다른 길이들과 ${amount}mm 안 맞습니다. 길이를 다시 확인해 주세요.${other}${walls}${tape}`
+        : split
+          ? `${panel}: 이 값들이 서로 약 ${amount}mm 안 맞습니다. 틀린 값이 둘 이상이거나 벽이 그림보다 두꺼울 수 있습니다. 하나씩 다시 확인해 주세요.${tape}`
+          : `${panel}: 이 값들 중 하나가 다른 길이들과 약 ${amount}mm 안 맞습니다. 하나씩 다시 확인해 주세요.${walls}${tape}`,
+      where: {
+        ...base, measureId: xs[0].m.id, measureIds: xs.map((x) => x.m.id),
+        points: base.points.concat(...xs.slice(1).map((x) => sideWorldPoints(ctx, x.side))),
+      },
+      note: soft ? null : one ? `※ ${list[0]}: 다른 길이와 ${amount}mm 안 맞음 — 확인필요`
+        : split ? `※ ${short}: 서로 약 ${amount}mm 안 맞음 — 확인필요`
+          : `※ ${short} 중 하나: 약 ${amount}mm 안 맞음 — 확인필요`,
+    });
+  }
+  return ids;
+}
+
+// A loop that names one value alone against exactly two values that agree (model.js computeWarnings `alt`; round 5,
+// 2026-11-08): the same mistake made on both of those cannot be told apart by the values (one wall's two faces typed with
+// the same wrong value had the correct third value named). → ' 이 값이 맞다면 다른 두 값(… / …)이 함께 틀렸을 수 있습니다.' | ''
+function altText(ctx, w) {
+  const xs = ((w && w.alt) || []).map((id) => ctx.measureInfo.get(id)).filter((x) => x && x.valid);
+  if (xs.length !== 2) return '';
+  return ` 이 값이 맞다면 다른 두 값(${xs.map((x) => `${x.spanLoc || ctx.sideLocation(x.m.room, x.side.key)} ${plain(x.m.value)}`).join(' / ')})이 함께 틀렸을 수 있습니다.`;
 }
 
 // Exactly two values that disagree more than a missing zero allows, and the drawing cannot tell which
@@ -1311,6 +1438,7 @@ function foldItem(ctx, push, w, outlierIds, outlierAxes) {
 function engineWarningChecks(ctx, push, explain, opts = {}) {
   const warnings = (ctx.derived && ctx.derived.warnings) || [];
   let fixed = null; // lazily built: which unmeasured sides other measures already fix
+  const lines = new Set(); // straight diagonal lines of T parts already reported (residual w.line)
   for (const w of warnings) {
     if (!w || typeof w !== 'object') continue;
     try {
@@ -1345,31 +1473,44 @@ function engineWarningChecks(ctx, push, explain, opts = {}) {
       const loc = x.spanLoc || ctx.sideLocation(x.m.room, x.side.key);
       const v = plain(x.m.value);
       const where = { ...sideWhere(ctx, x.m.room, x.side), measureId: x.m.id };
+      if (w.type === 'residual' && w.line) {
+        lineResidualItem(ctx, push, w, explain, lines);
+        continue;
+      }
       if (w.type === 'residual') {
         if (!(w.amount > RESIDUAL_MIN_MM)) continue;
-        const own = explain.own(x.m.id, ['twoSide', 'closure', 'overall', 'outlier']);
+        const own = explain.own(x.m.id, ['twoSide', 'closure', 'overall', 'outlier', 'loop']);
         const along = own ? null : explain.axis(measureAxes(x));
-        const check = !!w.check && !own && !along;
+        // residualCheckNow: a loop-decided pair turns round once the loop's value is confirmed (checkkeys.js).
+        const now = residualCheckNow(w, resolvedKeys(ctx.project));
+        const check = now && !own && !along;
         const diag = x.side.orient === 'd';
-        const why = own ? OWN_REASON[own] : along ? AXIS_REASON[along] : '';
+        // Missing only because of a value a loop calls (model.js `loopCall`, round 5): said so where nothing else is.
+        const byCall = !now && w.loopCall && w.loopCall.after ? AXIS_REASON.loop : '';
+        const why = own ? OWN_REASON[own] : along ? AXIS_REASON[along] : byCall;
         // The facing side of the same room it contradicts (model.js computeWarnings `opposite`).
         const opp = w.opposite && ctx.measureInfo.get(w.opposite.measureId);
         const facing = opp && opp.valid && opp.m.room === x.m.room
           ? ` 마주 보는 ${sideDirectionWord(opp.side)} 벽: ${plain(opp.m.value)} (${plain(Math.abs(opp.m.value - x.m.value))}mm 차이).` : '';
+        // A diagonal that is only a check and misses: the axis values it also compares (round 3, 2026-11-01).
+        const wx = diag && now ? withInfos(ctx, w) : [];
+        const key = `residual:${x.m.id}=${v}`;
         push({
-          key: `residual:${x.m.id}=${v}`,
+          key,
           level: check ? LEVEL_CHECK : LEVEL_INFO,
           category: 'residual',
           message: diag
-            ? `${loc}: 잰 사선 길이 ${v}, 다른 길이로 계산하면 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 사선 길이나 주변 벽 길이를 확인해 주세요.${why}`
+            ? `${loc}: 잰 사선 길이 ${v}, 다른 길이로 계산하면 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 사선 길이나 주변 벽 길이를 확인해 주세요.${withText(ctx, wx)}${why}`
             : `${loc}: 잰 값 ${v}, 그림 ${plain(w.drawn)} (${plain(w.amount)}mm 차이). 다른 길이 값과 맞지 않습니다.${facing}${why}`,
-          where,
+          where: wx.length ? { ...where, points: where.points.concat(...wx.map((y) => sideWorldPoints(ctx, y.side))) } : where,
           note: check
-            ? (facing ? `※ ${loc} ${v} / 마주 보는 벽 ${plain(opp.m.value)}: 안 맞음 — 확인필요` : `※ ${loc} ${v}: 다른 길이와 ${plain(w.amount)}mm 안 맞음 — 확인필요`)
+            ? (facing ? `※ ${loc} ${v} / 마주 보는 벽 ${plain(opp.m.value)}: 안 맞음 — 확인필요`
+              : `※ ${loc} ${v}: 다른 길이와 ${plain(w.amount)}mm 안 맞음 — ${wx.length ? `사선이나 ${withNote(ctx, wx)}` : ''}확인필요`)
             : null,
         });
+        if (check && wx.length) withAfterConfirm(ctx, push, explain, w, key, [x], wx);
       } else if (w.type === 'absorbed') {
-        const own = explain.own(x.m.id, ['twoSide', 'overall', 'outlier']);
+        const own = explain.own(x.m.id, ['twoSide', 'overall', 'outlier', 'loop']);
         const along = own ? null : explain.axis(measureAxes(x));
         // Review 0.5.1 (#6): 확인필요 only once other values tie both ends of this run, so that the walls
         // really had to give to make the values agree.
@@ -1390,6 +1531,110 @@ function engineWarningChecks(ctx, push, explain, opts = {}) {
     }
   }
 }
+
+// The measured parts of one straight diagonal line split by T's (model.js computeWarnings residual
+// `line`): one item for the whole line, its drawn length against the sum of the parts (round 2,
+// 2026-10-31, B6: a wrong h value gave two 확인필요 and two ※ lines, one per correct part).
+function lineResidualItem(ctx, push, w, explain, lines) {
+  const ids = w.line.measureIds || [];
+  const k = ids.slice().sort().join(',');
+  if (lines.has(k)) return;
+  const xs = ids.map((id) => ctx.measureInfo.get(id)).filter((x) => x && x.valid);
+  if (xs.length !== ids.length || !(w.line.amount > RESIDUAL_MIN_MM)) return;
+  lines.add(k);
+  const own = xs.map((x) => explain.own(x.m.id, ['twoSide', 'closure', 'overall', 'outlier', 'loop'])).find(Boolean) || null;
+  const along = own ? null : explain.axis([...new Set(xs.flatMap((x) => measureAxes(x)))]);
+  const resolved = resolvedKeys(ctx.project);
+  const flagged = (ctx.derived.warnings || []).some((v) => v && v.type === 'residual' && v.line && residualCheckNow(v, resolved)
+    && (v.line.measureIds || []).slice().sort().join(',') === k);
+  const check = flagged && !own && !along;
+  const byCall = !flagged && (ctx.derived.warnings || []).some((v) => v && v.type === 'residual' && v.line && v.loopCall && v.loopCall.after
+    && (v.line.measureIds || []).slice().sort().join(',') === k);
+  const why = own ? OWN_REASON[own] : along ? AXIS_REASON[along] : byCall ? AXIS_REASON.loop : '';
+  const at = (x) => `${x.spanLoc || ctx.sideLocation(x.m.room, x.side.key)} ${plain(x.m.value)}`;
+  const sum = xs.reduce((a, x) => a + x.m.value, 0);
+  const drawn = xs.reduce((a, x) => a + x.m.value + ((ctx.derived.solve && ctx.derived.solve.measureResiduals && ctx.derived.solve.measureResiduals.get(x.m.id)) || 0), 0);
+  const list = xs.map(at).join(' + ');
+  const base = sideWhere(ctx, xs[0].m.room, xs[0].side);
+  // The axis values that fix the line's two ends (round 3, 2026-11-01: B6 with 거실 아래쪽 벽 2570 typed
+  // 5270 named only the correct diagonal parts).
+  const wx = flagged ? withInfos(ctx, w) : [];
+  const key = `residual:${xs.map((x) => `${x.m.id}=${plain(x.m.value)}`).sort().join(',')}`;
+  push({
+    key,
+    level: check ? LEVEL_CHECK : LEVEL_INFO,
+    category: 'residual',
+    message: `${list}: 한 줄로 이어진 사선 벽입니다. 잰 길이의 합 ${plain(sum)}, 다른 길이로 계산하면 ${plain(drawn)} (${plain(w.line.amount)}mm 차이). 사선 길이나 주변 가로·세로 벽 길이를 확인해 주세요.${withText(ctx, wx)}${why}`,
+    where: {
+      ...base, measureId: xs[0].m.id, measureIds: xs.map((x) => x.m.id),
+      points: base.points.concat(...xs.slice(1).map((x) => sideWorldPoints(ctx, x.side)), ...wx.map((y) => sideWorldPoints(ctx, y.side))),
+    },
+    note: check ? `※ ${list}: 다른 길이와 ${plain(w.line.amount)}mm 안 맞음 — 사선이나 ${wx.length ? withNote(ctx, wx).replace(/ $/, '') : '주변 벽 길이'} 확인필요` : null,
+  });
+  if (check && wx.length) withAfterConfirm(ctx, push, explain, { ...w, amount: w.line.amount }, key, xs, wx);
+}
+
+// The axis values a diagonal check also compares (model.js computeWarnings residual `withIds`, solver
+// diagonalRows `with`: the values on every chain between the diagonal's (or its whole line's) two ends; a
+// value in a loop is the loop's). → [measure info]
+const WITH_PANEL_NAMES = 5;
+function withInfos(ctx, w) {
+  return [...new Set((w && w.withIds) || [])].map((id) => ctx.measureInfo.get(id)).filter((y) => y && y.valid);
+}
+const withAt = (ctx, y) => `${y.spanLoc || ctx.sideLocation(y.m.room, y.side.key)} ${plain(y.m.value)}`;
+// ' 함께 볼 값: 거실 아래쪽 벽 5270, 주방 아래쪽 벽 4750.' | ''
+function withText(ctx, wx) {
+  if (!wx.length) return '';
+  const list = wx.map((y) => withAt(ctx, y));
+  const shown = list.length > WITH_PANEL_NAMES ? `${list.slice(0, WITH_PANEL_NAMES).join(', ')} 외 ${list.length - WITH_PANEL_NAMES}개` : list.join(', ');
+  return ` 함께 볼 값: ${shown}.`;
+}
+// For the ※ line, the values to look at, the likeliest first, up to LOOP_NOTE_NAMES as on a 안 맞는 값 line
+// (round 4, 2026-11-01: with the first one only, a correct short side was named while the typo came second):
+// '거실 왼쪽 벽 5300 / 거실 위쪽 벽 3980 / 거실 오른쪽 벽 3650 외 1개 ' | '거실 아래쪽 벽 5270 ' | ''
+function withNote(ctx, wx) {
+  if (!wx.length) return '';
+  const list = wx.map((y) => withAt(ctx, y));
+  return `${list.length > LOOP_NOTE_NAMES ? `${list.slice(0, LOOP_NOTE_NAMES).join(' / ')} 외 ${list.length - LOOP_NOTE_NAMES}개` : list.join(' / ')} `;
+}
+// Once the diagonal (or the line of its parts) is confirmed as measured and still misses by more than its
+// tolerance, the axis values it compares are what is left: one 확인필요 naming them (round 3, 2026-11-01: B6
+// with 거실 아래쪽 벽 5270, B4 with 거실 아래쪽 벽 +500 printed the wrong value silently after the correct
+// diagonal was confirmed). Not while another open item names them or their axis (it explains them), nor
+// when that item's key is not confirmed. dxs: the diagonal's measure infos; wx: withInfos.
+// It is 확인필요 only when the misfit is more than twice the diagonal's tolerance, or when one of the values
+// also leaves its own loop open (w.withLoop: the loop points at it too). A smaller misfit is as likely the
+// diagonal's own tape (round 4, 2026-11-01: a diagonal 50–75 mm off, re-measured carelessly and confirmed,
+// named 2–3 correct h / v values 확인필요 and on paper): 참고, not printed.
+function withAfterConfirm(ctx, push, explain, w, diagKey, dxs, wx) {
+  if (!isKeyResolved(resolvedKeys(ctx.project), diagKey)) return;
+  if (wx.some((y) => explain.own(y.m.id, ['twoSide', 'closure', 'overall', 'outlier', 'loop']))) return;
+  if (explain.axis([...new Set(wx.flatMap((y) => measureAxes(y)))])) return;
+  const list = wx.map((y) => withAt(ctx, y));
+  const diag = dxs.map((x) => withAt(ctx, x)).join(' + ');
+  const one = list.length === 1;
+  const amount = plain(w.amount);
+  const panel = list.length > WITH_PANEL_NAMES ? `${list.slice(0, WITH_PANEL_NAMES).join(', ')} 외 ${list.length - WITH_PANEL_NAMES}개` : list.join(', ');
+  const short = list.length > LOOP_NOTE_NAMES ? `${list.slice(0, LOOP_NOTE_NAMES).join(' / ')} 외 ${list.length - LOOP_NOTE_NAMES}개` : list.join(' / ');
+  const base = sideWhere(ctx, wx[0].m.room, wx[0].side);
+  const diagTol = Math.min(ctx.settings.closureTolerance, DIAGONAL_TOLERANCE_MM);
+  const sure = !!w.withLoop || w.amount > WITH_CONFIRMED_FACTOR * diagTol + 0.01;
+  const small = ' 차이가 작아 사선을 잴 때 생긴 차이일 수 있습니다.';
+  push({
+    key: `residualWith:${wx.map((y) => `${y.m.id}=${plain(y.m.value)}`).sort().join(',')}|${dxs.map((x) => `${x.m.id}=${plain(x.m.value)}`).sort().join(',')}`,
+    level: sure ? LEVEL_CHECK : LEVEL_INFO, category: 'residual',
+    message: one
+      ? `${list[0]}: 확인한 사선 벽(${diag})과 ${amount}mm 안 맞습니다.${sure ? ' 이 길이를 다시 확인해 주세요.' : `${small} 이 길이도 한 번 더 확인해 주세요.`}`
+      : `${panel}: 확인한 사선 벽(${diag})과 ${amount}mm 안 맞습니다.${sure ? ' 이 가로·세로 값 중 하나가 틀렸을 수 있습니다. 하나씩 다시 확인해 주세요.' : `${small} 이 가로·세로 값도 한 번 더 확인해 주세요.`}`,
+    where: {
+      ...base, measureId: wx[0].m.id, measureIds: wx.map((y) => y.m.id),
+      points: base.points.concat(...wx.slice(1).map((y) => sideWorldPoints(ctx, y.side))),
+    },
+    note: !sure ? null : one ? `※ ${list[0]}: 사선 벽과 ${amount}mm 안 맞음 — 확인필요` : `※ ${short} 중 하나: 사선 벽과 ${amount}mm 안 맞음 — 확인필요`,
+  });
+}
+// withAfterConfirm: how many times the diagonal's tolerance a misfit must be to call the h / v values wrong.
+const WITH_CONFIRMED_FACTOR = 2;
 
 // The order safeguard stopped an h/v wall from folding; the walls absorbed `amount` mm instead. Since
 // contract C3 the engine reports this only when values, wall thicknesses or finishes had to give (when
@@ -1649,6 +1894,45 @@ function fixedByMeasures(ctx) {
 }
 
 // ---- 확인필요 flags set by the user ------------------------------------------------------------
+
+// Buildings drawn apart (final review 2026-10-28, C6: a 별채 화장실 | 창고 2.4 m from the 본채): no value can
+// tie two separate wall drawings, so the distance between them is the sketch's (2250 drawn ≈ 1780), printed as if to scale
+// and on paper wider where the chains of the two need the room (printlayout.js partsExtent). One 참고 and a ※ line on the
+// print. A drawing inside another's room (an island room, C5's 드레스룸) is not a building of its own.
+function detachedChecks(ctx, push) {
+  const parent = new Map();
+  const find = (a) => { while (parent.get(a) !== a) a = parent.get(a); return a; };
+  const add = (a) => { if (!parent.has(a)) parent.set(a, a); };
+  for (const e of ctx.project.edges || []) {
+    add(e.a); add(e.b);
+    const ra = find(e.a), rb = find(e.b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+  const rooms = (ctx.derived && ctx.derived.rooms) || [];
+  const comps = new Map(); // root → [room faces]
+  for (const dr of rooms) {
+    const id = dr.face && dr.face.nodeIds && dr.face.nodeIds[0];
+    if (!id || !parent.has(id)) continue;
+    const r = find(id);
+    if (!comps.has(r)) comps.set(r, []);
+    comps.get(r).push(dr);
+  }
+  if (comps.size < 2) return;
+  // Top-level drawings: not inside a room of another drawing.
+  const top = [...comps].filter(([r, list]) => {
+    const p = list[0].face.points[0];
+    return !rooms.some((dr) => !list.includes(dr) && dr.face && pointInPolygon(p, dr.face.points));
+  });
+  if (top.length < 2) return;
+  const points = top.flatMap(([, list]) => list.map((dr) => dr.labelPoint).filter(Boolean));
+  push({
+    key: 'detached',
+    level: LEVEL_INFO, category: 'detached',
+    message: `떨어져 그린 부분(건물·층)이 ${top.length}개 있습니다. 그 사이 거리는 값으로 정해지지 않아 축척과 다를 수 있고, 출력에서는 치수줄 자리만큼 더 벌어지기도 합니다.`,
+    where: { point: points[0] || null, points },
+    note: null,
+  });
+}
 
 function userFlagChecks(ctx, push, opts) {
   const p = ctx.project;
@@ -2301,8 +2585,9 @@ function openingChecks(ctx, push, opts, explain = null) {
 // fixtures.js keeps it). A measured length is drawn centred on the side and is 확인필요 with a ※
 // note; an unmeasured (default) length was drawn shortened to fit, which is only 참고. While the plan's
 // scale is not settled by the first values (scaleState) a measured one is 참고 too: the side is still
-// the sketch's guess. (Before ANY value the plan is the sketch exactly as drawn and nothing has been
-// rescaled; that state keeps the 확인필요 — tests/fixtures.test.html relies on it.) The key holds the
+// the sketch's guess — before ANY value as well (round 5, 2026-11-08: drawn first and measured later, a
+// fixture typed before the walls was 확인필요 until the first value, unlike a window or door; '아직 잰 값이
+// 없어 …'). The key holds the
 // fixture, its length and its side, not the solved side length (review 0.5.1, as openingWide). While a
 // 다시 확인 is open (explain.outlierOpen) the measured one is 참고 as well: that value may have shrunk the
 // side (round 2, as the window / door items). The column items below (기둥이 실보다 김) follow the same
@@ -2310,7 +2595,7 @@ function openingChecks(ctx, push, opts, explain = null) {
 function fixtureChecks(ctx, push, explain = null) {
   const sc = ctx.scaleState();
   const outlierOpen = !!(explain && explain.outlierOpen);
-  const unsettled = sc.values > 0 && !sc.settled;
+  const unsettled = !sc.settled;
   const fit = fitDemotion(ctx, explain, FIT_UNSETTLED);
   for (const raw of ctx.project.fixtures || []) {
     const f = normalizeFixture(raw);
@@ -2335,7 +2620,7 @@ function fixtureChecks(ctx, push, explain = null) {
         level: info ? LEVEL_INFO : LEVEL_CHECK, category: 'fixtureLong',
         message: `${loc} ${name} ${plain(f.w)}: 길이 ${plain(f.w)}mm가 벽 길이 ${plain(avail)}mm보다 깁니다. 그림에는 벽 가운데에 그렸습니다.`
           + (outlierOpen ? AXIS_REASON.outlier
-            : unsettled ? ' 아직 잰 값이 적어 벽 길이가 그림 비율이라 참고로만 알립니다. 값을 더 넣으면 다시 확인합니다.'
+            : unsettled ? noValuesYet(sc, WALL_UNSETTLED)
               : ' 설비 길이나 벽 길이를 확인해 주세요.'),
         where,
         note: info ? null : `※ ${loc} ${name} ${plain(f.w)}: 벽보다 김 — 확인필요`,
@@ -2443,18 +2728,20 @@ function fixtureChecks(ctx, push, explain = null) {
 //     ('위의 다시 확인 값 때문일 수 있습니다');
 //   - while the scale is not settled by the first values (scaleState): the room is still the sketch's
 //     guess (예시 세대 A list order: the first value A04 shrank 방1 to 2251 mm, narrower than the 2400 stair).
-//     Before ANY value the drawing is as drawn and the item stays 확인필요.
+//     Before ANY value too (round 5, 2026-11-08: '아직 잰 값이 없어 …'; it was 확인필요 until the first value).
 // unsettledText: the end of the message in the second case. → { level, tail(advice), note(text) }
 const FIT_UNSETTLED = ' 아직 잰 값이 적어 실 크기가 그림 비율이라 참고로만 알립니다. 값을 더 넣으면 다시 확인합니다.';
 const WALL_UNSETTLED = ' 아직 잰 값이 적어 벽 길이가 그림 비율이라 참고로만 알립니다. 값을 더 넣으면 다시 확인합니다.';
+// The same before any value: '아직 잰 값이 없어 … 값을 넣으면 …'.
+const noValuesYet = (sc, text) => (sc.values > 0 ? text : text.replace('잰 값이 적어', '잰 값이 없어').replace('값을 더 넣으면', '값을 넣으면'));
 function fitDemotion(ctx, explain, unsettledText) {
   const sc = ctx.scaleState();
   const outlierOpen = !!(explain && explain.outlierOpen);
-  const unsettled = sc.values > 0 && !sc.settled;
+  const unsettled = !sc.settled;
   const info = outlierOpen || unsettled;
   return {
     level: info ? LEVEL_INFO : LEVEL_CHECK,
-    tail: (advice) => (outlierOpen ? AXIS_REASON.outlier : unsettled ? unsettledText : advice),
+    tail: (advice) => (outlierOpen ? AXIS_REASON.outlier : unsettled ? noValuesYet(sc, unsettledText) : advice),
     note: (text) => (info ? null : text),
   };
 }
@@ -2672,6 +2959,10 @@ export function installChecks(DocStore) {
   };
   proto.isCheckResolved = function isCheckResolved(key) {
     return isKeyResolved(resolvedKeys(this.project), key);
+  };
+  // The room's label as everywhere (roomLabels): its name, or '이름 없는 실 N'; '실' for an unknown room.
+  proto.roomLabel = function roomLabel(roomId) {
+    return roomLabels(this.derived).get(roomId) || '실';
   };
   proto.checkItems = function checkItems(opts = {}) {
     const project = this.project, derived = this.derived;

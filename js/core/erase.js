@@ -556,7 +556,10 @@ export function mergedInto(before, after, removedIds = []) {
 // What a removal must not take from the walls it merged (checker 2026-10-22, "딱 닿는것만"): the
 // 확인필요 flag of an absorbed piece goes to the merged wall (as withSplits carries it over on a split),
 // and a fixture standing against it stays against the merged wall (it was set free as if that wall had
-// been deleted). doc: the graph after the removal (its wallChecks / fixtures as before). → doc
+// been deleted). A [확인 완료] mark whose key names an absorbed piece (openingWide:o3:900:e9, overlap:e3|e9,
+// userWall:e9) names the merged wall (round 5: the mark did not follow and the item came back as 확인필요); a
+// mark already there for the merged wall is not doubled. doc: the graph after the removal (its wallChecks /
+// fixtures / checks as before). → doc
 export function carryMerged(before, doc, removedIds = []) {
   const map = mergedInto(before, doc, removedIds);
   if (!map.size) return doc;
@@ -590,7 +593,35 @@ export function carryMerged(before, doc, removedIds = []) {
       checks[checks.indexOf(have)] = { ...have, note: have.note ? `${have.note} / ${note}` : note };
     }
   }
-  return changed ? { ...doc, fixtures, wallChecks: checks } : doc;
+  let marks = doc.checks;
+  if (Array.isArray(doc.checks) && doc.checks.length) {
+    const had = new Set(doc.checks.map((c) => c && c.key));
+    const made = new Set();
+    const out = [];
+    let moved = false;
+    for (const c of doc.checks) {
+      const key = c && typeof c.key === 'string' ? mergedKey(c.key, map) : null;
+      if (key == null || key === c.key) { out.push(c); continue; }
+      moved = true;
+      if (had.has(key) || made.has(key)) continue;
+      made.add(key);
+      out.push({ ...c, key });
+    }
+    if (moved) { marks = out; changed = true; }
+  }
+  return changed ? { ...doc, fixtures, wallChecks: checks, checks: marks } : doc;
+}
+
+// A check key with the wall ids an absorbed piece had (eNN, merged → its new wall) replaced; a list of ids
+// joined by '|' stays sorted as the checks write it. → key
+function mergedKey(key, map) {
+  const colon = key.indexOf(':');
+  if (colon < 0) return key;
+  const body = key.slice(colon + 1);
+  const next = body.replace(/\be\d+\b/g, (id) => map.get(id) || id);
+  if (next === body) return key;
+  const isIds = (part) => part.split('|').every((t) => /^[a-z]\d+$/.test(t));
+  return key.slice(0, colon + 1) + next.split(':').map((part) => (part.includes('|') && isIds(part) ? part.split('|').sort().join('|') : part)).join(':');
 }
 
 // ---- store command -----------------------------------------------------------------------------------

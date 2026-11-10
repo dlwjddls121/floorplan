@@ -10,13 +10,12 @@
 //
 // ctx = { store(), view, command(fn, label) → bool, toast(msg, opts), requestRender(),
 //         overlayHost: element over the canvas for the mode bar (e.g. #canvasWrap),
-//         onModeChange() (optional: [✎ 펜] / [메모 지우개] changed; the editor shows `hint`) }
+//         onModeChange() (optional: [✎ 펜] / [메모 지우개] changed; the bar shows the mode itself) }
 import { el, openDialog } from './panel.js';
 import { MEMO_COLOR, MEMO_PAPER_MM, WORLD_PER_PAPER_MM, memoStrokesAlong, validMemo, memoPaperWidth, isMemoHidden } from '../core/memo.js';
 
-export const MEMO_HINT = '메모: S펜이나 손가락으로 자유롭게 적으세요. 메모는 도면과 따로 저장되고, 출력할 때 넣을지 고릅니다.';
-// The memo bar's own eraser is not the toolbar's [지우개] (that one erases walls, windows … and memo too).
-export const MEMO_ERASER_HINT = '메모 지우개: 지울 메모를 문지르세요. 벽·창·문·설비는 왼쪽 [지우개]로 지웁니다. 다시 쓰려면 [✎ 펜]을 누르세요.';
+// The memo bar's own eraser is not the toolbar's [지우개] (that one erases walls, windows … and memo too):
+// a rub on a wall in [메모 지우개] says so in a toast (no tool hint line since 2026-10-29).
 
 const ERASER_PX = 14;      // eraser radius on screen
 const MIN_SCREEN_PX = 1.2;
@@ -137,11 +136,6 @@ export class MemoTool {
     this.mode = mode;
     this._renderBar();
     if (typeof this.ctx.onModeChange === 'function') this.ctx.onModeChange(mode);
-  }
-
-  // The tool hint for the current mode.
-  get hint() {
-    return this.mode === 'eraser' ? MEMO_ERASER_HINT : MEMO_HINT;
   }
 
   setVisible(on) {

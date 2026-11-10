@@ -256,7 +256,58 @@ export function edgeFrame(project, derived, edgeId) {
   let lo = endClearance(project, derived, edge, edge.a, dir);
   let hi = L - endClearance(project, derived, edge, edge.b, dir);
   if (hi - lo < MIN_WIDTH) { lo = 0; hi = L; }
-  return { edge, A, B, L, dir, left, thick: wallThickness(project, derived, edge), lo, hi };
+  // The wall goes on straight through a corner that only 구역 나누기 lines reach (they are no walls): an
+  // opening wider than its piece may use the whole straight run up to the real walls (placeOpening;
+  // final review 2026-10-28, A1 / E5: a door beside where the 거실 | 주방 line meets the wall was drawn
+  // 798–850 of 900 and printed with a 확인필요 '폭이 벽보다 큼' on a correct plan).
+  let run = null;
+  const ra = runFrom(ix, edge, edge.a), rb = runFrom(ix, edge, edge.b);
+  if (ra.extra > 0 || rb.extra > 0) {
+    const rlo = ra.extra > 0 ? -ra.extra + endClearance(project, derived, ra.edge, ra.node, unitOf(ix, ra.edge)) : lo;
+    const rhi = rb.extra > 0 ? L + rb.extra - endClearance(project, derived, rb.edge, rb.node, unitOf(ix, rb.edge)) : hi;
+    if (rhi - rlo > hi - lo) run = { lo: rlo, hi: rhi };
+  }
+  return { edge, A, B, L, dir, left, thick: wallThickness(project, derived, edge), lo, hi, run };
+}
+
+// Unit direction a → b of an edge.
+function unitOf(ix, edge) {
+  const A = ix.nodes.get(edge.a), B = ix.nodes.get(edge.b);
+  const L = A && B ? Math.hypot(B.x - A.x, B.y - A.y) : 0;
+  return L > 1e-9 ? { x: (B.x - A.x) / L, y: (B.y - A.y) / L } : { x: 1, y: 0 };
+}
+
+// From `edge` beyond its end `nodeId`: while the only wall meeting that corner is one going straight on
+// (the corner exists because 구역 나누기 lines reach it), walk on along it. → { extra (mm walked beyond
+// nodeId), node (the corner the run ends at), edge (the run's last wall, which meets that corner) }
+export function straightRun(project, edgeId, nodeId) {
+  const ix = indexOf(project);
+  const edge = ix.edges.get(edgeId);
+  return edge ? runFrom(ix, edge, nodeId) : { extra: 0, node: nodeId, edge: null };
+}
+
+function runFrom(ix, edge, nodeId) {
+  let cur = edge, at = nodeId, extra = 0;
+  const seen = new Set([edge.id]);
+  for (let guard = 0; guard < 64; guard++) {
+    const others = (ix.byNode.get(at) || []).filter((e) => e.id !== cur.id);
+    const walls = others.filter((e) => e.kind !== 'divider');
+    if (walls.length !== 1 || walls.length === others.length || seen.has(walls[0].id)) break;
+    const next = walls[0];
+    if (next.kind !== cur.kind) break;
+    const N = ix.nodes.get(at), far = ix.nodes.get(next.a === at ? next.b : next.a), back = ix.nodes.get(cur.a === at ? cur.b : cur.a);
+    if (!N || !far || !back) break;
+    const u = { x: N.x - back.x, y: N.y - back.y }, v = { x: far.x - N.x, y: far.y - N.y };
+    const lu = Math.hypot(u.x, u.y), lv = Math.hypot(v.x, v.y);
+    if (lu < 1e-9 || lv < 1e-9) break;
+    // Straight on (within about 1°), not a bend.
+    if ((u.x * v.x + u.y * v.y) / (lu * lv) < 0.9998) break;
+    extra += lv;
+    seen.add(next.id);
+    cur = next;
+    at = next.a === at ? next.b : next.a;
+  }
+  return { extra, node: at, edge: cur };
 }
 
 // Drawn width of an opening (mm), before clipping to its wall.
@@ -271,14 +322,24 @@ export function nominalWidth(o) {
 // Where an opening sits on its wall. → { frame, w, c, s0, s1, center, clipped } | null
 //   c = centre distance from A (mm), s0..s1 = covered part of the centre line, center = world point.
 export function placeOpening(project, derived, o, frame = null) {
-  const fr = frame || edgeFrame(project, derived, o.edge);
+  let fr = frame || edgeFrame(project, derived, o.edge);
   if (!fr) return null;
-  const span = fr.hi - fr.lo;
   const nominal = nominalWidth(o);
+  // Wider than its piece: the straight run through 구역 나누기 corners (edgeFrame), as its frame. An anchor
+  // at an end of the piece the run goes on past (a corner only 구역 나누기 lines reach) is not a corner of
+  // the wall: the opening covers its drop point there (round 2, 2026-10-31: a 900 door dropped 50–150 mm
+  // from where the 거실 | 주방 line meets the 안방 wall went to the run's far end, 2–3.4 m away in another
+  // room's wall, no 확인필요). An anchor at a real wall end stays (the run ends there too).
+  let anchor = o.anchor;
+  if (fr.run && nominal > fr.hi - fr.lo + 0.5) {
+    if ((anchor === 'a' && fr.run.lo < fr.lo - 0.5) || (anchor === 'b' && fr.run.hi > fr.hi + 0.5)) anchor = null;
+    fr = { ...fr, lo: fr.run.lo, hi: fr.run.hi };
+  }
+  const span = fr.hi - fr.lo;
   const w = Math.min(nominal, span);
   let c;
-  if (o.anchor === 'a') c = fr.lo + w / 2;
-  else if (o.anchor === 'b') c = fr.hi - w / 2;
+  if (anchor === 'a') c = fr.lo + w / 2;
+  else if (anchor === 'b') c = fr.hi - w / 2;
   else c = clamp((isFinite(o.t) ? o.t : 0.5) * fr.L, fr.lo + w / 2, fr.hi - w / 2);
   const s0 = c - w / 2, s1 = c + w / 2;
   const center = { x: fr.A.x + fr.dir.x * c, y: fr.A.y + fr.dir.y * c };

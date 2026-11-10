@@ -9,17 +9,17 @@ import { DocStore, createProject } from './core/model.js';
 import { drawCheckMarkers, notesForPrint } from './core/checks.js';
 import { OpeningPrefs, placeOpening } from './core/openings.js';
 import { normalizeFixture, fixtureBounds } from './core/fixtures.js';
-import { describeDim, buildDimensions, spansOverlap } from './core/dims.js';
+import { describeDim, spansOverlap } from './core/dims.js';
 import { applyLabelMove } from './core/labels.js';
-import { computePrintLayout } from './core/printlayout.js';
+import { computePrintLayout, partDimensions } from './core/printlayout.js';
 import { wirePackages, CHECK_OPTIONS, wallCutouts } from './ui/wiring.js';
 import * as storage from './io/storage.js';
 import { exportProject } from './io/fileio.js';
 import { registerServiceWorker, onUpdateAvailable } from './io/swclient.js';
 import { View, projectBounds } from './ui/view.js';
-import { InputController, installPalmGuard } from './ui/input.js';
+import { InputController, installPalmGuard, installGhostClickGuard } from './ui/input.js';
 import { renderPlan, renderOverlay } from './ui/render.js';
-import { ToolController, TOOL_HINTS } from './ui/tools.js';
+import { ToolController } from './ui/tools.js';
 import { PanelController, Toaster, openDialog } from './ui/panel.js';
 import { ListScreen } from './ui/list.js';
 import { TIMING, ZOOM, COLORS } from './ui/theme.js';
@@ -33,6 +33,7 @@ import { openInfoForm, SURVEYOR_KEY } from './ui/info-form.js';
 import { ChecksPanel, countForBadge } from './ui/checks-ui.js';
 import { drawDimensions, layoutDimensions, dimDragTarget } from './ui/draw-dims.js';
 import { OutputDialog, notesForChoices, DEFAULT_CHOICES, printsMemo } from './ui/output.js';
+import { preloadPaperFont } from './ui/paperfont.js';
 import { householdSettings } from './core/prefs.js';
 import { exteriorIds } from './core/exterior.js';
 
@@ -44,6 +45,25 @@ const EXTERIOR_VIEW_KEY = 'floorplan.exteriorView';
 // At 10 % the walls to tap next still moved up to 36 px on the 예시 세대 A (several values change the size
 // by 5–9 %); at 2 % at most 15 px, inside the tap reach.
 const HOLD_ZOOM_STEP = 0.02;
+// The wall the length panel shows (the one tapped, or the next side after [확인 ▶]) moves the view only when the
+// surveyor cannot see it where it is: less than half of it (of a wall longer than 2 × SEEN_PART_PX: less than
+// SEEN_PART_PX of it) lies SEEN_INSET_PX or more inside the free part of the canvas, above the bottom panel and
+// under the canvas buttons (Editor.focusWorld opts.ifHidden). Before, the view moved whenever an END of that wall
+// came within 60 px of the panel: the Galaxy Tab's bottom panel is taller than the PC's (its numpad keys are
+// 76 × 64 px for the finger, the PC's 58 × 46: 302 against 230 px), so there 예시 세대 A's next side, in view, jumped
+// 64 px, and the wall to tap after it moved with it (round 4, the tablet's ui-smoke #26).
+const SEEN_INSET_PX = 6;
+const SEEN_PART_PX = 120;
+// What the plan draws above its top corner on the screen (Editor._planTop): the outer wall's face and a text
+// outside it; in 치수선 보기 the dimension rows (fitAll leaves 120 px there).
+const TOP_CLEAR_PX = 24;
+const TOP_CLEAR_DIMS_PX = 100;
+// A plan this narrow (css px) has the S펜 chip at its top left (app.css @container plan (max-width: 960px)).
+const PEN_CHIP_TOP_LEFT_PX = 960;
+// After a tap on the plan at the canvas buttons' place (within VIEW_BTNS_HOLD_NEAR_PX of them) closed the bottom panel,
+// the buttons it hid take no pointer for this long (Editor._holdViewButtons).
+const VIEW_BTNS_HOLD_MS = 500;
+const VIEW_BTNS_HOLD_NEAR_PX = 16;
 
 // Stage B/C/D packages: label hooks, paper drawers and the 확인 완료 store commands.
 wirePackages();
@@ -119,8 +139,16 @@ class Editor {
     this.renderQueued = false;
     this.lastDroppedSeen = null;
     this.lastFocusedEdge = null;
-    this.roomLabels = new Map();
-    this.roomLabelsFor = null;
+    // The view before the bottom panels moved it, and the holdView moves since (_panelFocus): null or
+    // { base: { scale, ox, oy } | 'fit' | null, holds: [{ p0, p1, k }], expect: { scale, ox, oy }, clearTop, wholeIn }.
+    this._panelShift = null;
+    // The view's coming back is queued for when the task that closed the last panel is done (_onPanelChange).
+    this._restoreQueued = false;
+    // The view [전체 보기] / 치수선 보기 fitted into the strip above an open bottom panel (fitAll): fitted again to
+    // the whole canvas when the panels close, unless moved since (_onPanelChange). null or { scale, ox, oy }.
+    this._panelFit = null;
+    // The last automatic fit and the canvas height it was made for (_noteFit; _resize). null or { view, h }.
+    this._lastFit = null;
     // One function object, so the per-snapshot check cache (store.checkItems) can be reused.
     this.roomLabelFn = (id) => this.roomLabel(id);
     this.requestTextRelayoutFn = (ms) => this._requestTextRelayout(ms);
@@ -151,9 +179,13 @@ class Editor {
       command,
       toast,
       onChange: () => this._onPanelChange(),
-      focusWorld: (pts) => this.focusWorld(pts),
+      // The next side after [확인 ▶]: the view moves only when it cannot be seen (SEEN_INSET_PX); undone when
+      // the panels close (_panelFocus).
+      focusWorld: (pts) => this._panelFocus(pts, { ifHidden: true }),
       roomLabel: this.roomLabelFn,
       holdView,
+      // A tap on a room's name focuses the name field with the mouse only (input.js fieldFocusOk).
+      inputKind: () => (this.input ? this.input.lastInputKind : 'mouse'),
       // The [외벽] switch of the length panel shows its result: it turns 외벽 보기 on.
       exteriorView: () => this.exteriorView,
       showExterior: () => { if (!this.exteriorView) this.setExteriorView(true, { quiet: true }); },
@@ -192,6 +224,10 @@ class Editor {
       beforePanelOpen: () => { this.panel.close(); this.openingPanel.close(); },
       onPanelChange: () => this._onPanelChange(),
       overlayRects: () => this.overlayRects(),
+      // The last input's kind (input.js lastInputKind), as the room panel gets it: the 기타 name box takes the focus
+      // by itself only after a mouse or a key (input.js fieldFocusOk; fixtures-ui.js _nameRow), as the room's name
+      // field does.
+      inputKind: () => (this.input ? this.input.lastInputKind : 'mouse'),
     });
 
     this.memoTool = new MemoTool({
@@ -201,8 +237,6 @@ class Editor {
       toast,
       requestRender,
       overlayHost: this.wrap,
-      // [메모 지우개] has its own hint.
-      onModeChange: () => { if (this.tools && this.tools.tool === 'memo') this._setHint(this.memoTool.hint); },
     });
 
     // 지우개: rub what should go (red preview, one undo step, its own toast).
@@ -274,10 +308,19 @@ class Editor {
       if (b && b.closest('.topbar, #toolbar, .view-btns') && document.activeElement === b) b.blur();
     });
 
+    // A gesture on the plan at the canvas buttons' place that closed the bottom panel (a tap on empty paper there)
+    // holds the buttons it had hidden for a moment (_holdViewButtons).
+    const panelShown = () => !panelHost.hidden;
+    const holdIfClosed = (fn) => (g) => {
+      const shown = panelShown();
+      const r = fn(g);
+      if (shown && !panelShown()) this._holdViewButtons(g && g.screen && g.screen[g.screen.length - 1]);
+      return r;
+    };
     this.input = new InputController(this.canvas, this.view, {
-      onGestureStart: (g) => this.tools.onGestureStart(g),
+      onGestureStart: holdIfClosed((g) => this.tools.onGestureStart(g)),
       onGestureMove: (g) => this.tools.onGestureMove(g),
-      onGestureEnd: (g) => this.tools.onGestureEnd(g),
+      onGestureEnd: holdIfClosed((g) => this.tools.onGestureEnd(g)),
       onGestureCancel: (g) => this.tools.onGestureCancel(g),
       onViewChange: () => this.requestRender(),
       // body.pen-near: a toast's own button lets a pen tap through to the plan under it (app.css .toast-action).
@@ -285,6 +328,8 @@ class Editor {
     });
     // A palm on the numpad while the S Pen is in use types nothing (input.js installPalmGuard).
     installPalmGuard(panelHost, this.input);
+    // The click of a tap on the plan that opened a panel under the finger presses nothing there (input.js).
+    installGhostClickGuard(panelHost);
 
     this._bindChrome();
     this._bindKeyboard();
@@ -309,6 +354,9 @@ class Editor {
     this.fixtureTool.panel.close({ discard: true });
     this._detach();
     this.store = new DocStore(project);
+    // The view the panels of the household shown so far moved is not this one's (_panelFocus).
+    this._panelShift = null;
+    this._panelFit = null;
     this.changeSeq = 0;
     this.keptSeq = 0;
     this._conflict = null;
@@ -494,7 +542,6 @@ class Editor {
   _onStoreChange(change) {
     const prev = this.prevProject;
     this.prevProject = this.store.project;
-    this.roomLabelsFor = null;
     this.panel.refresh();
     this.openingPanel.refresh();
     this.fixtureTool.panel.refresh();
@@ -789,7 +836,7 @@ class Editor {
       b.classList.toggle('tool-on', on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     }
-    this._setHint(name === 'memo' ? this.memoTool.hint : (TOOL_HINTS[name] || ''));
+    this._placeToolBars();
     this.canvas.dataset.tool = name;
     // A window/door or fixture panel belongs to what was being placed; a new tool starts fresh.
     // (The length and room panels stay: they are opened by taps in every tool.)
@@ -799,32 +846,34 @@ class Editor {
     if (name === 'fixture' || name === 'memo') this._clearTopBar();
   }
 
-  // The tool hint (top left of the plan), with the 설비 / 메모 bar placed right under it.
-  _setHint(text) {
-    $('#hint').textContent = text || '';
-    this._placeToolBars();
-  }
-
-  // The floating 설비 / 메모 bar goes right under the tool hint, whatever its height (review 2026-10-25: the
-  // bar was fixed at 66 px and covered the hint's last lines, in portrait most of it).
+  // The floating 설비 / 메모 bar at the top left of the plan (no tool hint line there since the tablet test of
+  // 2026-10-29: "위쪽 문구 삭제"): beside the canvas buttons when it fits left of them, else right under
+  // them (the 설비 chips in landscape; both bars on a plan up to PEN_CHIP_TOP_LEFT_PX wide, the tablet
+  // upright, where the S펜 chip takes the top left: app.css @container plan).
   _placeToolBars() {
-    const hint = $('#hint');
-    const shown = hint && hint.textContent.trim() && !hint.hidden;
-    const top = shown ? Math.round(hint.offsetTop + hint.offsetHeight + 6) : 8;
-    for (const bar of this.wrap.querySelectorAll('.fx-bar, .memo-bar')) bar.style.top = `${Math.max(8, top)}px`;
+    const btns = this.wrap.querySelector('.view-btns');
+    const b = btns && btns.offsetHeight ? btns.getBoundingClientRect() : null;
+    const chipTopLeft = this.wrap.clientWidth <= PEN_CHIP_TOP_LEFT_PX;
+    for (const bar of this.wrap.querySelectorAll('.fx-bar, .memo-bar')) {
+      bar.style.top = '8px';
+      if (!b || bar.hidden || !bar.offsetHeight) continue;
+      const r = bar.getBoundingClientRect();
+      const meets = r.left < b.right && r.right > b.left - 6 && r.top < b.bottom && r.bottom > b.top;
+      if (meets || chipTopLeft) bar.style.top = `${Math.round(b.bottom - this.wrap.getBoundingClientRect().top + 6)}px`;
+    }
     this._placeToasts();
   }
 
-  // The toasts go under whatever floats over the top of the plan: the canvas buttons, the tool hint and a
-  // shown 설비 / 메모 bar (recheck 2026-10-25: a toast hid the 설비 chips for 2.6 s, its [되돌리기] lay over
-  // '계단' / '기타' and took their taps, and in portrait it covered the hint). Off the editor: the CSS place.
+  // The toasts go under whatever floats over the top of the plan: the canvas buttons and a shown 설비 / 메모
+  // bar (recheck 2026-10-25: a toast hid the 설비 chips for 2.6 s, its [되돌리기] lay over '계단' / '기타' and
+  // took their taps). Off the editor: the CSS place.
   _placeToasts() {
     const host = $('#toasts');
     if (!host) return;
     if (!this.isOpen) { host.style.top = ''; return; }
     let bottom = 0;
-    for (const el of this.wrap.querySelectorAll('.view-btns, #hint, .fx-bar, .memo-bar')) {
-      if (el.hidden || !el.offsetHeight || (el.id === 'hint' && !el.textContent.trim())) continue;
+    for (const el of this.wrap.querySelectorAll('.view-btns, .fx-bar, .memo-bar')) {
+      if (el.hidden || !el.offsetHeight) continue;
       bottom = Math.max(bottom, el.getBoundingClientRect().bottom);
     }
     host.style.top = bottom > 0 ? `${Math.round(bottom + 8)}px` : '';
@@ -844,6 +893,23 @@ class Editor {
     if (bottom - top > area.h - 2 * margin) { this.fitAll(); return; }
     this.view.panBy(0, area.y + margin - top);
     this.requestRender();
+  }
+
+  // While a bottom panel is open the canvas buttons are hidden and the plan is under them (app.css, question 6 1안). A
+  // tap on the plan there that closes the panel brings them back under the pen, and a quick second tap pressed one
+  // ([외벽 보기] turned on 0.25 s later; r4 question 6 check, r5). For VIEW_BTNS_HOLD_MS they take no pointer
+  // (.view-btns-held): a tap there still reaches the plan. A panel closed by a tap elsewhere on the plan, or by
+  // [✕ 닫기] (not a tap on the plan), leaves them usable at once.
+  // at: where the gesture ended (canvas css px); only a tap at the buttons (VIEW_BTNS_HOLD_NEAR_PX around them) holds them.
+  _holdViewButtons(at) {
+    const btns = this.wrap.querySelector('.view-btns');
+    if (!btns || !at) return;
+    const b = btns.getBoundingClientRect(), c = this.canvas.getBoundingClientRect();
+    const x = c.left + at.x, y = c.top + at.y, m = VIEW_BTNS_HOLD_NEAR_PX;
+    if (x < b.left - m || x > b.right + m || y < b.top - m || y > b.bottom + m) return;
+    btns.classList.add('view-btns-held');
+    clearTimeout(this._viewBtnsHold);
+    this._viewBtnsHold = setTimeout(() => btns.classList.remove('view-btns-held'), VIEW_BTNS_HOLD_MS);
   }
 
   // Close every bottom panel (length/room, window/door, fixture).
@@ -990,6 +1056,8 @@ class Editor {
     }
     this.tools.cancel();
     this.closePanels();
+    // The turned plan is fitted below: the view the panels moved does not come back (_restorePanelView).
+    this._panelShift = null;
     let turned = false;
     this.command(() => { turned = store.rotatePlan(1); }, '도면 회전');
     if (!turned) return false;
@@ -1070,17 +1138,8 @@ class Editor {
 
   roomLabel(roomId) {
     if (!this.store) return '';
-    const derived = this.store.derived;
-    if (this.roomLabelsFor !== derived) {
-      this.roomLabels = new Map();
-      let unnamed = 0;
-      for (const r of (derived && derived.rooms) || []) {
-        const name = r.room && r.room.name;
-        this.roomLabels.set(r.roomId, name || `이름 없는 실 ${++unnamed}`);
-      }
-      this.roomLabelsFor = derived;
-    }
-    return this.roomLabels.get(roomId) || '실';
+    // The shared label (core checks-full roomLabels, per derived): '이름 없는 실 N' by the room's place.
+    return this.store.roomLabel(roomId);
   }
 
   // The room whose name text (as drawn in the last frame) is under a world point, or null.
@@ -1126,6 +1185,13 @@ class Editor {
     if (!this.store || !s) return null;
     const pad = 4;
     const inBox = (b) => b && s.x >= b.x - pad && s.x <= b.x + b.w + pad && s.y >= b.y - pad && s.y <= b.y + b.h + pad;
+    // A label along a diagonal wall: its turned rectangle (poly), with the same margin; the box around it at 45° covers
+    // the wall, the door and the numbers beside the text.
+    const inTurned = ([a, b, , d]) => {
+      const w = Math.hypot(b.x - a.x, b.y - a.y), h = Math.hypot(d.x - a.x, d.y - a.y);
+      const u = ((s.x - a.x) * (b.x - a.x) + (s.y - a.y) * (b.y - a.y)) / w, v = ((s.x - a.x) * (d.x - a.x) + (s.y - a.y) * (d.y - a.y)) / h;
+      return u >= -pad && u <= w + pad && v >= -pad && v <= h + pad;
+    };
     if (this.dimsView) {
       const it = this.dimBoxes.find((d) => d.drag && inBox(d.textBox));
       if (it) return { type: 'dim', key: `dim:${it.dim.key}`, item: it, moved: !!it.moved };
@@ -1144,7 +1210,7 @@ class Editor {
     // The text drawn last is on top.
     for (let i = this.textBoxes.length - 1; i >= 0; i--) {
       const t = this.textBoxes[i];
-      if (inBox(t) && t.key && t.base && t.center && !insideItsFixture(t)) {
+      if ((t.poly ? inTurned(t.poly) : inBox(t)) && t.key && t.base && t.center && !insideItsFixture(t)) {
         return { type: 'label', key: t.key, kind: t.kind, refId: t.refId, base: t.base, center: t.center, moved: !!offsets[t.key] };
       }
     }
@@ -1157,7 +1223,12 @@ class Editor {
     if (hit.type === 'dim') {
       const t = dimDragTarget(hit.item, dx, dy);
       const move = { key: hit.key };
-      if (t.offset !== undefined) move.offset = t.offset;
+      // (Round 5: in paper mm at the household's own print scale, like a text's below. Before any text was moved the
+      // frame was drawn at 1:60 (printScale), so the first drag is converted from it; else D2's diagonal number, printed
+      // at 1:50, landed a sixth short of where the pointer left it.)
+      const wppm = this.printScale(true), g = hit.item.drag;
+      const conv = g && g.offsetPx > 0 && wppm > 0 && this.view.scale > 0 ? g.offsetPx / (wppm * this.view.scale) : 1;
+      if (t.offset !== undefined) move.offset = { dx: t.offset.dx * conv, dy: t.offset.dy * conv };
       const row = this._dimRowFor(hit.item, t);
       if (row != null) move.dimRow = { measureId: hit.item.dim.key, row };
       return move.offset !== undefined || move.dimRow ? move : null;
@@ -1192,9 +1263,9 @@ class Editor {
     try {
       const p = applyLabelMove(project, { dimRow: { measureId: item.dim.key, row: r } });
       if (p) {
-        const res = buildDimensions(p, this.store.derived, {});
-        const chain = res.chains.find((c) => c.side === item.side);
-        const row = chain && chain.rows[r];
+        // (On the chains of its own part, if the plan has separately drawn parts: core/printlayout.js.)
+        const rows = partDimensions(p, this.store.derived, {}).map((res) => (res.chains.find((c) => c.side === item.side) || { rows: [] }).rows[r]);
+        const row = rows.find((list) => list && list.some((d) => d.key === item.dim.key));
         const me = row && row.find((d) => d.key === item.dim.key);
         ok = !!me && row.every((d) => d === me || !spansOverlap(d, me));
       }
@@ -1242,30 +1313,31 @@ class Editor {
 
   // ---- view ----------------------------------------------------------------------------------
 
-  // The part of the canvas not covered by the bottom panel or by a tool bar floating over its top
-  // (설비 type chips, 메모 pen bar). opts.panel = false: as if the bottom panel were closed.
+  // The part of the canvas not covered by the bottom panel or by what floats over its top: the canvas
+  // buttons ([↻ 회전] … [전체 보기]) and a tool bar (설비 type chips, 메모 pen bar). The tool hint line, which
+  // ended about where the buttons do, is gone (2026-10-29); the buttons take its place here, so a fitted
+  // plan keeps its size and place (the screen texts are laid out for that zoom) and a wall the view moves
+  // to never ends up under them. opts.panel = false: as if the bottom panel were closed.
   visibleArea({ panel: withPanel = true } = {}) {
     const panel = $('#panel');
     const ph = !withPanel || panel.hidden ? 0 : panel.offsetHeight;
     let top = 0;
     const wrapTop = this.wrap.getBoundingClientRect().top;
-    // The tool hint (top left) counts too, so a fitted plan starts below it (0.4.0: the plan's top
-    // wall and its values were drawn under a long hint).
-    for (const bar of this.wrap.querySelectorAll('#hint, .fx-bar, .memo-bar')) {
-      if (bar.hidden || !bar.offsetHeight || (bar.id === 'hint' && !bar.textContent.trim())) continue;
+    for (const bar of this.wrap.querySelectorAll('.view-btns, .fx-bar, .memo-bar')) {
+      if (bar.hidden || !bar.offsetHeight) continue;
       top = Math.max(top, bar.getBoundingClientRect().bottom - wrapTop);
     }
     top = Math.max(0, Math.min(top, this.view.height / 2));
     return { x: 0, y: top, w: this.view.width, h: Math.max(80, this.view.height - ph - top) };
   }
 
-  // Canvas-px rectangles of the elements floating over the canvas (hint, tool bars, view buttons,
-  // S펜 chip, bottom panel): the fixture size readout keeps clear of them. → [{ x, y, w, h }]
+  // Canvas-px rectangles of the elements floating over the canvas (tool bars, view buttons, S펜 chip,
+  // bottom panel): the fixture size readout keeps clear of them. → [{ x, y, w, h }]
   overlayRects() {
     const wrapRect = $('#plan').getBoundingClientRect();   // canvas CSS px
     const out = [];
-    for (const el of this.wrap.querySelectorAll('#hint, #penChip, .view-btns, .fx-bar, .memo-bar, #panel')) {
-      if (el.hidden || !el.offsetHeight || (el.id === 'hint' && !el.textContent.trim())) continue;
+    for (const el of this.wrap.querySelectorAll('#penChip, .view-btns, .fx-bar, .memo-bar, #panel')) {
+      if (el.hidden || !el.offsetHeight) continue;
       const r = el.getBoundingClientRect();
       out.push({ x: r.left - wrapRect.left, y: r.top - wrapRect.top, w: r.width, h: r.height });
     }
@@ -1282,15 +1354,28 @@ class Editor {
       this.view.scale = ZOOM.initial;
       this.view.centerOn({ x: 0, y: 0 }, this.visibleArea());
     }
+    // Fitted into the strip above an open bottom panel: fitted again to the whole canvas when the panels close,
+    // unless the view moves meanwhile (_onPanelChange; round 4 part B check: [전체 보기] with the length panel
+    // open left the plan at a third of its size after [✕ 닫기], since 0.6.8).
+    this._panelFit = this.store && this._anyPanelOpen() ? this._viewNow() : null;
+    this._noteFit();
     this.requestRender();
+  }
+
+  // The view is a fit of the plan to the canvas as it is now (_resize: fitted again when the canvas grows taller).
+  _noteFit() {
+    this._lastFit = this.store ? { view: this._viewNow(), h: this.view.height } : null;
   }
 
   // Pan the least amount so that the world points are visible above the panel.
   // opts.fit: when they do not fit at this zoom, zoom out until they do (centred); never zooms in.
+  // opts.ifHidden (points along a wall or side, in order): leave the view alone while the wall can be seen where
+  // it is (seenInArea); only a hidden one is brought in as above.
   focusWorld(points, center = false, opts = {}) {
     if (!points || !points.length) return;
     const area = this.visibleArea();
     const margin = 60;
+    if (opts.ifHidden && !center && !opts.fit && seenInArea(points.map((p) => this.view.toScreen(p)), area)) return;
     if (opts.fit) {
       const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
       const wb = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
@@ -1350,6 +1435,10 @@ class Editor {
   // (a redo may replay another command than the held one).
   _holdView(anchor, run, applies = null) {
     const store = this.store;
+    // With a bottom panel open this move is recorded (_panelMove): undone, as the panels' own, when they close.
+    const tracked = this._anyPanelOpen();
+    if (tracked) this._panelShiftNow();
+    const start = tracked ? this._viewStart() : null;
     const p0 = store ? safeCall(anchor, null) : null;
     const s0 = p0 ? this.view.toScreen(p0) : null;
     const d0 = store ? planDiagonal(store.project) : 0;
@@ -1360,9 +1449,140 @@ class Editor {
     const s1 = this.view.toScreen(p1);
     this.view.panBy(s0.x - s1.x, s0.y - s1.y);
     const d1 = planDiagonal(store.project);
-    if (d0 > 0 && d1 > 0 && Math.abs(d1 / d0 - 1) > HOLD_ZOOM_STEP) this.view.zoomAt(s0.x, s0.y, d0 / d1);
+    const k = d0 > 0 && d1 > 0 && Math.abs(d1 / d0 - 1) > HOLD_ZOOM_STEP ? d0 / d1 : 1;
+    if (k !== 1) this.view.zoomAt(s0.x, s0.y, k);
+    if (tracked) {
+      const sh = this._panelMove(start);
+      if (sh) sh.holds.push({ p0: { x: p0.x, y: p0.y }, p1: { x: p1.x, y: p1.y }, k });
+    }
     this.requestRender();
     return result;
+  }
+
+  // ---- the view while a bottom panel is open ----
+  // Opening a panel may move the view (_onPanelChange: the tapped wall, window / door or fixture above the
+  // panel, the whole room for the room panel; the next side after [확인 ▶] when the panel hides it). On the
+  // Galaxy Tab the panel takes 302–372 of 655–823 px, so those moves pushed the plan's top walls and values up
+  // under the canvas buttons ([↻ 회전] … [전체 보기]), and the plan stayed there after [✕ 닫기]: a pen tap meant
+  // for a top wall turned the plan (simulation 2026-11-01). Now the view from before the first automatic move
+  // is kept (base), with the holdView moves made while a panel was open (a value re-solving the plan keeps the
+  // measured side on its spot); when the last panel closes, the view is the base again with those holds
+  // replayed on it — what the surveyor would see had the panel never moved the view — as long as the surveyor
+  // did not move it meanwhile (a pan, pinch or wheel, [전체 보기], 회전, 치수선 보기): then their view stays.
+  // A panel handing the shared host over to another (a window tapped with the length panel open) keeps the
+  // record: the plan does not jump back and forth under the pen (_onPanelChange). A new width while a panel is open
+  // (the tablet turned) cannot give the base back as it was: a plan wholly in view then is fitted again, any
+  // other keeps the view the turn left. Last, a plan that was clear of the canvas buttons before the first
+  // automatic move and lies under them now (values grew it upward, the turn) moves down just enough; one that
+  // was wholly in view then and no longer fits so is fitted (as _clearTopBar does for a tool bar).
+
+  // The record of the panels' automatic moves (null when none), dropped when something else moved the view
+  // since the last one (the surveyor, [전체 보기] …): that view is the one to come back to then.
+  _panelShiftNow() {
+    const sh = this._panelShift;
+    if (sh && !this._viewIs(sh.expect)) this._panelShift = null;
+    return this._panelShift;
+  }
+
+  // Before an automatic move: the view, and whether the plan lies below the canvas buttons (clearTop) and wholly
+  // in view without the panel (wholeIn) in it.
+  _viewStart() {
+    const view = this._viewNow();
+    return { view, clearTop: this._topClear(), wholeIn: this._planInView(view) };
+  }
+
+  // After an automatic move with a panel open (start: _viewStart() before it): the record, started at that view
+  // when there was none. → the record, or null when the view did not move
+  _panelMove(start) {
+    if (this._viewIs(start.view)) return null;
+    if (!this._panelShift) {
+      this._panelShift = { base: start.view, holds: [], expect: null, clearTop: start.clearTop, wholeIn: start.wholeIn };
+    }
+    this._panelShift.expect = this._viewNow();
+    return this._panelShift;
+  }
+
+  _viewNow() {
+    return { scale: this.view.scale, ox: this.view.ox, oy: this.view.oy };
+  }
+
+  _viewIs(v) {
+    const w = this.view;
+    return !!v && Math.abs(w.scale - v.scale) <= 1e-9 * Math.max(1, v.scale) && Math.abs(w.ox - v.ox) < 0.01 && Math.abs(w.oy - v.oy) < 0.01;
+  }
+
+  _anyPanelOpen() {
+    return !!(this.panel.isOpen || this.openingPanel.isOpen || (this.fixtureTool && this.fixtureTool.panel.isOpen));
+  }
+
+  // focusWorld for a bottom panel (opts as there): the view before the first such move is kept (see above).
+  _panelFocus(points, opts = {}) {
+    if (!this.store || !this._anyPanelOpen()) return;
+    this._panelShiftNow();
+    const start = this._viewStart();
+    this.focusWorld(points, false, opts);
+    this._panelMove(start);
+  }
+
+  // The last bottom panel has closed: back to the view from before the panels moved it (see above).
+  _restorePanelView() {
+    const sh = this._panelShift;
+    if (!sh || this._anyPanelOpen()) return;
+    this._panelShift = null;
+    if (!this.store) return;
+    const v = this.view;
+    if (!this._viewIs(sh.expect)) {
+      // The surveyor moved the view meanwhile: their view stays. Only where they just moved it (no zoom) and the
+      // plan, clear of the canvas buttons before the panels moved it, still lies under them: down just enough
+      // (round 4 part B check: moved by two fingers 60 / 90 px after the panel's move, 'room:r1' stayed under
+      // [↻ 회전] and wall e2 under [치수선 보기], more of it the panel's move than theirs).
+      if (sh.clearTop && sh.expect && Math.abs(v.scale - sh.expect.scale) <= 1e-9 * Math.max(1, sh.expect.scale) && !this._topClear()) {
+        v.panBy(0, this.visibleArea({ panel: false }).y - this._planTop());
+        this.requestRender();
+      }
+      return;
+    }
+    const b = projectBounds(this.store.project);
+    if (sh.base === 'fit') {
+      if (b) { v.fitBounds(b, this.visibleArea({ panel: false }), this.dimsView ? 120 : 56); this._noteFit(); }
+    } else if (sh.base) {
+      v.scale = sh.base.scale; v.ox = sh.base.ox; v.oy = sh.base.oy;
+      for (const h of sh.holds) {
+        const s0 = v.toScreen(h.p0), s1 = v.toScreen(h.p1);
+        v.panBy(s0.x - s1.x, s0.y - s1.y);
+        if (h.k !== 1) v.zoomAt(s0.x, s0.y, h.k);
+      }
+    }
+    if (sh.clearTop && !this._topClear()) {
+      const area = this.visibleArea({ panel: false });
+      v.panBy(0, area.y - this._planTop());
+      if (b && sh.wholeIn && !this._planInView(this._viewNow())) { v.fitBounds(b, area, this.dimsView ? 120 : 56); this._noteFit(); }
+    }
+    this.requestRender();
+  }
+
+  // The whole plan lies in the canvas without the bottom panel and below its buttons, in the view v
+  // ({ scale, ox, oy }) at the view's present size (_resize: a plan wholly in view is kept so).
+  _planInView(v) {
+    const b = this.store && projectBounds(this.store.project);
+    if (!b) return false;
+    const area = this.visibleArea({ panel: false });
+    const x0 = b.minX * v.scale + v.ox, x1 = b.maxX * v.scale + v.ox;
+    const y0 = b.minY * v.scale + v.oy, y1 = b.maxY * v.scale + v.oy;
+    return x0 >= -1 && x1 <= this.view.width + 1 && y0 >= area.y - 1 && y1 <= area.y + area.h + 1;
+  }
+
+  // Screen y above which the plan draws nothing: its top corner, less TOP_CLEAR_PX (the outer wall's face,
+  // a window's text outside it) or, in 치수선 보기, TOP_CLEAR_DIMS_PX (the dimension rows above the plan).
+  _planTop() {
+    const b = this.store && projectBounds(this.store.project);
+    if (!b) return Infinity;
+    return this.view.toScreen({ x: b.minX, y: b.minY }).y - (this.dimsView ? TOP_CLEAR_DIMS_PX : TOP_CLEAR_PX);
+  }
+
+  // The plan lies below what floats over the top of the canvas (the canvas buttons, a tool bar).
+  _topClear() {
+    return this._planTop() >= this.visibleArea({ panel: false }).y - 0.5;
   }
 
   // World points of an opening ('o:<id>') or a fixture ('f:<id>'), for focusWorld.
@@ -1390,8 +1610,9 @@ class Editor {
     if (edgeId && edgeId !== this.lastFocusedEdge && this.store) {
       const e = this.store.project.edges.find((x) => x.id === edgeId);
       const nodes = e ? this.store.project.nodes.filter((n) => n.id === e.a || n.id === e.b) : [];
-      // Wait for the panel layout so its height is known.
-      requestAnimationFrame(() => this.focusWorld(nodes));
+      // Wait for the panel layout so its height is known. Only a wall that cannot be seen where it is moves
+      // the view (SEEN_INSET_PX): one in view stays under the finger.
+      requestAnimationFrame(() => this._panelFocus(nodes, { ifHidden: true }));
     }
     this.lastFocusedEdge = edgeId;
     // The room panel (a tap in a room or on its name): the whole room in view above the panel.
@@ -1399,7 +1620,7 @@ class Editor {
     if (roomId && roomId !== this.lastFocusedRoom && this.store) {
       const dr = ((this.store.derived && this.store.derived.rooms) || []).find((r) => r.roomId === roomId);
       const pts = dr && dr.face && Array.isArray(dr.face.points) ? dr.face.points : [];
-      if (pts.length) requestAnimationFrame(() => this.focusWorld(pts, false, { fit: true }));
+      if (pts.length) requestAnimationFrame(() => this._panelFocus(pts, { fit: true }));
     }
     this.lastFocusedRoom = roomId;
     // The window/door or fixture being edited stays visible above the panel.
@@ -1407,9 +1628,30 @@ class Editor {
       : this.fixtureTool.panel.isOpen ? `f:${this.fixtureTool.panel.fixtureId}` : null;
     if (itemKey && itemKey !== this.lastFocusedItem && this.store) {
       const pts = this._itemPoints(itemKey);
-      if (pts.length) requestAnimationFrame(() => this.focusWorld(pts));
+      if (pts.length) requestAnimationFrame(() => this._panelFocus(pts));
     }
     this.lastFocusedItem = itemKey;
+    // Every panel closed: the view the panels moved goes back (_restorePanelView) as soon as the task that closed
+    // it is done — before the next frame and the next tap. A panel closed for another that opens in the same task
+    // (OpeningPanel ctx.onOpen and FixturePanel ctx.beforePanelOpen close the others first; the fixture panel's
+    // [벽 길이 ▶] closes itself and opens the length panel) is a hand-over: the view stays, and comes back when
+    // the last one closes.
+    // A fit made while a panel was open ([전체 보기], 치수선 보기: fitAll, _panelFit) is made again for the whole canvas.
+    if ((this._panelShift || this._panelFit) && !this._restoreQueued && !this._anyPanelOpen()) {
+      this._restoreQueued = true;
+      queueMicrotask(() => {
+        this._restoreQueued = false;
+        if (this._anyPanelOpen()) return;
+        const fit = this._panelFit;
+        this._panelFit = null;
+        if (fit && this.store && this._viewIs(fit)) {
+          this._panelShift = null;
+          this.fitAll();
+          return;
+        }
+        if (this._panelShift) this._restorePanelView();
+      });
+    }
     this.requestRender();
   }
 
@@ -1445,8 +1687,30 @@ class Editor {
     const oldW = this.view.width, oldH = this.view.height;
     const keep = this.store && !this.root.hidden && oldW > 1 && oldH > 1 && Math.abs(w - oldW) >= 2
       ? this._viewBeforeResize(oldW, oldH) : null;
+    // With a bottom panel open the move is recorded (_panelMove): the view from before the panels cannot come
+    // back at the new width; a plan wholly in view then is fitted again when they close (_restorePanelView).
+    const open = !!keep && this._anyPanelOpen();
+    const shift = open ? this._panelShiftNow() : null;
+    const start = open ? this._viewStart() : null;
+    // Wholly in view as the surveyor had it: before the panels' first move (the record's start), else now.
+    const wasIn = open && (shift ? shift.wholeIn : start.wholeIn);
     this.view.setSize(w, h);
     if (keep) this._viewAfterResize(keep);
+    if (open) {
+      const sh = this._panelMove(start);
+      if (sh) { sh.base = wasIn ? 'fit' : null; sh.holds = []; }
+    }
+    // A fit made on a shorter canvas — the on-screen keyboard up — stays a fit when the canvas grows taller again (the
+    // keyboard down), unless the view moved since: a panel closed with the keyboard up was fitted into the strip the
+    // keyboard left, at a sixth of its size, and stayed so (round 4 part B check; _lastFit).
+    const fit = this._lastFit;
+    if (!keep && fit && this.store && !this.root.hidden && h > fit.h + 40 && this._viewIs(fit.view) && !this._anyPanelOpen()) {
+      const b = projectBounds(this.store.project);
+      if (b) {
+        this.view.fitBounds(b, this.visibleArea(), this.dimsView ? 120 : 56);
+        this._noteFit();
+      }
+    }
     this._placeToolBars();
     this.dpr = dpr;
     // Setting the canvas size clears it; draw now so the frame being painted is not blank
@@ -1456,7 +1720,7 @@ class Editor {
   }
 
   // Before the view takes a new width: the world point at the middle of the free area, and whether the
-  // whole plan was in view. (The panel and hint have their new sizes already; the view the old ones.)
+  // whole plan was in view. (The panel has its new size already; the view the old one.)
   // "In view" and the fit below count the canvas without the bottom panel (recheck 2026-10-25: turned with
   // the length panel open, the plan was fitted into the strip above the panel, at half size in landscape,
   // and stayed that small after the panel closed); the middle kept is the middle of what is seen.
@@ -1675,6 +1939,38 @@ function rotateToastText(turns) {
   return `도면을 오른쪽으로 90° 회전했습니다. 원래대로 하려면 [↻ 회전]을 ${['', '한', '두', '세'][left]} 번 더 누르세요.`;
 }
 
+// Screen points along a wall or side (in order) can be seen where they are: at least half of their length, or
+// SEEN_PART_PX of it, lies `inset` or more inside the area { x, y, w, h } (Editor.focusWorld opts.ifHidden).
+// One point (or a wall of no length): that point inside.
+function seenInArea(pts, area, inset = SEEN_INSET_PX) {
+  if (!pts || !pts.length || !area) return false;
+  const x0 = area.x + inset, x1 = area.x + area.w - inset, y0 = area.y + inset, y1 = area.y + area.h - inset;
+  if (!(x1 > x0 && y1 > y0)) return false;
+  const inside = (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  let total = 0, seen = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (!isFinite(len)) return false;
+    total += len;
+    // The part of a → b inside the rectangle (Liang–Barsky).
+    let t0 = 0, t1 = 1;
+    for (const [p, q] of [[-dx, a.x - x0], [dx, x1 - a.x], [-dy, a.y - y0], [dy, y1 - a.y]]) {
+      if (p === 0) {
+        if (q < 0) { t1 = -1; break; }
+        continue;
+      }
+      const r = q / p;
+      if (p < 0) t0 = Math.max(t0, r);
+      else t1 = Math.min(t1, r);
+    }
+    if (t1 > t0) seen += (t1 - t0) * len;
+  }
+  if (!(total > 0)) return inside(pts[0]);
+  return seen >= Math.min(total / 2, SEEN_PART_PX);
+}
+
 // Diagonal (mm) of the corners' extent, 0 without corners (Editor.holdView).
 function planDiagonal(project) {
   const b = projectBounds(project);
@@ -1719,14 +2015,16 @@ function openProject(project, opts = {}) {
 
 // Registered only off localhost, or with ?sw=1, so that development reloads always get fresh files.
 // The update flow itself (wait, [지금 적용], SKIP_WAITING, reload) lives in io/swclient.js.
+// → true when the worker was registered
 function setupServiceWorker() {
-  if (!('serviceWorker' in navigator)) return;
+  if (!('serviceWorker' in navigator)) return false;
   const host = location.hostname;
   const local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.localhost');
   const forced = new URLSearchParams(location.search).get('sw') === '1';
-  if (local && !forced) return;
+  if (local && !forced) return false;
   registerServiceWorker('./sw.js');
   onUpdateAvailable(({ apply }) => showUpdateBanner(apply));
+  return true;
 }
 
 // "새 버전이 있습니다 [지금 적용] [나중에]": a strip at the top that moves the screen down instead of
@@ -1907,8 +2205,12 @@ async function start() {
   await list.refresh();
 }
 
-setupServiceWorker();
+const swRegistered = setupServiceWorker();
 start().catch((err) => {
   console.error('start failed', err);
   toast('앱을 시작하지 못했습니다. 새로고침해 주세요.', { type: 'error', ms: 0 });
 });
+// The output font (ui/paperfont.js) in the background, a little after the start, so the first [출력] does
+// not wait for it; on a first visit only once the service worker serves it from the offline cache (else
+// the 1.4 MB file would be downloaded twice).
+preloadPaperFont({ waitForWorker: swRegistered && !navigator.serviceWorker.controller });

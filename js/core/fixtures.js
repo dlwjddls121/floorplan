@@ -20,7 +20,9 @@
 //   - fullW   an UNMEASURED length that was drawn shorter to fit its room side (the default 1800 of a
 //             sink on a 1500 side): the length to come back to when the side gets longer. null when
 //             the fixture is drawn at its full length.
-//   - fullD   (columns only) the same for an unmeasured depth drawn shorter to fit the room.
+//   - fullD   the same for an unmeasured depth drawn shorter to fit the room (columns and stairs: the room
+//             in front; every other wall fixture: only a wall standing in the room that reaches a quarter of
+//             its depth at most into it, round 5).
 //   - dropShare (wall fixtures with an UNMEASURED length that nearly fills its room side when placed,
 //             review 예시 세대 A #23): where it was dropped, as the share of the side's whole length (0..1)
 //             counted in the direction of its wall edge from node a to node b (a 도면 돌리기 keeps it).
@@ -70,7 +72,7 @@
 //
 // Everything here is pure: inputs are never mutated.
 import { nextId } from './graph.js';
-import { innerCorners } from './dims.js';
+import { innerCorners, wallPolygons } from './dims.js';
 import { pointInPolygon } from './geom.js';
 
 // Types in the order the chooser shows them. w = along the wall, d = depth (mm).
@@ -246,8 +248,9 @@ export function normalizeFixture(f) {
     along: isNum(f.along) ? Math.min(1, Math.max(0, f.along)) : null,
     fullW: !measured.w && isNum(f.fullW) && f.fullW > w && f.fullW <= MAX_FIXTURE_MM ? f.fullW : null,
   };
-  // Only columns and stairs shorten their depth to fit (older records never have it).
-  if (keepsInRoom(type) && !measured.d && isNum(f.fullD) && f.fullD > d && f.fullD <= MAX_FIXTURE_MM) out.fullD = f.fullD;
+  // A depth drawn shorter to fit (columns and stairs since 0.2; every wall fixture in front of a wall standing in
+  // its room since round 5; older records never have it).
+  if (!measured.d && isNum(f.fullD) && f.fullD > d && f.fullD <= MAX_FIXTURE_MM) out.fullD = f.fullD;
   if (type === STAIR_TYPE) out.stairDir = f.stairDir === -1 ? -1 : 1;
   if (info.storage && f.inWall === true) out.inWall = true;
   // Only stored while it applies: a wall fixture whose length is not measured.
@@ -486,7 +489,17 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
   // A column or a stair dropped inside a room must stay in that room: a wall piece whose face toward
   // the fixture belongs to another room or to the outside (a deep stair dropped next to the end of
   // an L's inner wall snapped onto that wall's notch side) is not a candidate.
-  const home = keepsInRoom(size) ? roomAround(project, derived, point) : null;
+  // Every other fixture dropped inside a room stands in that room too (final review 2026-10-28, A2: an
+  // 옷장 dropped in the 드레스룸 near the end of the 안방's wall piece across the 드레스룸's wall was put on
+  // that piece, in the 안방, over the 안방 door's swing).
+  const home = roomAround(project, derived, point);
+  // In the drop room: the smallest room around the point is that room (round 3, 2026-11-01: a room's face
+  // has no holes, so a point inside a room standing free in it, a 드레스룸 in the 안방, counted as in the
+  // 안방, and an 옷장 dropped 60 mm outside the 드레스룸's wall was put inside it, on its wall's far face).
+  const inHome = (pt) => {
+    const r = smallestRoomAt(derived, pt);
+    return !!r && r.roomId === home.dr.roomId;
+  };
   const inSomeRoom = (pt) => ((derived && derived.rooms) || []).some((dr) => dr.face && dr.face.points && pointInPolygon(pt, dr.face.points));
   let best = null;
   for (const wl of walls) {
@@ -524,7 +537,7 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
       const s = wl.s1 - wl.s0 >= w ? Math.min(wl.s1 - w / 2, Math.max(wl.s0 + w / 2, along)) : (wl.s0 + wl.s1) / 2;
       const c = wl.c + side * (wl.t / 2 + Math.min(d / 2, 100));   // just in front of the face
       const at = wl.h ? { x: s, y: c } : { x: c, y: s };
-      if (!pointInPolygon(at, home.dr.face.points)) continue;
+      if (!inHome(at)) continue;
     }
     if (!best || score < best.score) best = { wl, side, rot: r, gap, score, along };
   }
@@ -535,15 +548,35 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
   const { side } = best;
   const { w, d } = sizeOn(wl.h);
   let along = best.along;
-  if (corner) along = snapEnds(walls, wl, side, along, w, d, snapMM);
+  // The corner snap keeps it in the room it was dropped in too (round 2, 2026-10-31: a 싱크대 / 욕조
+  // dropped in the 안방 just below the T where the 화장실 | 안방 wall meets the outer wall was slid to the
+  // 화장실's far corner, across that wall, and shortened to the 화장실's wall: 26 / 18 of 60 drops).
+  // Nor does it slide the fixture's middle out of that room (round 4, 예시 세대 A: a 기타 dropped in the 주방 beside its
+  // right wall, above the 주방 | 거실 line, was slid to the end of the 주방's part under 방2's wall and stood
+  // through that wall in 방2), unless its middle stood out of it where it was put.
+  const middle = (s) => {
+    const c = wl.c + side * (wl.t / 2 + d / 2);
+    return inHome(wl.h ? { x: s, y: c } : { x: c, y: s });
+  };
+  const middleHome = !home || middle(along);
+  const standsHome = (s) => {
+    if (!home) return true;
+    const c = wl.c + side * (wl.t / 2 + Math.min(d / 2, 100));
+    return inHome(wl.h ? { x: s, y: c } : { x: c, y: s }) && (!middleHome || middle(s));
+  };
+  if (corner) along = snapEnds(walls, wl, side, along, w, d, snapMM, standsHome);
   // Collinear wall pieces (a line split by a T-junction) give the same gap, and the first one in the
   // list would win even when the fixture stands over the next piece. Take the piece under its centre:
   // with a T on the fixture's side the two pieces belong to different rooms, and the room side is
   // looked up from this edge (fixtureRoomSide), so a sink dropped right of the T must not land left.
+  // Not a piece whose face toward the fixture belongs to another room (round 4, B6: a 싱크대 dropped in the
+  // 거실 beside the end of its bottom wall, where the 주방's piece of that line goes on under a slanted 구역
+  // 나누기 선, stood in the 주방; behind a real diagonal wall it stood in the next room): the fixture then stays
+  // on its own piece and fitFixtureOnSide keeps it in its room side.
   if (!(along >= wl.s0 - 1e-6 && along <= wl.s1 + 1e-6)) {
     const under = walls.find((p) => p.h === wl.h && Math.abs(p.c - wl.c) < 0.5
       && along >= p.s0 - 1e-6 && along <= p.s1 + 1e-6);
-    if (under) wl = under;
+    if (under && (!home || roomBehind(derived, under.edge, side) === home.dr.roomId)) wl = under;
   }
   const acrossC = wl.c + side * (wl.t / 2 + d / 2);
   return {
@@ -552,6 +585,17 @@ export function snapFixture(project, derived, size, point, { snapMM = 300, rot =
     rot: best.rot,
     wall: wl.edge.id,
   };
+}
+
+// The room whose side runs along wall edge `edge` on its side `side` (+1 = the larger coordinate), as
+// fixtureRoomSide finds it. → room id | null
+function roomBehind(derived, edge, side) {
+  const h = edge.orient === 'h';
+  for (const dr of (derived && derived.rooms) || []) {
+    if ((dr.sides || []).some((s) => s.orient === edge.orient && s.edgeIds.includes(edge.id)
+      && (h ? s.inwardNormal.y : s.inwardNormal.x) * side > 0.5)) return dr.roomId;
+  }
+  return null;
 }
 
 // A fixture dropped farther from every wall than the snap reaches stands free, centred on the drop point
@@ -648,7 +692,8 @@ function boxCrossesWall(wl, b, eps = 1) {
 
 // Slide the fixture along its wall so an end that is within snapMM of a perpendicular wall's face
 // touches it (a sink put "in the corner" ends exactly in the corner).
-function snapEnds(walls, wl, side, along, w, d, snapMM) {
+// ok(along): a shifted place is taken only when it says so (snapFixture: still in the drop room).
+function snapEnds(walls, wl, side, along, w, d, snapMM, ok = null) {
   const face = wl.c + side * (wl.t / 2);
   const band0 = Math.min(face, face + side * d), band1 = Math.max(face, face + side * d);
   const lo = along - w / 2, hi = along + w / 2;
@@ -666,6 +711,7 @@ function snapEnds(walls, wl, side, along, w, d, snapMM) {
       // Do not push the fixture into the wall itself.
       const nlo = lo + c.shift, nhi = hi + c.shift;
       if (nhi > p.c - p.t / 2 + 0.5 && nlo < p.c + p.t / 2 - 0.5) continue;
+      if (ok && !ok(along + c.shift)) continue;
       if (bestShift == null || Math.abs(c.shift) < Math.abs(bestShift)) bestShift = c.shift;
     }
   }
@@ -778,12 +824,20 @@ export function fitFixtureOnSide(project, derived, raw, { keepAlong = false } = 
   let lo, hi;
   if (rs) {
     ({ lo, hi } = rs);
+    ({ lo, hi } = endFaceLimits(project, derived, rs, f, lo, hi));
   } else {
     const lim = wallEndFaces(project, derived, e, sideFromRot(f.rot));
     if (!lim) return raw;
     ({ lo, hi } = lim);
   }
-  const bounded = isFinite(lo) && isFinite(hi);
+  let bounded = isFinite(lo) && isFinite(hi);
+  // An unmeasured length longer than its side, in a niche shallower than the fixture, where the room goes on
+  // past an end of that side: the length goes on past that end (pastOpenEnds).
+  if (rs && bounded && !f.measured.w && !keepsInRoom(f)) {
+    const want = f.fullW != null ? f.fullW : f.w;
+    if (want > hi - lo + 1e-6) ({ lo, hi } = pastOpenEnds(project, derived, rs, f, lo, hi, want));
+    bounded = isFinite(lo) && isFinite(hi);
+  }
   let w = f.w, fullW = f.fullW;
   if (!f.measured.w && bounded) {
     const want = fullW != null ? fullW : f.w;
@@ -813,35 +867,329 @@ export function fitFixtureOnSide(project, derived, raw, { keepAlong = false } = 
       else if (along == null) along = 0.5;
     }
   }
-  const out = { ...raw, [key]: c, w, along, fullW };
-  let d = f.d;
-  if (rs && keepsInRoom(f)) {
-    // A column (or a stair) must not stick out of its room on the front either: an unmeasured depth
-    // is drawn no deeper than the room in front of it (fullD keeps the full depth); a measured one is
-    // kept and reported (checks-full.js 'fixtureDeep' / 'stairFit').
-    const avail = depthInRoom(project, derived, rs, c - w / 2, c + w / 2);
-    if (!f.measured.d && isFinite(avail)) {
+  // Its depth and its place across the wall for a centre cc along the side.
+  const across = (cc, cap = Infinity) => {
+    const r = { d: f.d, fullD: undefined, extra: 0, cross: undefined };
+    if (rs && !keepsInRoom(f) && !f.measured.d && (f.fullD != null || cap < f.d - 1e-6)) {
+      // A depth drawn shorter in front of a wall standing in the room (below) comes back first.
       const want = f.fullD != null ? f.fullD : f.d;
-      d = Math.min(want, Math.max(MIN_FIXTURE_MM, avail));
-      out.d = d;
-      out.fullD = d < want - 1e-6 ? want : null;
+      r.d = Math.min(want, Math.max(MIN_FIXTURE_MM, cap));
+      r.fullD = r.d < want - 1e-6 ? want : null;
     }
+    if (rs && keepsInRoom(f)) {
+      // A column (or a stair) must not stick out of its room on the front either: an unmeasured depth
+      // is drawn no deeper than the room in front of it (fullD keeps the full depth); a measured one is
+      // kept and reported (checks-full.js 'fixtureDeep' / 'stairFit').
+      const avail = depthInRoom(project, derived, rs, cc - w / 2, cc + w / 2);
+      if (!f.measured.d && isFinite(avail)) {
+        const want = f.fullD != null ? f.fullD : f.d;
+        r.d = Math.min(want, Math.max(MIN_FIXTURE_MM, avail));
+        r.fullD = r.d < want - 1e-6 ? want : null;
+      }
+    }
+    if (rs) {
+      // Its back on the face of the thickest wall piece of the side it reaches over (a 구역 나누기 선 has none).
+      r.extra = backFaceExtra(project, derived, rs, e, cc - w / 2, cc + w / 2);
+      // An in-wall fixture (신발장 built into the wall) goes back into the drawn wall band, as far as the far
+      // face of the thinnest piece behind it (round 4: over a 100 wall joined by a 150 one it went to the
+      // thicker one's far face and stood 25 mm into the room behind the thinner one).
+      const shift = f.inWall ? Math.min(r.d, Math.max(0, rs.band - thinnerBy(project, derived, rs, e, cc - w / 2, cc + w / 2) / 2 + r.extra)) : 0;
+      r.cross = rs.face + rs.side * (r.extra + r.d / 2 - shift);
+    } else if (f.inWall) {
+      // No room on that side: back into the bare wall from its face.
+      const A = (project.nodes || []).find((n) => n.id === e.a);
+      const t = wallThickness(e, derived, project.settings);
+      const side = sideFromRot(f.rot);
+      if (A) r.cross = A[cross] + side * (t / 2 + r.d / 2 - Math.min(r.d, t));
+    }
+    return r;
+  };
+  let at = across(c);
+  // Along the side, clear of what stands in its depth (clearAlong; not a fixture longer than its side). The
+  // place it was put (along, dropShare) stays as it was: this follows from it on every fit.
+  if (rs && bounded && !(min > max + 1e-6)) {
+    const c2 = clearAlong(project, derived, rs, e, f, { lo, hi, w, c, at });
+    if (c2 != null && Math.abs(c2 - c) > 1e-6) { c = c2; at = across(c); }
   }
-  if (rs) {
-    // An in-wall fixture (신발장 built into the wall) goes back into the drawn wall band.
-    const shift = f.inWall ? Math.min(d, Math.max(0, rs.band)) : 0;
-    out[cross] = rs.face + rs.side * (d / 2 - shift);
-  } else if (f.inWall) {
-    // No room on that side: back into the bare wall from its face.
-    const A = (project.nodes || []).find((n) => n.id === e.a);
-    const t = wallThickness(e, derived, project.settings);
-    const side = sideFromRot(f.rot);
-    if (A) out[cross] = A[cross] + side * (t / 2 + d / 2 - Math.min(d, t));
+  // A wall standing in the room in front of it that still reaches into its depth, by a quarter of it at most (C5:
+  // a 600 deep 싱크대 against the 안방's wall beside the 드레스룸 standing 579 mm from that wall stood 21 mm in the
+  // 드레스룸's wall; moving it clear would have taken it 700 mm from where it was put): an unmeasured depth is drawn
+  // that much less deep (fullD keeps it, as a stair's), and it stays where it is (round 5).
+  if (rs && bounded && !keepsInRoom(f) && !f.measured.d && isNum(at.cross)) {
+    const into = standingInto(project, derived, rs, c - w / 2, c + w / 2, at.cross - rs.side * at.d / 2, at.cross + rs.side * at.d / 2);
+    if (into > FLUSH_TOL && into <= at.d / 4 + 1e-6) at = across(c, at.d - into);
   }
+  const out = { ...raw, [key]: c, w, along, fullW };
+  if (at.fullD !== undefined) { out.d = at.d; out.fullD = at.fullD; }
+  if (at.cross !== undefined) out[cross] = at.cross;
   const same = (a, b) => (a == null && b == null) || (a != null && b != null && Math.abs(a - b) < 1e-6);
   if (same(out.x, raw.x) && same(out.y, raw.y) && same(out.w, raw.w) && same(out.along, raw.along)
     && same(out.fullW, raw.fullW) && same(out.d, raw.d) && same(out.fullD, raw.fullD)) return raw;
   return out;
+}
+
+// A room side's wall face is not one line where its pieces differ: a 구역 나누기 선 (no thickness) continued
+// by a wall, or an outer wall continued by a thinner inner one (round 3, 2026-11-01, D6: a 싱크대 against
+// the 주방 | 복도 line went on along the 주방's wall and stood 1455 mm long in half of that wall's band; one
+// against the 주방's left wall ended at that line and reached into the wall beside it). The fixture's back
+// goes to the face of the thickest piece behind its length lo..hi (→ mm further into the room than rs.face),
+// and an end goes to the face of the thickest piece of the neighbouring side across its depth
+// (endFaceLimits → { lo, hi }, narrowed).
+function sideEdgesOf(project, derived, rs) {
+  const dr = ((derived && derived.rooms) || []).find((r) => r.roomId === rs.roomId);
+  const i = dr ? dr.sides.findIndex((s) => s.key === rs.sideKey) : -1;
+  return i < 0 ? null : { dr, i };
+}
+function pieceSpan(project, edge, key) {
+  const nodes = project.nodes || [];
+  const A = nodes.find((n) => n.id === edge.a), B = nodes.find((n) => n.id === edge.b);
+  return A && B ? { A, s0: Math.min(A[key], B[key]), s1: Math.max(A[key], B[key]) } : null;
+}
+function backFaceExtra(project, derived, rs, e, lo, hi) {
+  const at = sideEdgesOf(project, derived, rs);
+  if (!at) return 0;
+  const base = wallThickness(e, derived, project.settings) / 2;   // rs.face is the face of the fixture's own piece
+  let extra = 0;
+  for (const id of at.dr.sides[at.i].edgeIds) {
+    const x = (project.edges || []).find((q) => q.id === id);
+    if (!x || x.kind === 'divider' || x.id === e.id) continue;
+    const sp = pieceSpan(project, x, rs.key);
+    if (!sp || Math.min(hi, sp.s1) - Math.max(lo, sp.s0) <= FLUSH_TOL) continue;
+    extra = Math.max(extra, wallThickness(x, derived, project.settings) / 2 - base);
+  }
+  return extra > FLUSH_TOL ? extra : 0;
+}
+// How much thinner than the fixture's own piece the thinnest wall piece of the side behind its length lo..hi
+// is (an in-wall fixture goes back only as far as that piece's far face). → mm ≥ 0
+function thinnerBy(project, derived, rs, e, lo, hi) {
+  const at = sideEdgesOf(project, derived, rs);
+  if (!at) return 0;
+  const own = wallThickness(e, derived, project.settings);
+  let min = own;
+  for (const id of at.dr.sides[at.i].edgeIds) {
+    const x = (project.edges || []).find((q) => q.id === id);
+    if (!x || x.kind === 'divider' || x.id === e.id) continue;
+    const sp = pieceSpan(project, x, rs.key);
+    if (!sp || Math.min(hi, sp.s1) - Math.max(lo, sp.s0) <= FLUSH_TOL) continue;
+    min = Math.min(min, wallThickness(x, derived, project.settings));
+  }
+  return own - min > FLUSH_TOL ? own - min : 0;
+}
+
+// Where along its room side a wall fixture stands clear (fitFixtureOnSide; round 4) → its centre (c when
+// nothing moves it):
+//  - A thicker wall piece of the side reaching under only an end of it, less than a quarter of its length,
+//    does not push its whole back off the face (backFaceExtra): it moves along past that piece's end
+//    instead (예시 세대 A: a 싱크대 against the 거실 | 주방 line over the last 83 mm of 방3's wall stood 148 mm off
+//    the line), when it fits there.
+//  - Within its depth in front of the face, the walls standing in the room (a 드레스룸 standing free in the
+//    안방, a wall stub) and the room's own inner corners (the 주방 of 예시 세대 A going on under 방2's wall) are
+//    passed like the corners of the side: it stays in the stretch of the side, between them, that holds its
+//    centre (a 싱크대 dropped beside the 주방's right wall above the line stood through that wall into 방2's
+//    door; a 욕조 in front of the 드레스룸 stood 18 mm in its wall), when it fits there; otherwise it stays.
+// opts: { lo, hi } the side's stretch, w its length, c its centre now, at its place across (fitFixtureOnSide).
+function clearAlong(project, derived, rs, e, f, { lo, hi, w, c, at }) {
+  const min = lo + w / 2, max = hi - w / 2;
+  let cc = c;
+  if (at.extra > 0) {
+    const side = sideEdgesOf(project, derived, rs);
+    const base = wallThickness(e, derived, project.settings) / 2;
+    const a = cc - w / 2, b = cc + w / 2;
+    let up = 0, down = 0, inside = false;
+    for (const id of side ? side.dr.sides[side.i].edgeIds : []) {
+      const x = (project.edges || []).find((q) => q.id === id);
+      if (!x || x.kind === 'divider' || x.id === e.id) continue;
+      if (wallThickness(x, derived, project.settings) / 2 - base <= FLUSH_TOL) continue;
+      const sp = pieceSpan(project, x, rs.key);
+      const ov = sp ? Math.min(b, sp.s1) - Math.max(a, sp.s0) : 0;
+      if (ov <= FLUSH_TOL) continue;
+      if (ov >= w / 4) { inside = true; break; }
+      if (sp.s0 <= a + FLUSH_TOL) up = Math.max(up, sp.s1 - a);
+      else if (sp.s1 >= b - FLUSH_TOL) down = Math.max(down, b - sp.s0);
+      else { inside = true; break; }
+    }
+    const shift = up && down ? 0 : up || -down;
+    if (!inside && shift && cc + shift >= min - 1e-6 && cc + shift <= max + 1e-6
+      && backFaceExtra(project, derived, rs, e, cc + shift - w / 2, cc + shift + w / 2) === 0) cc += shift;
+  }
+  // Its depth in front of the room's face (an in-wall fixture is partly in its wall).
+  const dr = ((derived && derived.rooms) || []).find((r) => r.roomId === rs.roomId);
+  const d = isNum(at.d) ? at.d : 0;
+  const front = isNum(at.cross) ? at.cross + rs.side * d / 2 : rs.face + rs.side * d;
+  const depth = (front - rs.face) * rs.side;
+  const poly = dr && roomInnerPolygon(dr, project, derived);
+  if (!poly || !(depth > 1)) return cc;
+  const c0 = Math.min(rs.face, front), c1 = Math.max(rs.face, front);
+  const lk = rs.key === 'x' ? 'minX' : 'minY', hk = rs.key === 'x' ? 'maxX' : 'maxY';
+  const lc = rs.cross === 'x' ? 'minX' : 'minY', hc = rs.cross === 'x' ? 'maxX' : 'maxY';
+  const blocked = [];   // [from, to, how deep it reaches into the fixture's depth]
+  for (const wl of standingWalls(project, derived, dr)) {
+    const deep = Math.min(c1, wl.box[hc]) - Math.max(c0, wl.box[lc]);
+    if (deep <= FLUSH_TOL) continue;
+    if (Math.min(hi, wl.box[hk]) - Math.max(lo, wl.box[lk]) > FLUSH_TOL) blocked.push([wl.box[lk], wl.box[hk], deep]);
+  }
+  // The room's own outline: where the depth band in front of the side leaves the room.
+  const cuts = [lo, hi];
+  for (const P of poly) if (P[rs.key] > lo + FLUSH_TOL && P[rs.key] < hi - FLUSH_TOL) cuts.push(P[rs.key]);
+  cuts.sort((p, q) => p - q);
+  const pt = (u, v) => (rs.key === 'x' ? { x: u, y: v } : { x: v, y: u });
+  for (let k = 0; k + 1 < cuts.length; k++) {
+    const u0 = cuts[k], u1 = cuts[k + 1];
+    if (u1 - u0 <= FLUSH_TOL) continue;
+    const u = (u0 + u1) / 2;
+    let out = !pointInPolygon(pt(u, c0 + 1), poly) || !pointInPolygon(pt(u, c1 - 1), poly);
+    for (let i = 0; !out && i < poly.length; i++) {
+      const P = poly[i], Q = poly[(i + 1) % poly.length];
+      if (Math.abs(P[rs.cross] - Q[rs.cross]) > 0.5) continue;           // not parallel to the side
+      if (P[rs.cross] <= c0 + 1 || P[rs.cross] >= c1 - 1) continue;      // not inside its depth
+      if (u > Math.min(P[rs.key], Q[rs.key]) && u < Math.max(P[rs.key], Q[rs.key])) out = true;
+    }
+    if (out) blocked.push([u0, u1, Infinity]);
+  }
+  if (!blocked.length) return cc;
+  // The free stretch holding its centre.
+  let a = lo, b = hi;
+  for (const [s0, s1, deep] of blocked) {
+    if (s1 <= cc + FLUSH_TOL) a = Math.max(a, s1);
+    else if (s0 >= cc - FLUSH_TOL) b = Math.min(b, s0);
+    // Its centre stands in front of it: a wall reaching more than a quarter into its depth (the room's outline:
+    // a 600 deep 기타 against the 주방 | 거실 line in front of the 주방's strip under 방2's wall stood through that
+    // wall, its middle in 방2; round 5) moves it to the nearest stretch of the side where it fits, clear of it,
+    // when there is one; else it stays.
+    else return deep > d / 4 ? nearestClear(blocked, { lo, hi, w, min, max, cc }) : cc;
+  }
+  if (b - a < w - 1e-6) return cc;
+  const lo2 = Math.max(min, a + w / 2), hi2 = Math.min(max, b - w / 2);
+  if (lo2 > hi2 + 1e-6) return cc;
+  const to = Math.min(hi2, Math.max(lo2, cc));
+  // A wall reaching only a little into its depth (a quarter of it at most: 21 mm of a 600 sink beside a
+  // 드레스룸 579 mm from the wall, sketch accuracy) does not move it further than a quarter of its length.
+  const deep = Math.max(0, ...blocked.filter(([s0, s1]) => Math.min(cc + w / 2, s1) - Math.max(cc - w / 2, s0) > FLUSH_TOL).map((x) => x[2]));
+  return Math.abs(to - cc) > w / 4 + 1e-6 && deep <= d / 4 ? cc : to;
+}
+
+// A side shorter than its fixture's unmeasured length, in a niche of its room shallower than the fixture (round 5,
+// 예시 세대 A: the 주방 goes on under 방2's wall as a strip 175 mm deep; a 900 옷장 dropped there against that wall was
+// drawn 400 long, the length of the strip, and stood across the 주방 | 거실 line anyway): its length goes on past an
+// end of the side where the room goes on (a corner turning back, not a wall closing it), as far as no wall stands
+// in its depth (a 구역 나누기 선 is not a wall), so it keeps the size chosen, stays on the wall it was put against
+// and goes through no wall. A room deep enough in front of the side keeps the rule of §7.4 (drawn as long as the
+// side, fullW kept). → { lo, hi } (wider, or as they were)
+function pastOpenEnds(project, derived, rs, f, lo, hi, want) {
+  const d = isNum(f.d) ? f.d : 0;
+  if (!(d > 0) || !(depthInRoom(project, derived, rs, lo, hi) < d - FLUSH_TOL)) return { lo, hi };
+  const dr = ((derived && derived.rooms) || []).find((r) => r.roomId === rs.roomId);
+  const poly = dr && roomInnerPolygon(dr, project, derived);
+  if (!poly) return { lo, hi };
+  const c0 = Math.min(rs.face, rs.face + rs.side * d), c1 = Math.max(rs.face, rs.face + rs.side * d);
+  const lk = rs.key === 'x' ? 'minX' : 'minY', hk = rs.key === 'x' ? 'maxX' : 'maxY';
+  const lc = rs.cross === 'x' ? 'minX' : 'minY', hc = rs.cross === 'x' ? 'maxX' : 'maxY';
+  const pt = (u, v) => (rs.key === 'x' ? { x: u, y: v } : { x: v, y: u });
+  const walls = wallPolygons(project, derived).filter((wp) => Math.min(c1, wp.box[hc]) - Math.max(c0, wp.box[lc]) > FLUSH_TOL);
+  let need = want - (hi - lo);
+  for (const dir of [-1, 1]) {
+    const u = dir < 0 ? lo : hi;
+    if (!pointInPolygon(pt(u + dir * 2, rs.face + rs.side * 2), poly)) continue;   // a corner closing the side
+    let reach = need;
+    for (const wp of walls) {
+      if (dir < 0 && wp.box[hk] <= u + FLUSH_TOL) reach = Math.min(reach, u - wp.box[hk]);
+      else if (dir > 0 && wp.box[lk] >= u - FLUSH_TOL) reach = Math.min(reach, wp.box[lk] - u);
+      else if (dir < 0 ? wp.box[lk] < u - FLUSH_TOL : wp.box[hk] > u + FLUSH_TOL) reach = 0;   // a wall at the corner itself
+    }
+    if (!(reach > FLUSH_TOL)) continue;
+    if (dir < 0) lo -= reach; else hi += reach;
+    need -= reach;
+    if (need <= FLUSH_TOL) break;
+  }
+  return { lo, hi };
+}
+
+// How far (mm) the walls standing in the room (standingWalls) reach into a wall fixture's depth: its back at
+// cross coordinate `back`, its front at `front`, over lo..hi along its room side rs. → mm (0: none)
+function standingInto(project, derived, rs, lo, hi, back, front) {
+  const dr = ((derived && derived.rooms) || []).find((r) => r.roomId === rs.roomId);
+  const lk = rs.key === 'x' ? 'minX' : 'minY', hk = rs.key === 'x' ? 'maxX' : 'maxY';
+  const lc = rs.cross === 'x' ? 'minX' : 'minY', hc = rs.cross === 'x' ? 'maxX' : 'maxY';
+  const c0 = Math.min(back, front), c1 = Math.max(back, front);
+  let into = 0;
+  for (const wl of standingWalls(project, derived, dr)) {
+    if (Math.min(hi, wl.box[hk]) - Math.max(lo, wl.box[lk]) <= FLUSH_TOL) continue;
+    if (Math.min(c1, wl.box[hc]) - Math.max(c0, wl.box[lc]) <= FLUSH_TOL) continue;
+    const near = rs.side > 0 ? wl.box[lc] : wl.box[hc];          // its face toward the fixture's back
+    into = Math.max(into, (front - near) * rs.side);
+  }
+  return into;
+}
+
+// The nearest place along a room side (centre between min and max) where a fixture of length w stands clear of
+// every blocked stretch ([from, to, deep]) → its centre (cc when there is none)
+function nearestClear(blocked, { lo, hi, w, min, max, cc }) {
+  const spans = blocked.map(([s0, s1]) => [s0, s1]).sort((p, q) => p[0] - q[0]);
+  let best = null;
+  let a = lo;
+  for (const [s0, s1] of [...spans, [hi, hi]]) {
+    const b = Math.min(hi, s0);
+    if (b - a >= w - 1e-6) {
+      const l2 = Math.max(min, a + w / 2), h2 = Math.min(max, b - w / 2);
+      if (l2 <= h2 + 1e-6) {
+        const to = Math.min(h2, Math.max(l2, cc));
+        if (best == null || Math.abs(to - cc) < Math.abs(best - cc)) best = to;
+      }
+    }
+    a = Math.max(a, s1);
+  }
+  return best == null ? cc : best;
+}
+
+// The h / v walls standing inside a room (not on its outline): a room standing free in it (its walls), a wall
+// stub. → [{ edge, box }] (box: the drawn wall, dims.wallPolygons)
+// The drawn walls of a derived state, worked out once per state (every wall fixture is fitted after every edit).
+const axisWallBoxes = new WeakMap();   // derived → { project, walls }
+function standingWalls(project, derived, dr) {
+  const ef = derived && derived.edgeFaces;
+  const out = [];
+  if (!dr || !dr.face || !dr.face.points) return out;
+  let hit = derived && typeof derived === 'object' ? axisWallBoxes.get(derived) : null;
+  if (!hit || hit.project !== project) {
+    hit = { project, walls: wallPolygons(project, derived).filter((wp) => wp.orient === 'h' || wp.orient === 'v') };
+    if (derived && typeof derived === 'object') axisWallBoxes.set(derived, hit);
+  }
+  for (const wp of hit.walls) {
+    const pair = ef && typeof ef.get === 'function' ? ef.get(wp.edgeId) : null;
+    if (pair && (pair[0] === dr.faceIndex || pair[1] === dr.faceIndex)) continue;
+    const mid = { x: (wp.box.minX + wp.box.maxX) / 2, y: (wp.box.minY + wp.box.maxY) / 2 };
+    if (!pointInPolygon(mid, dr.face.points)) continue;
+    out.push({ edge: wp.edgeId, box: wp.box });
+  }
+  return out;
+}
+
+function endFaceLimits(project, derived, rs, f, lo, hi) {
+  const at = sideEdgesOf(project, derived, rs);
+  if (!at) return { lo, hi };
+  const { dr, i } = at;
+  const n = dr.sides.length;
+  const d = isNum(f.d) ? f.d : 0;
+  if (!(d > 0)) return { lo, hi };
+  const c0 = Math.min(rs.face, rs.face + rs.side * d), c1 = Math.max(rs.face, rs.face + rs.side * d);
+  const finish = derived.solve && derived.solve.finish;
+  for (const j of [(i + n - 1) % n, (i + 1) % n]) {
+    const s = dr.sides[j];
+    if (!s || j === i || (s.orient !== 'h' && s.orient !== 'v') || s.orient === dr.sides[i].orient) continue;
+    const nk = s.inwardNormal[rs.key];
+    if (Math.abs(nk) < 0.5) continue;
+    const fin = finish && typeof finish.get === 'function' ? Math.max(0, finish.get(`${dr.roomId}:${s.key}`) || 0) : 0;
+    for (const id of s.edgeIds) {
+      const x = (project.edges || []).find((q) => q.id === id);
+      if (!x || x.kind === 'divider') continue;
+      const sp = pieceSpan(project, x, rs.cross);
+      if (!sp || Math.min(c1, sp.s1) - Math.max(c0, sp.s0) <= FLUSH_TOL) continue;
+      const faceK = sp.A[rs.key] + Math.sign(nk) * (wallThickness(x, derived, project.settings) / 2 + fin);
+      if (nk > 0 && faceK > lo + FLUSH_TOL) lo = faceK;
+      else if (nk < 0 && faceK < hi - FLUSH_TOL) hi = faceK;
+    }
+  }
+  return { lo, hi };
 }
 
 // The point (along-wall coordinate) at `share` of the side lo..hi, counted in the direction of the
@@ -903,6 +1251,8 @@ export function roomInnerPolygon(dr, project, derived) {
 // Clear depth in front of a wall fixture's back (from its room side's inner face into the room) over
 // the stretch lo..hi along the wall: up to the nearest inner face of the same room that runs
 // parallel to the wall in front of it. → mm (Infinity when nothing closes it)
+// The walls standing in the room close it too (round 4, C5: a 계단 against the 안방's wall in front of the
+// 드레스룸 standing free in the 안방 went through the 드레스룸's wall).
 export function depthInRoom(project, derived, rs, lo, hi) {
   const dr = ((derived && derived.rooms) || []).find((r) => r.roomId === rs.roomId);
   const poly = dr ? roomInnerPolygon(dr, project, derived) : null;
@@ -915,6 +1265,25 @@ export function depthInRoom(project, derived, rs, lo, hi) {
     if (Math.min(b, hi) - Math.max(a, lo) <= FLUSH_TOL) continue;       // not in front of it
     const dist = (P[rs.cross] - rs.face) * rs.side;
     if (dist > FLUSH_TOL && dist < best) best = dist;
+  }
+  const lk = rs.key === 'x' ? 'minX' : 'minY', hk = rs.key === 'x' ? 'maxX' : 'maxY';
+  const lc = rs.cross === 'x' ? 'minX' : 'minY', hc = rs.cross === 'x' ? 'maxX' : 'maxY';
+  for (const wl of standingWalls(project, derived, dr)) {
+    if (Math.min(hi, wl.box[hk]) - Math.max(lo, wl.box[lk]) <= FLUSH_TOL) continue;
+    const dist = ((rs.side > 0 ? wl.box[lc] : wl.box[hc]) - rs.face) * rs.side;
+    if (dist > FLUSH_TOL && dist < best) best = dist;
+  }
+  return best;
+}
+
+// The smallest room whose walls (face outline) hold the point: a room standing free inside another room
+// counts, not the room around it (faces have no holes). → derived room | null
+function smallestRoomAt(derived, pt) {
+  let best = null;
+  for (const dr of (derived && derived.rooms) || []) {
+    const pts = dr.face && dr.face.points;
+    if (!pts || !pointInPolygon(pt, pts)) continue;
+    if (!best || dr.area < best.area) best = dr;
   }
   return best;
 }
@@ -1317,7 +1686,7 @@ export function resizeFixtureBox(project, derived, raw, box) {
     fullW: Math.abs(w - f.w) < 0.5 ? f.fullW : null,
     dropShare: ['minX', 'minY', 'maxX', 'maxY'].some(moved) ? undefined : f.dropShare,
   };
-  if (keepsInRoom(f)) nf.fullD = Math.abs(d - f.d) < 0.5 ? (f.fullD ?? null) : null;
+  if (keepsInRoom(f) || isNum(f.fullD)) nf.fullD = Math.abs(d - f.d) < 0.5 ? (f.fullD ?? null) : null;
   if (nf.wall) nf = fitFixtureOnSide(project, derived, { ...nf, along: null });
   else nf = keepColumnInRoom(project, derived, nf);
   return nf;
@@ -1944,8 +2313,7 @@ export function installFixtures(DocStore) {
       }
       let nf = resizeFixture(p, cur, w, d, this.derived);
       nf = { ...nf, type, measured, fullW: wSet ? null : cur.fullW };
-      if (keepsInRoom(type)) nf.fullD = ('d' in patch || measured.d || type !== cur.type) ? null : (cur.fullD ?? null);
-      else nf.fullD = null;
+      nf.fullD = ('d' in patch || measured.d || type !== cur.type) ? null : (cur.fullD ?? null);
       // The way up of a stair ([방향 바꾸기]); other types have no direction.
       if (isStair(type)) nf.stairDir = 'stairDir' in patch ? (patch.stairDir === -1 ? -1 : 1) : (cur.stairDir === -1 ? -1 : 1);
       else nf.stairDir = undefined;
@@ -1987,6 +2355,8 @@ export function installFixtures(DocStore) {
       // A column on a wall of the other orientation swaps w / d to keep its 가로 × 세로; a column or
       // a stair may have its depth shortened to fit the room in front of its new wall (fullD).
       if (keepsInRoom(cur)) Object.assign(fixtures[i], { d: placed.d, measured: placed.measured, fullD: placed.fullD ?? null });
+      // Any other fixture: a depth drawn shorter in front of a wall standing in its old room comes back (round 5).
+      else if (placed.fullD != null || isNum(cur.fullD)) Object.assign(fixtures[i], { d: placed.d, fullD: placed.fullD ?? null });
       // A stair moved to the opposite wall keeps pointing the same way on the plan.
       if (isStair(cur)) fixtures[i] = keepStairWay(cur, fixtures[i]);
       fixtures[i] = withoutWallPin(fixtures[i]);
@@ -2050,6 +2420,8 @@ export function installFixtures(DocStore) {
       // On a wall: inside the room side it now stands on (R3: the turn keeps it in the room); free: off
       // a diagonal wall of its room.
       let nf = { ...p.fixtures[i], ...placed, along: null, dropShare: undefined };
+      // A depth drawn shorter on its old wall comes back first (the new place is fitted again; round 5).
+      if (!cur.measured.d && isNum(cur.fullD)) nf = { ...nf, d: cur.fullD, fullD: null };
       if (nf.wall) nf = fitFixtureOnSide(p, this.derived, nf);
       else nf = keepColumnInRoom(p, this.derived, nf, { project: p, derived: this.derived, fixture: p.fixtures[i] });
       const fixtures = p.fixtures.slice();
@@ -2145,7 +2517,10 @@ export function placeFixture(project, derived, f, point, snapMM, rot = null) {
     const d = !m.d && isNum(f.fullD) ? f.fullD : f.d;
     return keepColumnInRoom(project, derived, { ...f, x: point.x, y: point.y, rot: r, wall: null, w, d, along: null, fullW: null, fullD: null, dropShare: undefined });
   }
-  // Kept off a diagonal wall of the room it is dropped in (keepColumnInRoom → keepOffSlants).
-  return keepColumnInRoom(project, derived, { ...f, x: point.x, y: point.y, rot: r, wall: null, w, along: null, fullW: null, dropShare: undefined });
+  // Kept off a diagonal wall of the room it is dropped in (keepColumnInRoom → keepOffSlants). A depth drawn
+  // shorter on a wall comes back (round 5).
+  const rec = { ...f, x: point.x, y: point.y, rot: r, wall: null, w, along: null, fullW: null, dropShare: undefined };
+  if (!m.d && isNum(f.fullD)) Object.assign(rec, { d: f.fullD, fullD: null });
+  return keepColumnInRoom(project, derived, rec);
 }
 const placeOn = placeFixture;

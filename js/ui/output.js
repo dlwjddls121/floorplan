@@ -1,6 +1,7 @@
 // [출력] — A4 output of the drawing (stage C; plan §7).
 //
 //   renderPaper(ctx, project, derived, layout, options)  draws EVERYTHING in paper mode
+//   outputLayout(project, derived, choices, { baseNotes, dpi }) → { layout, notes }: the page of every 종류 (one scale)
 //   produceOutput(project, derived, choices, deps)        → Promise<{ blob, fileName, layout }> (300 dpi)
 //   deliverFile(blob, fileName, { target })               → Promise<{ method: 'download'|'share'|'cancelled'|'ready'|'failed' }>
 //   saveMode(nav) / saveButtons(mode, format)             which save buttons the dialog shows (PC / tablet)
@@ -29,6 +30,10 @@
 // same layout (scale and position), so they overlay exactly; 전체 도면 is 외벽 표시 without the red and the
 // legend, pixel for pixel.
 // [↻ 도면 회전] in the dialog turns the plan itself a quarter turn (ctx.rotate; core/rotate.js).
+// Every text of every kind is measured and drawn in the bundled output font (theme.js PAPER_FONT_STACK,
+// ui/paperfont.js; user 2026-11-01), so a household prints the same on the PC and on the tablet. Each file
+// waits for the font first (produceOutput, at most PAPER_FONT_TIMEOUT_MS; then it is made with the device
+// fonts); the dialog's preview is drawn at once and drawn again when the font arrives.
 //
 // Saving (user 2026-10-24: "저장은 갤러리에 할수도 있어야되고 구글드라이브에 할수도 있어야돼"). Until 0.6.3 [저장]
 // on a tablet only opened the share sheet, so nothing was kept on the tablet and the Gallery never showed
@@ -45,13 +50,14 @@
 // A PC has one [저장] (a download into the Downloads folder; a desktop share sheet does not reach Drive).
 
 import { wallPolygons, finishPolygons, exteriorJointPolygons, installDims, buildDimensions, SPLIT_COMPUTED_NOTES, splitComputedNote } from '../core/dims.js';
-import { computePrintLayout, SCALES } from '../core/printlayout.js';
+import { computePrintLayout, withDpi, SCALES, partDimensions } from '../core/printlayout.js';
 import { drawDimensions } from './draw-dims.js';
 import { drawLabels, drawTitle, drawNotes } from './draw-labels.js';
 import { drawPaperPlanText, paintExterior, trimmedLine } from './render.js';
-import { LINES, COLORS, canvasFont } from './theme.js';
+import { LINES, COLORS, paperFont } from './theme.js';
+import { ensurePaperFont, loadPaperFont, onPaperFontReady, paperFontReady, paperTextWidth } from './paperfont.js';
 import { exteriorIds } from '../core/exterior.js';
-import { PAPER_STYLE, PT_MM } from '../core/printlayout.js';
+import { PAPER_STYLE, PT_MM, paperSmallTexts } from '../core/printlayout.js';
 import { canvasToBlob, buildRasterPdf } from '../io/export.js';
 import { downloadBlob, isDesktopPlatform, isDefaultHouseholdName, householdFilePart } from '../io/fileio.js';
 import { el } from './panel.js';
@@ -77,7 +83,26 @@ const PREVIEW_CSS = { portrait: 300, landscape: 380 };
 export const BOTH_VALUES_NOTE = '괄호 안은 반대쪽 실에서 잰 값입니다.';
 export const PDF_NOTE = '인쇄할 때 "실제 크기(100%)"로 인쇄해야 축척이 맞습니다.';
 
-export const NO_DIMS_NOTE = '치수선 대신, 실마다 잰 안쪽 길이를 실 안의 벽 옆에 적습니다 (치수선 보기를 끈 화면과 같습니다).';
+// Every value inside its own room, at most as small as the room heights (user 2026-10-31, ui/render.js; until then
+// a small room's value could stand just outside its outer wall).
+export const NO_DIMS_NOTE = '치수선 대신, 실마다 잰 안쪽 길이를 실 안의 그 벽 옆에 적습니다. 실이 좁으면 글씨를 줄여 적지만, 천장고(H) 글씨보다 작게 하지는 않습니다.';
+// At 1:150 (user 2026-11-01, Q1) and at a scale picked by hand that draws the plan smaller than [자동] does (question 5,
+// 1안, user 2026-11-07; core/printlayout.js paperSmallTexts, core/printlayout.js PAPER_STYLE.smallValuePt) a value with no free
+// spot at the room heights' size is written smaller, down to 6.5 pt, still inside its own room, so NO_DIMS_NOTE's
+// '천장고(H) 글씨보다 작게 하지는 않습니다' is not true there (r4 part B: 13 of D1's 40 values at 자동 1:150; 예시 세대 A,
+// [자동] 1:60, picked at 1:75: 2 values).
+export const NO_DIMS_NOTE_SMALL = '치수선 대신, 실마다 잰 안쪽 길이를 실 안의 그 벽 옆에 적습니다. 실이 좁으면 글씨를 줄여 적고, 1:150에서는 천장고(H) 글씨보다 작게 적기도 합니다.';
+export const NO_DIMS_NOTE_PICKED = '치수선 대신, 실마다 잰 안쪽 길이를 실 안의 그 벽 옆에 적습니다. 실이 좁으면 글씨를 줄여 적고, 자동보다 도면이 작게 나오는 축척을 고르면 천장고(H) 글씨보다 작게 적기도 합니다.';
+// The scale of NO_DIMS_NOTE_SMALL: core/printlayout.js FALLBACK_SCALE (paperSmallTexts; tests/export.test.html
+// checks the notes agree with the printed values).
+export const NO_DIMS_SMALL_SCALE = 150;
+// The 치수선 없이 note for a page printed at 1:scale (the scale [자동] or the one picked: the layout's; layout: its
+// computePrintLayout result, which tells a scale picked by hand smaller than [자동]'s — without it only 1:150 says so).
+export function noDimsNote(scale, layout = null) {
+  const s = Number(scale);
+  if (s === NO_DIMS_SMALL_SCALE) return NO_DIMS_NOTE_SMALL;
+  return paperSmallTexts(s, layout) ? NO_DIMS_NOTE_PICKED : NO_DIMS_NOTE;
+}
 // 외벽 is marked by hand only (core/exterior.js, user 2026-10-25): the notes say how to mark it.
 export const EXTERIOR_NOTE = '[외벽]으로 표시한 벽을 전체 도면에 빨간색으로 그립니다 (흑백으로 인쇄하면 진한 회색). 표시를 넣거나 빼려면 도면에서 벽을 누르고 아래 창의 [외벽]을 누르세요.';
 export const EXTERIOR_NONE_NOTE = '아직 외벽으로 표시한 벽이 없어 전체 도면과 같게 나옵니다. 도면에서 벽을 누르고 아래 창의 [외벽]을 누르면 외벽으로 표시됩니다.';
@@ -111,9 +136,8 @@ function callDrawer(name, ...args) {
 // ---- notes ---------------------------------------------------------------------------------------
 
 // True when some two-faced dimension shows two different values (then 양쪽 값 adds a note).
-export function hasDifferentPairs(project, derived, res = null) {
-  const r = res || buildDimensions(project, derived, {});
-  return r.dims.concat(r.aligned || []).some((d) => d.alt != null && Math.round(d.alt) !== Math.round(d.value));
+export function hasDifferentPairs(project, derived, sets = null) {
+  return (sets || partDimensions(project, derived, {})).some((r) => r.dims.concat(r.aligned || []).some((d) => d.alt != null && Math.round(d.alt) !== Math.round(d.value)));
 }
 
 // Notes printed for these choices, and the most any choice can print (reserved by the layout).
@@ -122,12 +146,12 @@ export function hasDifferentPairs(project, derived, res = null) {
 // (core/dims.js splitComputedNote: '구역을 나눈 위치' / '벽 위치' / both).
 export function notesForChoices(project, derived, choices, baseNotes = []) {
   const base = (baseNotes || []).filter(Boolean);
-  const res = buildDimensions(project, derived, {});
-  const pairNote = hasDifferentPairs(project, derived, res);
+  const sets = partDimensions(project, derived, {});
+  const pairNote = hasDifferentPairs(project, derived, sets);
   const has = base.some((l) => SPLIT_COMPUTED_NOTES.includes(l));
   // The chains may leave a computed part out (a measured dimension covers the same stretch); 치수선
   // 없이 writes every computed part in brackets, so it needs the note whenever there is one.
-  const chainsNote = has ? null : (res.notes && res.notes.splitNote) || null;
+  const chainsNote = has ? null : splitComputedNote(sets.flatMap((r) => r.dims));
   const allNote = has ? null : splitComputedNote((derived && derived.computedMeasures) || []);
   const splitNote = choices.noDims ? allNote : chainsNote;
   const lines = base.slice();
@@ -253,9 +277,21 @@ export function paperLabelObstacles(dimItems, opts) {
 }
 
 // → the placed labels (core/labels.js placeLabels; [] for 치수선 없이 / 그림만), for tests.
+// The page in two parts (paintPicture, then paintTexts over it; the 외벽 legend last), so the dialog's preview
+// can keep the texts of 전체 도면 for 외벽 표시 (OutputDialog _drawPreview).
 export function renderPaper(ctx, project, derived, layout, options = {}) {
+  const job = pageJob(layout, options);
+  ctx.save();
+  const exterior = paintPicture(ctx, project, derived, job);
+  const labels = paintTexts(ctx, project, derived, job);
+  if (exterior && exterior.size) drawExteriorLegend(ctx, layout, job.o.notes);
+  ctx.restore();
+  return labels;
+}
+
+// The choices of one page (DEFAULT_CHOICES + options) and the draw options of the other packages.
+function pageJob(layout, options) {
   const o = { ...DEFAULT_CHOICES, notes: [], ...(options || {}) };
-  let labels = [];
   if (o.noDims) o.drawingOnly = false;
   // 외벽 표시 is 전체 도면 with the exterior walls marked; 치수선 없이 and 그림만 never mark them.
   if (o.noDims || o.drawingOnly) o.exterior = false;
@@ -274,33 +310,61 @@ export function renderPaper(ctx, project, derived, layout, options = {}) {
       drawingOnly: !!o.drawingOnly, highlight: null, notes: o.notes, includeTitle: !!o.includeTitle,
     },
   };
+  return { o, u, opts, layout };
+}
+
+// What a page draws, with the draw options of each: the plan, or each separately drawn part at its own place on the page
+// (layout.parts, core/printlayout.js). The title, the notes and the 외벽 legend are the page's: once.
+function pageParts(project, derived, job) {
+  const { layout, o, opts } = job;
+  return layout.parts ? layout.parts.map((q) => ({ project: q.project, derived: q.derived, opts: pageJob(q.layout, o).opts })) : [{ project, derived, opts }];
+}
+
+// The picture: the white page, the walls (외벽 표시: the exterior ones red), 실 아님 spaces, fixtures, openings and
+// 구역 나누기 선 (all of 그림만). → the walls drawn red: Set of wall ids | null
+function paintPicture(ctx, project, derived, job) {
+  const { o, u, layout } = job;
   ctx.save();
   ctx.fillStyle = '#FFFFFF';
   ctx.fillRect(0, 0, layout.paperRect.w * u, layout.paperRect.h * u);
+  let exterior = null;
   if (project && derived) {
-    const exterior = o.exterior ? exteriorIds(project, derived) : null;
-    const redWalls = drawPaperWalls(ctx, project, derived, opts, exterior);
-    callDrawer('drawNotRoomSpaces', ctx, project, derived, opts);
-    callDrawer('drawFixtures', ctx, project, derived, opts);
-    callDrawer('drawOpenings', ctx, project, derived, opts);
-    drawPaperDividers(ctx, project, derived, opts, redWalls);
-    if (o.noDims) {
-      try { drawPaperPlanText(ctx, project, derived, opts); } catch (err) { console.error('[output] plan text failed', err); }
-      if (o.includeTitle) drawTitle(ctx, project, derived, opts);
-      drawNotes(ctx, project, derived, opts);
-      if (o.showMemo) callDrawer('drawMemo', ctx, project, derived, opts);
-    } else if (!o.drawingOnly) {
-      const dimItems = drawDimensions(ctx, project, derived, opts) || [];
-      const { obstacles, nameObstacles, thinLines } = paperLabelObstacles(dimItems, opts);
-      labels = drawLabels(ctx, project, derived, { ...opts, obstacles, nameObstacles, thinLines });
-      if (o.includeTitle) drawTitle(ctx, project, derived, opts);
-      drawNotes(ctx, project, derived, opts);
-      if (o.showMemo) callDrawer('drawMemo', ctx, project, derived, opts);
-      if (exterior && exterior.size) drawExteriorLegend(ctx, layout, o.notes);
+    exterior = o.exterior ? exteriorIds(project, derived) : null;
+    for (const q of pageParts(project, derived, job)) {
+      const redWalls = drawPaperWalls(ctx, q.project, q.derived, q.opts, exterior);
+      callDrawer('drawNotRoomSpaces', ctx, q.project, q.derived, q.opts);
+      callDrawer('drawFixtures', ctx, q.project, q.derived, q.opts);
+      callDrawer('drawOpenings', ctx, q.project, q.derived, q.opts);
+      drawPaperDividers(ctx, q.project, q.derived, q.opts, redWalls);
     }
   }
   ctx.restore();
-  return labels || [];
+  return exterior;
+}
+
+// The texts over the picture: 치수선 없이 the editor's texts (ui/render.js drawPaperPlanText), 전체 도면 and
+// 외벽 표시 the dimensions and labels (the same for both); then the title, the notes and the memo. 그림만: none.
+// They do not depend on 외벽 표시. → the placed labels ([] for 치수선 없이 / 그림만)
+function paintTexts(ctx, project, derived, job) {
+  const { o, opts } = job;
+  if (!project || !derived || (o.drawingOnly && !o.noDims)) return [];
+  const parts = pageParts(project, derived, job);
+  let labels = [];
+  ctx.save();
+  for (const q of parts) {
+    if (o.noDims) {
+      try { drawPaperPlanText(ctx, q.project, q.derived, q.opts); } catch (err) { console.error('[output] plan text failed', err); }
+    } else {
+      const dimItems = drawDimensions(ctx, q.project, q.derived, q.opts) || [];
+      const { obstacles, nameObstacles, thinLines } = paperLabelObstacles(dimItems, q.opts);
+      labels = labels.concat(drawLabels(ctx, q.project, q.derived, { ...q.opts, obstacles, nameObstacles, thinLines }) || []);
+    }
+  }
+  if (o.includeTitle) drawTitle(ctx, project, derived, opts);
+  drawNotes(ctx, project, derived, opts);
+  if (o.showMemo) for (const q of parts) callDrawer('drawMemo', ctx, q.project, q.derived, q.opts);
+  ctx.restore();
+  return labels;
 }
 
 // ---- 외벽 legend ---------------------------------------------------------------------------------
@@ -354,16 +418,19 @@ export function exteriorLegendPlace(ctx, layout, noteLines = []) {
     const size = PAPER_STYLE.notePt * PT_MM;
     const lh = size * PAPER_STYLE.noteLineFactor;
     const bottom = layout.notesRect.y + layout.notesRect.h;
-    ctx.font = canvasFont(size * u);
+    ctx.font = paperFont(size * u);
     lines.forEach((line, i) => {
       const text = line.startsWith('※') ? line : `※ ${line}`;
-      const tw = Math.min(ctx.measureText(text).width / u, pr.w);
+      const w = paperTextWidth(text, size * u, 'normal');
+      const tw = Math.min((w != null ? w : ctx.measureText(text).width) / u, pr.w);
       notes.push({ x1: pr.x + tw, cy: bottom - (lines.length - i - 0.5) * lh, h: lh });
     });
   }
   const textMM = L.textPt * PT_MM;
-  ctx.font = canvasFont(textMM * u);
-  const tw = ctx.measureText(L.text).width / u;
+  ctx.font = paperFont(textMM * u);
+  // (Round 5: from the output font's own advances, the same on every device; paperfont.js.)
+  const w0 = paperTextWidth(L.text, textMM * u, 'normal');
+  const tw = (w0 != null ? w0 : ctx.measureText(L.text).width) / u;
   ctx.restore();
   return exteriorLegendBox(layout, { w: L.swatchW + L.gapMM + tw, h: Math.max(L.swatchH, textMM * 1.2) }, notes);
 }
@@ -381,7 +448,7 @@ export function drawExteriorLegend(ctx, layout, noteLines = []) {
   const cy = box.y + box.h / 2;
   ctx.fillStyle = COLORS.exterior;
   ctx.fillRect(box.x * u, (cy - L.swatchH / 2) * u, L.swatchW * u, L.swatchH * u);
-  ctx.font = canvasFont(L.textPt * PT_MM * u);
+  ctx.font = paperFont(L.textPt * PT_MM * u);
   ctx.fillStyle = '#222222';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
@@ -443,15 +510,66 @@ function makeCanvas(w, h) {
   return c;
 }
 
+// The dialog's remembered preview pages and 전체 도면 / 외벽 표시 text layers (OutputDialog _drawPreview): at most
+// this many of each (a preview canvas is about 0.5–1.6 MB at the tablet's DPR 1.75: at most about 15 MB), the least
+// recently shown dropped. Closing the dialog drops them all.
+const PREVIEW_PAGES = 6;
+const PREVIEW_TEXT_LAYERS = 3;
+// What the preview drew (tests): pages drawn, text layers drawn (each places the labels), pages copied back.
+export const previewStats = { pages: 0, texts: 0, copied: 0 };
+function takeCached(map, key) {
+  const v = map.get(key);
+  if (v) { map.delete(key); map.set(key, v); }
+  return v || null;
+}
+function keepCached(map, key, canvas, max) {
+  map.set(key, canvas);
+  while (map.size > max) {
+    const [oldest, c] = map.entries().next().value;
+    map.delete(oldest);
+    c.width = c.height = 0;
+  }
+}
+function dropPreviewCache(pv) {
+  if (!pv) return;
+  for (const map of [pv.pages, pv.texts]) {
+    for (const c of map.values()) c.width = c.height = 0;
+    map.clear();
+  }
+}
+// src (a canvas) onto g pixel for pixel (same size; 'copy': its pixels as they are, alpha too).
+function copyCanvas(src, g) {
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'copy';
+  g.globalAlpha = 1;
+  g.drawImage(src, 0, 0);
+  g.restore();
+}
+
+// The page of a file (and of the dialog's preview) for these choices: its scale, paper orientation and the plan's
+// place on it, and the ※ notes it prints. One layout for every 종류 of a household (user 2026-11-01, Q3: 전체 도면,
+// 외벽 표시, 치수선 없이 and 그림만 print at one scale and orientation, so they overlay): it depends on the drawing,
+// the notes band reserved for the most any 종류 prints (notesForChoices maxLines), the scale picked and 메모 포함 only.
+// choices: DEFAULT_CHOICES fields; baseNotes: [string] (CHECKS). → { layout, notes: notesForChoices result }
+export function outputLayout(project, derived, choices = {}, { baseNotes = [], dpi = 300 } = {}) {
+  const c = { ...DEFAULT_CHOICES, ...(choices || {}) };
+  const notes = notesForChoices(project, derived, c, baseNotes);
+  const layout = computePrintLayout(project, derived, { scale: c.scale, dpi: dpi > 0 ? dpi : 300, noteLines: notes.maxLines, memo: printsMemo(c) });
+  return { layout, notes };
+}
+
 // Renders the page at `dpi` and encodes it. choices: DEFAULT_CHOICES fields.
-// deps: { baseNotes: [string] (CHECKS), dpi = 300 }. → { blob, fileName, layout }
+// deps: { baseNotes: [string] (CHECKS), dpi = 300, fontWaitMs (PAPER_FONT_TIMEOUT_MS) }.
+// → { blob, fileName, layout, paperFont: true when the texts are in the bundled output font }
 export async function produceOutput(project, derived, choices = {}, deps = {}) {
+  // The output font first (ui/paperfont.js): loaded, or the device fonts after a failure or the wait.
+  const fontOk = await ensurePaperFont(deps.fontWaitMs);
   const c = { ...DEFAULT_CHOICES, ...choices };
   if (c.noDims) c.drawingOnly = false;
   if (c.noDims || c.drawingOnly) c.exterior = false;
   const hasTitle = !!String((project.info && project.info.title) || '').trim();
-  const notes = notesForChoices(project, derived, c, deps.baseNotes);
-  const layout = computePrintLayout(project, derived, { scale: c.scale, dpi: deps.dpi || 300, noteLines: notes.maxLines, memo: printsMemo(c) });
+  const { layout, notes } = outputLayout(project, derived, c, { baseNotes: deps.baseNotes, dpi: deps.dpi || 300 });
   const canvas = makeCanvas(layout.pixelSize.w, layout.pixelSize.h);
   const ctx = canvas.getContext('2d');
   renderPaper(ctx, project, derived, layout, { ...c, includeTitle: c.includeTitle && hasTitle, notes: notes.lines });
@@ -463,7 +581,7 @@ export async function produceOutput(project, derived, choices = {}, deps = {}) {
   }
   // The title turned off on a household that has one: no 세대명 in the file name either.
   const anonymous = hasTitle && !c.includeTitle;
-  return { blob, fileName: outputFileName(project, { drawingOnly: c.drawingOnly, noDims: c.noDims, exterior: c.exterior, format: c.format, anonymous }), layout };
+  return { blob, fileName: outputFileName(project, { drawingOnly: c.drawingOnly, noDims: c.noDims, exterior: c.exterior, format: c.format, anonymous }), layout, paperFont: fontOk };
 }
 
 const MIME = { png: 'image/png', jpg: 'image/jpeg', pdf: 'application/pdf' };
@@ -608,6 +726,15 @@ export async function deliverFile(blob, fileName, opts = {}) {
 
 // ---- dialog --------------------------------------------------------------------------------------
 
+// A note of the dialog (종류 / PDF / warning), each word kept whole on its line (output.css .out-word): the lines
+// break at the spaces only (r4 part B, the tablet: '적습니 / 다', '1:150에 / 서는'; word-break: keep-all alone still
+// broke '[외벽] / 을' and '천장고 / (H)'). Its textContent stays the text. Unchanged text is left as it is.
+function setNoteText(node, text) {
+  const t = String(text || '');
+  if (node.textContent === t && (!t || node.firstElementChild)) return;
+  node.replaceChildren(...(t ? t.split(' ').flatMap((w, i) => [i ? ' ' : null, el('span', { class: 'out-word' }, w)].filter(Boolean)) : []));
+}
+
 const PREFS_KEY = 'floorplan.output.choices';
 function loadPrefs() {
   try {
@@ -670,10 +797,14 @@ export class OutputDialog {
 
   close() {
     if (!this.root) return;
+    if (this._fontWait) { this._fontWait(); this._fontWait = null; }
     document.removeEventListener('keydown', this._onKey, true);
     this.root.remove();
     this.root = null;
     this._made = null;
+    // The remembered preview pages go with the dialog (each opening draws its first preview anew).
+    dropPreviewCache(this._pv);
+    this._pv = null;
   }
 
   _segmented(label, name, options) {
@@ -693,7 +824,7 @@ export class OutputDialog {
         },
       }, text));
     }
-    return el('div', { class: 'out-group' }, el('div', { class: 'out-label' }, label), row);
+    return el('div', { class: `out-group out-row-${name}` }, el('div', { class: 'out-label' }, label), row);
   }
 
   // sub: a small second line inside the label (it does not make the options column taller).
@@ -718,8 +849,10 @@ export class OutputDialog {
       this.refresh();
     });
     this.scaleInfo = el('div', { class: 'out-scale-info' });
-    this.pdfNote = el('p', { class: 'out-note' }, PDF_NOTE);
-    this.kindNote = el('p', { class: 'out-kind-note' }, NO_DIMS_NOTE);
+    this.pdfNote = el('p', { class: 'out-note' });
+    setNoteText(this.pdfNote, PDF_NOTE);
+    this.kindNote = el('p', { class: 'out-kind-note' });
+    setNoteText(this.kindNote, NO_DIMS_NOTE);
     this.warn = el('p', { class: 'out-warn', role: 'status' });
     // [↻ 도면 회전]: the plan itself turns (the editor too); not an undo step, four presses give it back.
     this.rotateHint = el('span', { class: 'out-rotate-hint' });
@@ -755,7 +888,7 @@ export class OutputDialog {
         SAVE_TEXT.driveHint.slice(0, cut), el('span', { class: 'out-nowrap' }, SAVE_TEXT.driveHint.slice(cut))));
     }
     const saveNote = labels.note ? el('p', { class: 'out-save-note' }, labels.note) : null;
-    const checks = el('div', { class: 'out-group' },
+    const checks = el('div', { class: 'out-group out-row-checks' },
       el('div', { class: 'out-label' }, '선택'),
       el('div', { class: 'out-checks' },
         this._check('extensionLines', '치수 보조선'),
@@ -774,7 +907,7 @@ export class OutputDialog {
           this.kindNote,
           this._segmented('형식', 'format', [['png', 'PNG'], ['jpg', 'JPG'], ['pdf', 'PDF']]),
           checks,
-          el('div', { class: 'out-group' }, el('div', { class: 'out-label' }, '축척'), this.scaleSelect),
+          el('div', { class: 'out-group out-row-scale' }, el('div', { class: 'out-label' }, '축척'), this.scaleSelect),
           this.pdfNote,
           this.warn)),
       el('div', { class: `dialog-buttons out-buttons out-mode-${this.saveMode}` },
@@ -787,11 +920,54 @@ export class OutputDialog {
     this.host.append(this.root);
   }
 
-  // Layout for the current choices (the same one [저장] uses, at another dpi).
+  // Layout for the current choices (the same one [저장] uses, at another dpi: outputLayout).
   _layout(project, derived, dpi) {
-    const notes = notesForChoices(project, derived, this.choices, this._baseNotes(project, derived));
-    const layout = computePrintLayout(project, derived, { scale: this.choices.scale, dpi, noteLines: notes.maxLines, memo: printsMemo(this.choices) });
-    return { layout, notes };
+    return outputLayout(project, derived, this.choices, { baseNotes: this._baseNotes(project, derived), dpi });
+  }
+
+  // Draws the preview page into g (the preview canvas, already sized to the layout's pixels): as renderPaper draws
+  // it, but remembered for this state while the dialog is open (final review round 4, D1 at 1:150: placing the
+  // window / door labels of a big household takes 1–2.4 s on a PC, about 3–8 s on the tablet, and every tap on a
+  // 종류, a format or a choice drew the whole preview again):
+  //   - a page already drawn (the same state, 종류, choices, notes, scale and size; the format does not change it)
+  //     is copied back at once;
+  //   - the texts of 전체 도면 are those of 외벽 표시 (only the red walls and the legend differ): drawn once on a
+  //     clear layer over the picture, they are laid over the other's picture at once.
+  // The files (produceOutput) are always drawn whole (renderPaper). → nothing
+  _drawPreview(g, project, derived, layout, options) {
+    const job = pageJob(layout, options);
+    const o = job.o;
+    const canvas = g.canvas, w = canvas.width, h = canvas.height;
+    let pv = this._pv;
+    if (!pv || pv.project !== project || pv.derived !== derived) {
+      dropPreviewCache(pv);
+      pv = this._pv = { project, derived, pages: new Map(), texts: new Map() };
+    }
+    const rect = (r) => (r ? [r.x, r.y, r.w, r.h].map((v) => Math.round(v * 1000) / 1000) : null);
+    const textsKey = JSON.stringify([o.noDims ? 'nodims' : o.drawingOnly ? 'drawing' : 'full', w, h, layout.dpi, layout.scale, layout.orientation,
+      rect(layout.planRect), rect(layout.titleRect), rect(layout.notesRect), !!o.extensionLines, !!o.bothValues, !!o.showMemo, !!o.includeTitle,
+      o.notes || [], paperFontReady()]);
+    const pageKey = JSON.stringify([!!o.exterior, textsKey]);
+    const kept = takeCached(pv.pages, pageKey);
+    if (kept) { copyCanvas(kept, g); previewStats.copied++; return; }
+    previewStats.pages++;
+    g.save();
+    const exterior = paintPicture(g, project, derived, job);
+    if (!o.drawingOnly) {
+      let layer = takeCached(pv.texts, textsKey);
+      if (!layer) {
+        previewStats.texts++;
+        layer = makeCanvas(w, h);
+        paintTexts(layer.getContext('2d'), project, derived, job);
+        keepCached(pv.texts, textsKey, layer, PREVIEW_TEXT_LAYERS);
+      }
+      g.drawImage(layer, 0, 0);
+    }
+    if (exterior && exterior.size) drawExteriorLegend(g, layout, o.notes);
+    g.restore();
+    const copy = makeCanvas(w, h);
+    copyCanvas(canvas, copy.getContext('2d'));
+    keepCached(pv.pages, pageKey, copy, PREVIEW_PAGES);
   }
 
   refresh() {
@@ -814,14 +990,6 @@ export class OutputDialog {
       input.disabled = off;
       input.closest('.out-check').classList.toggle('out-check-off', off);
     }
-    // 치수선 없이 and 외벽 표시 say what they print.
-    if (c.noDims) this.kindNote.textContent = NO_DIMS_NOTE;
-    else if (c.exterior) {
-      let none = false;
-      try { none = !(derived && exteriorIds(project, derived).size); } catch (_) { none = false; }
-      this.kindNote.textContent = none ? EXTERIOR_NONE_NOTE : EXTERIOR_NOTE;
-    }
-    this.kindNote.hidden = !(c.noDims || c.exterior);
     if (this.titleNote) this.titleNote.hidden = !(this.hasTitle && !c.includeTitle && !c.drawingOnly);
     // Nothing drawn yet: nothing to turn (as the editor's [↻ 회전]).
     if (this.rotateBtn) this.rotateBtn.disabled = !(project.nodes && project.nodes.length);
@@ -837,13 +1005,25 @@ export class OutputDialog {
       return { land, cssW, cssH: (cssW * lay.paperRect.h) / lay.paperRect.w, dpi: (cssW * dpr * 25.4) / lay.paperRect.w };
     };
     this.scaleSelect.disabled = false;
+    // Laid out once; a landscape page is the same layout at its own preview dpi (printlayout.js withDpi: the
+    // place on the page does not depend on the dpi; final review round 3: a household printed at 1:150 was
+    // laid out twice at every tap in the dialog).
     let { layout, notes } = this._layout(project, derived, (PREVIEW_CSS.portrait * dpr * 25.4) / 210);
     const pv = previewFor(layout);
-    if (pv.land) ({ layout, notes } = this._layout(project, derived, pv.dpi));
-    // Scale list with the automatic choice spelled out.
+    if (pv.land) layout = withDpi(layout, pv.dpi);
+    // 치수선 없이 and 외벽 표시 say what they print (치수선 없이 by the scale it prints at: one for every 종류).
+    if (c.noDims) setNoteText(this.kindNote, noDimsNote(layout.scale, layout));
+    else if (c.exterior) {
+      let none = false;
+      try { none = !(derived && exteriorIds(project, derived).size); } catch (_) { none = false; }
+      setNoteText(this.kindNote, none ? EXTERIOR_NONE_NOTE : EXTERIOR_NOTE);
+    }
+    this.kindNote.hidden = !(c.noDims || c.exterior);
+    // Scale list with the automatic choice spelled out: the scale [자동] prints (autoBest), also while a
+    // scale is picked by hand (final review round 3: '자동 (1:150)' where [자동] prints 1:75).
     const sel = this.scaleSelect;
     sel.textContent = '';
-    sel.append(el('option', { value: 'auto' }, `자동 (1:${layout.autoScale})`));
+    sel.append(el('option', { value: 'auto' }, `자동 (1:${layout.autoBest || layout.autoScale})`));
     for (const s of SCALES) sel.append(el('option', { value: String(s) }, `1:${s}`));
     sel.value = c.scale === 'auto' ? 'auto' : String(c.scale);
     this.scaleInfo.textContent = `A4 ${layout.orientation === 'landscape' ? '가로' : '세로'} · 축척 1:${layout.scale}`;
@@ -854,7 +1034,7 @@ export class OutputDialog {
     if (layout.empty) warn = '그린 벽이 없습니다. 벽을 그린 뒤에 출력하세요.';
     else if (layout.overflow) warn = `축척 1:${layout.scale}에서는 도면이 A4에 다 들어가지 않습니다. 잘리는 부분이 있을 수 있습니다.`;
     else if (layout.warning) warn = '1:100으로도 A4에 들어가지 않아 1:150으로 출력합니다.';
-    this.warn.textContent = warn;
+    setNoteText(this.warn, warn);
     this.warn.hidden = !warn;
     const canvas = this.previewCanvas;
     canvas.width = layout.pixelSize.w;
@@ -864,11 +1044,21 @@ export class OutputDialog {
     canvas.classList.toggle('out-landscape', pv.land);
     const g = canvas.getContext('2d');
     try {
-      renderPaper(g, project, derived, layout, { ...c, includeTitle: c.includeTitle && this.hasTitle, notes: notes.lines });
+      this._drawPreview(g, project, derived, layout, { ...c, includeTitle: c.includeTitle && this.hasTitle, notes: notes.lines });
     } catch (err) {
       console.error('[output] preview failed', err);
     }
     this.lastLayout = layout;
+    // Drawn before the output font has arrived (ui/paperfont.js; it loads in the background from the app's
+    // start): with the device fonts for now, and once more when it is there. Never waits here.
+    this.previewFont = paperFontReady();
+    if (!this.previewFont && !this._fontWait) {
+      loadPaperFont();
+      this._fontWait = onPaperFontReady(() => {
+        this._fontWait = null;
+        if (this.root) this.refresh();
+      });
+    }
   }
 
   // The file for the current choices (or `override`), without delivering it. → { blob, fileName, layout }
@@ -886,8 +1076,9 @@ export class OutputDialog {
   async _madeFile() {
     const { project, derived } = this._source();
     const c = this.choices;
+    // A file made with the device fonts (the output font not there yet) is made again once it is.
     const key = JSON.stringify([c.drawingOnly, c.noDims, c.exterior, c.format, c.extensionLines, c.includeTitle && this.hasTitle,
-      c.bothValues, c.showMemo, c.scale, this._baseNotes(project, derived)]);
+      c.bothValues, c.showMemo, c.scale, this._baseNotes(project, derived), paperFontReady()]);
     const m = this._made;
     if (m && m.project === project && m.derived === derived && m.key === key) return m.out;
     const out = await this.produce();

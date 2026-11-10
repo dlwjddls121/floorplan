@@ -15,8 +15,8 @@
 //   eraser  (지우개)   rub or tap what should go: a touched wall as its whole straight wall, each touched
 //                      window / door / fixture / memo stroke / 구역 나누기 line; red preview while rubbing,
 //                      one undo step (eraser-ui.js EraserTool, gets every gesture; no panels, no names)
-// In EVERY tool a gesture with the S Pen side button held (g.erase, input.js) is the 지우개's rub (the
-// EraserTool gets it; the tool stays as it was).
+// In EVERY tool a gesture with a pen's side button or eraser end held (g.erase, input.js; not reported by the
+// Galaxy Tab S9 FE, and not mentioned on screen) is the 지우개's rub (the EraserTool gets it; the tool stays).
 // In every tool except 설비, 메모 and 지우개 a tap opens the panel of what is under it: a room NAME (the room
 // panel with its name field open), a window/door, a fixture, a wall (length panel) or a room (room
 // panel), in that order. A window/door counts only on its symbol in the wall band (OpeningTool
@@ -31,30 +31,15 @@
 import { HIT, formatMM } from './theme.js';
 import { roundTo } from './panel.js';
 import { OpeningTool } from './openings-ui.js';
-import { FIXTURE_HINT } from './fixtures-ui.js';
-import { MEMO_HINT } from './memo-ui.js';
-import { ERASER_HINT } from './eraser-ui.js';
 import { wallThickness, finishBeside } from '../core/dims.js';
 import { normalizeFixture, fixtureBounds } from '../core/fixtures.js';
 import { straightenStroke } from '../core/sketch.js';
 
 export const TOOL_NAMES = ['wall', 'select', 'room', 'divider', 'window', 'door', 'fixture', 'memo', 'eraser'];
 
-// Said in the 벽 and 지우개 hints: the S Pen side button rubs out in every tool (input.js g.erase).
-export const PEN_ERASE_HINT = 'S펜 옆 버튼을 누른 채 문지르면 어느 도구에서든 지워집니다.';
-
-export const TOOL_HINTS = {
-  wall: `벽: 손가락이나 S펜으로 벽을 그으세요. 비스듬히 그으면 사선 벽이 됩니다. ${PEN_ERASE_HINT}`,
-  // Kept short (two lines at most on a tablet): the hint floats over the top of the plan.
-  select: '선택: 벽·실·창·문·설비를 누르세요(실 이름을 누르면 이름을 바꿀 수 있습니다). 끌면 옮겨지고(글자도), 옮긴 글자를 길게 누르면 제자리로 돌아갑니다.',
-  room: '실 추가: 직사각형을 끌어서 그리면 가로×세로를 물어봅니다.',
-  divider: '구역 나누기: 벽은 없지만 천장고나 실 이름이 다른 곳(예: 거실·주방 사이)에 선을 그으세요. 점선으로 그려집니다.',
-  window: '창: 벽 위로 끌어다 놓으세요. 벽 끝 가까이 놓으면 끝에 붙습니다. 놓은 창을 누르면 재질·종류·규격을 고릅니다.',
-  door: '문: 벽 위로 끌어다 놓으세요. 실 안쪽으로 열리게 놓이고, [열림 방향]으로 바꿀 수 있습니다.',
-  fixture: FIXTURE_HINT,
-  memo: MEMO_HINT,
-  eraser: `${ERASER_HINT} ${PEN_ERASE_HINT}`,
-};
+// No tool hint line over the plan (tablet test 2026-10-29: "위쪽 문구 삭제"); how each tool works is in
+// 앱_사용방법.md. Nothing on screen mentions the S Pen side button any more: the Galaxy Tab S9 FE's Chrome
+// never reports it (input.js), although the rub stays for pens that do.
 
 const DRAG_SLOP_PX = 8;
 // The tap distance of input.js (a tap is decided by movement only): a gesture that starts on a room

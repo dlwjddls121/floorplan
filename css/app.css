@@ -328,20 +328,9 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 #plan.space-pan { cursor: grab; }
 #plan.panning { cursor: grabbing; }
 
-.hint {
-  position: absolute;
-  top: 8px; left: 10px;
-  max-width: min(640px, calc(100% - 500px)); /* leave room for [↻ 회전] [치수선 보기] [외벽 보기] [전체 보기] */
-  margin: 0;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.88);
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.4;
-  pointer-events: none;
-}
-/* Under [전체 보기] on the right, so it never covers the tool hint on the left. Above the 설비 / 메모 bars. */
+/* No tool hint line over the plan (tablet test 2026-10-29: "위쪽 문구 삭제").
+   The S펜 chip: under [전체 보기] on the right, above the 설비 / 메모 bars (main.js _placeToolBars puts a bar
+   left of the canvas buttons when it fits there, else under them). */
 .pen-chip {
   position: absolute;
   z-index: 7;
@@ -360,12 +349,18 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 .view-btns { position: absolute; top: 8px; right: 10px; display: flex; gap: 6px; z-index: 5; }
 .view-btns .btn { background: rgba(255, 255, 255, 0.95); }
 .view-btns .btn.btn-on { background: #E8F0FE; border-color: #1A73E8; color: #174EA6; }
-/* A narrow plan (the tablet upright: 727 px): the hint goes under the canvas buttons, as wide as the plan
-   (it was 227 px wide and 7 lines tall, mostly under the 설비 bar), and the S펜 chip takes the free space
-   left of the buttons. */
+/* While a bottom panel (length / room, window / door, fixture) is open the canvas buttons are hidden, so a pen tap on
+   a top wall or name the panel's view move brought under them reaches the plan (tablet simulation 2026-11-01: the plan
+   turned). visibility, not display: they keep their place, so the free area above the panel (visibleArea), the
+   toasts and the 설비 / 메모 bars stay where they were; they come back when the panel closes. */
+.canvas-wrap:has(> #panel:not([hidden])) .view-btns { visibility: hidden; }
+/* For a moment after a tap on the plan at their place closed the panel (main.js _holdViewButtons) they take no pointer:
+   a quick second tap there reaches the plan instead of pressing the button that just came back under the pen. */
+.view-btns.view-btns-held, .view-btns.view-btns-held * { pointer-events: none; }
+/* A narrow plan (the tablet upright: 727 px): the S펜 chip takes the free space left of the canvas buttons
+   (the 설비 / 메모 bars go under the buttons there). */
 .canvas-wrap { container: plan / inline-size; }
 @container plan (max-width: 960px) {
-  .hint { top: 64px; max-width: min(640px, calc(100% - 20px)); }
   .pen-chip { top: 8px; left: 10px; right: auto; max-width: calc(100% - 500px); border-radius: 14px; line-height: 1.3; }
 }
 /* ---- checks popover ----------------------------------------------------------------------- */
@@ -377,6 +372,7 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
   z-index: 30;
   width: min(460px, calc(100vw - 24px));
   max-height: 60vh;
+  max-height: 60dvh;   /* the screen as seen (100vh in a Chrome tab on Android is taller than it) */
   overflow-y: auto;
   padding: 8px;
   background: var(--surface);
@@ -423,7 +419,22 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 .panel-title { font-size: 14px; font-weight: 700; color: var(--muted); }
 .panel-note, .panel-hint { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
 .panel-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.panel-close { margin-left: auto; }
+/* [✕ 닫기] (panel.js closeButton): framed and larger than the other panel buttons, with a big ✕ (tablet test
+   2026-10-29: "닫기 버튼을 조금 크게"). It stays in the row of buttons, so it never covers the numpad or the
+   values. */
+.panel-close {
+  margin-left: auto;
+  min-height: 56px;
+  min-width: 116px;
+  padding: 0 18px;
+  gap: 8px;
+  border: 2px solid var(--line-strong);
+  background: #F1F3F5;
+  font-size: 19px;
+  font-weight: 700;
+}
+.panel-close:active:not(:disabled) { background: #DDE3EA; }
+.panel-close-x { font-size: 26px; line-height: 1; }
 
 .field-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .field-wrap { display: flex; align-items: center; gap: 8px; }
@@ -532,7 +543,7 @@ body:has(#editor:not([hidden])) .app-version { display: none; }
 
 /* Under the row of canvas buttons ([↻ 회전] … [전체 보기], 8 + 48 px), and taps go through a toast (only
    its own button takes them): a toast over [↻ 회전] swallowed the next press (review 2026-10-25). In the
-   editor main.js (_placeToasts) sets `top` under the buttons, the tool hint and a shown 설비 / 메모 bar. */
+   editor main.js (_placeToasts) sets `top` under the buttons and a shown 설비 / 메모 bar. */
 .toasts {
   position: fixed;
   top: calc(var(--banner-h) + var(--topbar-h) + 66px);
@@ -596,9 +607,13 @@ body.pen-near .toast-action { pointer-events: none; }
   padding: 16px;
   background: rgba(20, 24, 30, 0.45);
 }
+/* At most the backdrop's own box (the screen as seen, less its 16 px padding). Not calc(100vh - 32px): in a Chrome tab
+   on Android 100vh is the screen with the toolbar hidden (the tablet: 655 + 93.7 css px), though the toolbar never
+   hides here, so the centred 세대 정보 form was 61.7 px taller than the screen, its title and [취소] / [저장] cut off at
+   both ends (round 4 part B check; the 출력 dialog: output.css). */
 .dialog {
   width: min(560px, 100%);
-  max-height: calc(100vh - 32px);
+  max-height: 100%;
   overflow-y: auto;
   padding: 20px;
   border-radius: 16px;

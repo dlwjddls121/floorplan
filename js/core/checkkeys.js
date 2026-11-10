@@ -30,12 +30,62 @@ export function legacyKeyPattern(key) {
   return m ? new RegExp(`^${m[1]}:${escapeRe(m[2])}:${m[3]}:\\d+$`) : null;
 }
 
+// The 'id=value' pairs of a 안 맞는 값 key ('loop:m2=3450,m4=3875'), or of the h / v values of a
+// '확인한 사선 벽과 안 맞습니다' key with the diagonal's own part ('residualWith:m15=400,m17=2990|m16=2330':
+// pairs m15=400, m17=2990; rest 'm16=2330'). → { kind, pairs: [string], rest } | null
+function subsetPairs(key) {
+  if (typeof key !== 'string') return null;
+  if (key.startsWith('loop:')) return { kind: 'loop', pairs: key.slice(5).split(',').filter(Boolean), rest: '' };
+  if (key.startsWith('residualWith:')) {
+    const body = key.slice('residualWith:'.length);
+    const bar = body.lastIndexOf('|');
+    if (bar < 0) return null;
+    return { kind: 'residualWith', pairs: body.slice(0, bar).split(',').filter(Boolean), rest: body.slice(bar + 1) };
+  }
+  return null;
+}
+
 // Whether `key` is resolved in the set from resolvedKeys(), by itself or by an older key of the same item.
+// A 안 맞는 값 key is also resolved by a confirmed one that named all its values with these values (round 2,
+// 2026-10-31: confirmed while typing, 'loop:m2=3450,m4=3875' came back as 'loop:m4=3875' with the next
+// value, the same value asked about again); a '확인한 사선 벽과 안 맞습니다' key likewise, by a confirmed one
+// about the same diagonal with the same value that named all its values (round 4, 2026-11-01: typed in the
+// field's order, each new value took one more name off the list and the same correct values were asked
+// about three times).
 export function isKeyResolved(resolved, key) {
   if (!resolved || !key) return false;
   if (resolved.has(key)) return true;
+  const sub = subsetPairs(key);
+  if (sub) {
+    for (const k of resolved) {
+      const had = subsetPairs(k);
+      if (had && had.kind === sub.kind && had.rest === sub.rest && sub.pairs.every((p) => had.pairs.includes(p))) return true;
+    }
+    return false;
+  }
   const old = legacyKeyPattern(key);
   if (!old) return false;
   for (const k of resolved) if (old.test(k)) return true;
   return false;
+}
+
+// Whether a residual warning (model.js computeWarnings) is '안 맞음' / 확인필요 now, with the household's [확인 완료]
+// marks (resolvedKeys). A value its loop names alone (w.loopKey: that loop's item) and the surveyor confirmed there is
+// not asked about again in its own 안 맞는 값 item (round 4 part B check: after [확인 완료] on '거실 위쪽 벽 5325: … 안
+// 맞습니다' the next 확인필요 named 5325 again; 250 of 504 such confirmations in a sweep of single typos). Of a pair of
+// facing values the loop decides (opposite.byLoop), the named one (opposite.side 'named') is then right, so the other
+// one, facing it, does not fit (opposite.against). Derive does not run again on a [확인 완료], so the screen marks, the
+// length panel and the checks read it here.
+export function residualCheckNow(w, resolved) {
+  if (!w) return false;
+  const o = w.opposite;
+  if (o && o.byLoop && typeof o.loopKey === 'string' && resolved && isKeyResolved(resolved, o.loopKey)) {
+    return o.side === 'named' ? false : !!o.against;
+  }
+  if (typeof w.loopKey === 'string' && resolved && isKeyResolved(resolved, w.loopKey)) return false;
+  // Round 5 (2026-11-08): a value a loop calls alone is '안 맞음', the values that miss only because of it are not
+  // (model.js computeWarnings `loopCall`); once an item that asks about a called value is confirmed, `after`.
+  const c = w.loopCall;
+  if (c && Array.isArray(c.keys) && resolved && c.keys.some((k) => isKeyResolved(resolved, k))) return !!c.after;
+  return !!w.check;
 }

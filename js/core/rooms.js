@@ -201,7 +201,7 @@ const SECOND_FACE_FRACTION = 0.2;
 //   matches its last polygon both ways (each covers ≥ REVIVE_MIN_OVERLAP of the other): the room is
 //   closed again where it was. Their ids are never given to new rooms.
 // → { rooms, faceRoom: [roomId per face], created: [roomId], merged: [{ kept, removed }], dropped: [roomId],
-//     revived: [roomId] }
+//     revived: [roomId], relinked: [detached room records that stay detached with a new keptName / keptHeight] }
 export function matchRooms(doc, faces, rooms, opts = {}) {
   const prev = opts.prevPolygons || null;
   const boxes = faces.map((f) => bbox(f.points));
@@ -278,6 +278,35 @@ export function matchRooms(doc, faces, rooms, opts = {}) {
     });
     revived.push(d.id);
   }
+  // A room that came back after a merge whose kept room took its name ([벽 지우기], then the question '두 실이
+  // 하나로 합쳐졌습니다' answered with the gone room's name, or a kept room without a name that takes it
+  // silently): the kept room gets its own name back (round 3, 2026-11-01: the wall redrawn instead of ↶
+  // gave two rooms named 방1 and the 주방 name was gone). d.mergedInto / keptName / keptHeight: recorded when
+  // it merged (model.js derive). Not when the kept room was renamed since. Its H: the merge kept the kept
+  // room's own H when it had one (main.js), so a different H now was typed since and stays (round 4: H 2500
+  // typed on the merged room was lost when the wall was drawn again); without one it took the gone room's,
+  // which goes back with the gone room unless it was changed since.
+  // relinked: the kept room of a merge that took the name of a room merged into it before (two walls erased
+  // one after the other, the gone room's name picked both times) keeps that earlier name when the earlier
+  // room comes back first and the name cannot go back yet: the later record's keptName becomes the earlier
+  // one's (round 4: the walls redrawn in the order erased gave 거실 | 거실 | 방2, the 방1 name was gone).
+  const relinked = new Map();
+  for (const d of detached) {
+    if (!assigned.has(d.id) || typeof d.mergedInto !== 'string' || typeof d.keptName !== 'string') continue;
+    const k = kept.findIndex((r) => r.id === d.mergedInto);
+    const K = k >= 0 ? kept[k] : null;
+    if (!K || !d.name || K.name === d.keptName) continue;
+    if (K.name !== d.name) {
+      for (const c of detached) {
+        const cur = relinked.get(c.id) || c;
+        if (c === d || assigned.has(c.id) || cur.mergedInto !== K.id || cur.keptName !== d.name) continue;
+        relinked.set(c.id, { ...cur, keptName: d.keptName, keptHeight: Number.isFinite(d.keptHeight) ? d.keptHeight : null });
+      }
+      continue;
+    }
+    const height = Number.isFinite(d.keptHeight) || K.height !== d.height ? K.height : null;
+    kept[k] = { ...K, name: d.keptName, height };
+  }
 
   const created = [];
   const allIds = (rooms || []).map((r) => r.id).concat((opts.detached || []).filter((d) => d && d.id).map((d) => d.id));
@@ -290,7 +319,7 @@ export function matchRooms(doc, faces, rooms, opts = {}) {
     faceRoom[fi] = id;
     created.push(id);
   }
-  return { rooms: kept, faceRoom, created, merged, dropped, revived };
+  return { rooms: kept, faceRoom, created, merged, dropped, revived, relinked: [...relinked.values()] };
 }
 
 // ---- straight runs of sides across dividers ------------------------------------------------------

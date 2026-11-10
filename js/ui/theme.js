@@ -1,15 +1,26 @@
 // Visual constants shared by the UI and the renderer (dev/DESIGN.md §0, §5).
 // Keep every colour, size and preset list here so that the look can be tuned in one place.
 
-// Font stack used in CSS and in canvas `ctx.font`: each device's own plain Korean gothic (user
+// SCREEN font stack (CSS and the screen canvas `ctx.font`; the outputs use PAPER_FONT_STACK below): each device's own plain Korean gothic (user
 // 2026-10-18 "기본 글꼴로, 너무 고전적인 느낌 말고"; the tablets have no NanumBarunGothic). PC: 맑은 고딕
 // (Latin letters too; this PC has no Roboto, so its outputs did not change). Galaxy Tab: Roboto (on every
 // Android) for the Latin letters and digits, then the system Korean font for Hangul. Without Roboto in
 // the list the Galaxy Tab S9 FE drew the Latin letters ('(A4 · 300dpi)', 'mm', 'NotAllowedError') in a
-// serif face (field test 2026-10-22, 0.6.3). No font files are bundled. Copies: css/app.css --font,
+// serif face (field test 2026-10-22, 0.6.3). No font file is bundled for the screen. Copies: css/app.css --font,
 // devtest/devtest.css --font, devtest/devtest.js FONT_STACK (tests/pen-input.html checks them).
 export const FONT_STACK =
   '"Malgun Gothic", "맑은 고딕", "Apple SD Gothic Neo", Roboto, "Noto Sans KR", "Noto Sans CJK KR", sans-serif';
+
+// Every OUTPUT (paper / PDF / PNG / JPG of all four 종류, turned or not, and the preview in the 출력 dialog)
+// writes its texts in one bundled font, Noto Sans KR (app/fonts/, SIL OFL 1.1; user 2026-11-01, option 1):
+// with each device's own fonts the PC and the Galaxy Tab measured the same texts differently, so texts
+// landed in other spots and some overlaps and small sizes came only on the tablet. The screen keeps
+// FONT_STACK. The family name is one no device has installed (Windows has 'Noto Sans KR' itself), so the
+// bundled copy is the only one used; ui/paperfont.js loads it (FontFace, weight 100–900 from the variable
+// font's wght axis). Until it has loaded, or when it cannot be loaded, the paper texts fall back to
+// FONT_STACK. Measuring and drawing a paper text must use this same string (paperFont / canvasFont paper).
+export const PAPER_FONT_FAMILY = 'PaperKR';
+export const PAPER_FONT_STACK = `"${PAPER_FONT_FAMILY}", ${FONT_STACK}`;
 
 // Colours (dark-on-light theme).
 export const COLORS = {
@@ -86,9 +97,13 @@ export const TIMING = {
   toast: 2600,
 };
 
-// Canvas font string for a given pixel size and weight.
-export function canvasFont(px, weight = 'normal') {
-  return `${weight} ${px}px ${FONT_STACK}`;
+// Canvas font string for a given pixel size and weight; paper: an output's text (PAPER_FONT_STACK).
+export function canvasFont(px, weight = 'normal', paper = false) {
+  return `${weight} ${px}px ${paper ? PAPER_FONT_STACK : FONT_STACK}`;
+}
+// The canvas font of a paper text (every output kind and the 출력 preview).
+export function paperFont(px, weight = 'normal') {
+  return canvasFont(px, weight, true);
 }
 
 // Number formatting used in panels ("2,900") and on the plan ("2900", like the paper drawings).

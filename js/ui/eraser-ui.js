@@ -9,12 +9,13 @@
 // ink), thin lines close by on the floor, and a rub keeps to what it is rubbing while it wobbles a few px
 // off it. Two fingers still pan / zoom and a palm under the S Pen is ignored (input.js cancels the
 // gesture: nothing is erased). A merged-name question after the erase stays in its undo step (main.js).
-// The S Pen side button (0.6.3): in EVERY tool a pen gesture with the button held comes here too (tools.js
-// g.erase), with the same preview, toast and undo step; the current tool stays.
+// A pen's side button or eraser end (0.6.3; the Galaxy Tab S9 FE's Chrome never reports the S Pen's, so
+// nothing on screen mentions it since 2026-10-29): in EVERY tool a pen gesture with it held comes here too
+// (tools.js g.erase), with the same preview, toast and undo step; the current tool stays.
 //
 // ctx = { store(), view, command(fn, label, opts) → bool, toast(msg, opts), requestRender() }
 import {
-  eraserIndex, eraserSizes, eraserTouch, samplePath, erasePlan, addTouch, LINE_REACH_PX,
+  eraserIndex, eraserSizes, eraserTouch, samplePath, erasePlan, addTouch, LINE_REACH_PX, ERASER_PX,
 } from '../core/erase.js';
 import { placeOpening, slidingLeaves } from '../core/openings.js';
 import { normalizeFixture, fixturePolygon } from '../core/fixtures.js';
@@ -26,13 +27,12 @@ import { memoLinePx } from './memo-ui.js';
 import { COLORS } from './theme.js';
 import { waitingValuesText } from './panel.js';
 
-export const ERASER_HINT = '지우개: 지울 것을 문지르세요. 닿은 벽은 한 줄 전체, 창·문·설비·메모·구역 나누기 선은 하나씩 지워집니다. 잘못 지우면 ↶.';
-
 export const ERASE_STYLE = {
   wall: 'rgba(229, 57, 53, 0.88)',     // an erased wall's outline, filled
   item: 'rgba(229, 57, 53, 0.30)',     // the fill over a window / door / fixture
   line: '#E53935',                     // outlines, door arcs, 구역 나누기 lines, memo strokes
   ring: '#5F6670',                     // the eraser ring (as the 메모 eraser)
+  memoRing: 'rgba(95, 102, 112, 0.5)', // the fainter ring: how far memo ink on the floor is taken
 };
 
 export class EraserTool {
@@ -146,6 +146,17 @@ export class EraserTool {
       // The ring shows the reach for thin lines (door arcs, 구역 나누기 lines); the dot is what touches
       // walls, windows / doors and fixtures.
       const c = opts.toPx(a.last);
+      // With memo on the plan (shown: hidden memo is never erased, eraserIndex), a fainter, wider ring: memo ink
+      // on the floor is taken within ERASER_PX (the 메모 eraser's reach), not the 8 px of the ring above (r5;
+      // DESIGN §7.16 Known: the ring showed 8 px while memo went up to 14 px).
+      if (a.index && a.index.memo && a.index.memo.length) {
+        ctx2d.strokeStyle = ERASE_STYLE.memoRing;
+        ctx2d.lineWidth = 1;
+        ctx2d.setLineDash([2, 3]);
+        ctx2d.beginPath();
+        ctx2d.arc(c.x, c.y, ERASER_PX, 0, Math.PI * 2);
+        ctx2d.stroke();
+      }
       ctx2d.strokeStyle = ERASE_STYLE.ring;
       ctx2d.lineWidth = 1.5;
       ctx2d.setLineDash([4, 3]);

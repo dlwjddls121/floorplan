@@ -4,6 +4,12 @@
    save buttons stay in view. */
 .out-dialog {
   width: min(820px, 100%);
+  /* Never taller than its backdrop (the screen less the backdrop's 16 px padding). Not .dialog's
+     calc(100vh - 32px): in a Chrome tab on Android 100vh is the screen with the toolbar hidden (the tablet:
+     655 + 93.7 css px), though it never hides here, so the dialog stood 61.7 px taller than the screen and the
+     centred backdrop cut the title '출력' and the Drive hint off, out of reach (manager's tablet simulation
+     2026-11-01: 1316×655, 치수선 없이). */
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -136,6 +142,10 @@
   font-size: 15px;
   line-height: 1.45;
 }
+/* The words of the notes (output.js setNoteText): their lines break at the spaces only, never inside a word (r4
+   part B, the tablet: '적습니 / 다', '1:150에 / 서는'; word-break: keep-all alone still broke '[외벽] / 을' and
+   '천장고 / (H)'). */
+.out-word { white-space: nowrap; }
 /* [↻ 도면 회전] and its hint, under the preview (output.js _build). As wide as the preview: the hint wraps
    and does not widen the preview column. */
 .out-preview .out-rotate {
@@ -195,6 +205,33 @@
   line-height: 1.4;
   color: var(--muted, #5F6670);
   word-break: keep-all;
+}
+
+/* A short, wide screen (the tablet's Chrome tab, 1316 x 655): with one row under another the 축척 and the notes lay below
+   the fold, so here the dialog takes the width instead (round 5, question 3). 형식 and 축척 share a row, the choices share
+   a row, the paper's line and [↻ 도면 회전] stand beside the preview, under the options. The rows are placed by their
+   classes (output.js _build), so the notes may come and go. The installed app (1317 x 823) and the tablet held upright
+   are not short and wide: they keep the layout above. */
+@media (max-height: 700px) and (min-width: 1000px) {
+  .out-dialog { width: min(1080px, 100%); }
+  /* The preview | the paper's line | [↻ 도면 회전]: columns of their own, so that the rotate hint wraps instead of
+     running over the paper's line. The options span the last two. */
+  .out-body { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px 20px; align-items: start; }
+  .out-preview { display: contents; }
+  .out-preview-canvas { grid-column: 1; grid-row: 1 / span 2; }
+  .out-scale-info { grid-column: 2; grid-row: 2; align-self: center; }
+  .out-preview .out-rotate { grid-column: 3; grid-row: 2; justify-self: end; align-self: center; width: auto; min-width: 0; margin-top: 0; }
+  .out-rotate > .out-label { display: none; }
+  .out-options { grid-column: 2 / -1; grid-row: 1; display: grid; grid-template-columns: minmax(0, 1fr) 170px; gap: 8px 14px; align-items: start; }
+  .out-options > * { grid-column: 1 / -1; }
+  .out-row-format { grid-column: 1; }
+  .out-row-scale { grid-column: 2; }
+  /* 축척 comes after 선택 in the page: 선택 and the notes step back behind it. */
+  .out-row-checks { order: 1; }
+  .out-note, .out-warn { order: 2; }
+  .out-group { gap: 4px; }
+  .out-checks { flex-direction: row; flex-wrap: wrap; gap: 0 18px; }
+  .out-note, .out-warn, .out-kind-note { padding: 6px 10px; }
 }
 
 /* Narrow or short screens (tablet portrait, phones): preview above the options. */

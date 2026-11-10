@@ -19,6 +19,9 @@ const NODE_MARGIN = 0.4;
 // line drawn a little off (a wall joining them keeps both; the solver puts them on one line). Farther
 // apart they are two lines.
 const SAME_LINE = 0.4;
+// A corner a new h / v wall reaches within this fraction of the snap of its line (under 3 of the 18 screen
+// px), continuing a wall line that ends there, is that corner rather than a T beside it (planEnd).
+const JOG = 0.15;
 // After a stroke (joinStrokeEnds): a free end of the new walls joins an old free end at their corner up to
 // CORNER × snap away (ht #13); a piece the stroke drew past a wall is dropped when shorter than STUB × snap.
 // 1.5 rather than 2: 예시 세대 A's 1453 and 1505 lines are 520 mm apart, and at the default zoom (snap 300) a wall
@@ -84,7 +87,13 @@ function work(doc) {
   for (const n of nodes) w.nodeMap.set(n.id, n);
   // Fill missing sketch vectors from geometry.
   for (const e of edges) if (!e.sketch) e.sketch = geometricSketch(w, e, 1);
-  w.nodeCounter = Number(nextId('n', nodes).slice(1)) - 1;
+  // A new corner never takes an id a detached room or a waiting value still names (round 4: after two walls
+  // were erased, the wall drawn next took the first one's corner ids, the detached room's outline followed
+  // them to the new wall, and the room did not come back when its wall was drawn again: its name was lost).
+  const held = nodes.map((n) => n.id);
+  for (const r of doc.detachedRooms || []) for (const id of (r && r.nodeIds) || []) held.push(id);
+  for (const m of doc.detachedMeasures || []) if (m) held.push(m.from, m.to);
+  w.nodeCounter = Number(nextId('n', held).slice(1)) - 1;
   w.edgeCounter = Number(nextId('e', edges).slice(1)) - 1;
   return w;
 }
@@ -182,7 +191,18 @@ function snapEnd(w, p, snap, orient, skip = null, foot = null) {
   if (orient === 'd') return snapDiagonalEnd(w, p, snap, skip, foot);
   const nn = nearestNodeIn(w.nodes, p, snap, skip && skip.nodes);
   const across = nearestEdgeIn(w, p, snap, (e) => !(skip && skip.edges && skip.edges.has(e.id)) && !parallelTo(e, orient));
-  if (nn && (!across || nn.dist <= across.dist + Math.max(ON_TOL, snap * NODE_MARGIN))) {
+  // An h / v end on a DIAGONAL within the snap of that diagonal's own end goes to that corner: a T there
+  // only leaves a slanted stub side (final review 2026-10-28, B4: the 화장실 wall drawn to where the
+  // diagonal outer wall meets the bottom wall ended on the diagonal 130 mm short of it, 4 of 12 sketches).
+  // Not when that corner already has a wall of the new end's own direction (round 2, 2026-10-31): the new
+  // wall's line would then fold onto that wall (an h wall drawn 150–260 mm above the bottom wall to the
+  // diagonal near its foot vanished into the bottom wall, no new room and no message).
+  const diagEnd = nn && across && orient !== 'd' && (() => {
+    const e = w.edges.find((x) => x.id === across.edgeId);
+    return e && e.orient === 'd' && (e.a === nn.nodeId || e.b === nn.nodeId)
+      && !w.edges.some((x) => (x.a === nn.nodeId || x.b === nn.nodeId) && x.orient === orient);
+  })();
+  if (nn && (!across || diagEnd || nn.dist <= across.dist + Math.max(ON_TOL, snap * NODE_MARGIN))) {
     const n = pos(w, nn.nodeId);
     return { type: 'node', id: n.id, point: { x: n.x, y: n.y }, dist: nn.dist };
   }
@@ -290,6 +310,122 @@ function cornerOnDiagonal(w, ends, snap) {
 
 function parallelTo(e, orient) {
   return (orient === 'h' || orient === 'v') && e.orient === orient;
+}
+
+// A one-piece h / v wall stroke drawn along a STEPPED line: existing walls of its direction on two or more lines a
+// little apart, one after the other under it (round 5, fuzz of round 4: one long 복도 stroke under rooms whose bottom
+// walls are a few cm apart re-traced one of them and doubled the others, a strip a few cm wide and '[overlap]'
+// followed, or two rooms merged). Then it is drawn in pieces: along each run of walls on its own line (re-tracing
+// it), and across a gap between two runs from the end corner of one to the start corner of the next (planned like
+// any wall between two corners: a crooked piece the solver straightens, or a T on the far corner's wall); where two
+// runs meet at one corner line, the wall across between them is the step. A run is under the stroke when its line is
+// within SAME_LINE × snap of the stroke's line or of the pen, or when it steps from such a run at a corner; a run
+// less than one snap under the stroke at an end of it is not followed (the pen ran on past a corner).
+// pen: [first, last] pen points | null. → [[from, to], …] in the stroke's direction | null (one line, or not a clean
+// stepped line: two lines side by side, a wall in a gap, a step with no wall across)
+function steppedPieces(w, p, q, key, snap, orient, pen, ends) {
+  const along = key === 'y' ? 'x' : 'y';
+  const lo = Math.min(p[along], q[along]), hi = Math.max(p[along], q[along]);
+  if (hi - lo < 2 * snap) return null;
+  const c0 = (p[key] + q[key]) / 2;
+  const near = SAME_LINE * snap;
+  const penAt = (u) => {
+    if (!pen || !pen[0] || !pen[1]) return c0;
+    const a = pen[0], b = pen[1];
+    const t = Math.abs(b[along] - a[along]) > EPS ? (u - a[along]) / (b[along] - a[along]) : 0.5;
+    return a[key] + (b[key] - a[key]) * Math.min(1, Math.max(0, t));
+  };
+  const walls = [];
+  for (const e of w.edges) {
+    if (e.kind !== 'wall' || !parallelTo(e, orient)) continue;
+    const A = pos(w, e.a), B = pos(w, e.b);
+    if (Math.abs(A[key] - B[key]) > ON_TOL || Math.abs(A[key] - c0) > 2 * near) continue;
+    const a = Math.min(A[along], B[along]), b = Math.max(A[along], B[along]);
+    if (Math.min(hi, b) - Math.max(lo, a) <= ON_TOL) continue;
+    walls.push({ line: A[key], a, b });
+  }
+  walls.sort((x, y) => x.a - y.a || x.b - y.b);
+  const runs = [];
+  for (const x of walls) {
+    const r = runs[runs.length - 1];
+    if (r && Math.abs(r.line - x.line) <= ON_TOL && x.a <= r.b + ON_TOL) r.b = Math.max(r.b, x.b);
+    else runs.push({ ...x });
+  }
+  const under = (r) => Math.min(hi, r.b) - Math.max(lo, r.a);
+  while (runs.length && under(runs[0]) < snap) runs.shift();
+  while (runs.length && under(runs[runs.length - 1]) < snap) runs.pop();
+  if (runs.length < 2 || runs.some((r) => under(r) < snap)) return null;
+  const lines = runs.map((r) => r.line);
+  if (Math.max(...lines) - Math.min(...lines) <= ON_TOL) return null;
+  const nodeAt = (u, line) => w.nodes.find((n) => Math.abs(n[along] - u) <= ON_TOL && Math.abs(n[key] - line) <= ON_TOL);
+  // Whether walls across cover the step from U to V (both at one place along the stroke).
+  const stepWall = (U, V) => {
+    const k0 = Math.min(U[key], V[key]), k1 = Math.max(U[key], V[key]);
+    const spans = [];
+    for (const e of w.edges) {
+      if (parallelTo(e, orient) || !isAxis(e)) continue;
+      const A = pos(w, e.a), B = pos(w, e.b);
+      if (Math.abs(A[along] - U[along]) > ON_TOL || Math.abs(B[along] - U[along]) > ON_TOL) continue;
+      spans.push([Math.min(A[key], B[key]), Math.max(A[key], B[key])]);
+    }
+    spans.sort((x, y) => x[0] - y[0]);
+    let reach = k0;
+    for (const [a, b] of spans) if (a <= reach + ON_TOL) reach = Math.max(reach, b);
+    return reach >= k1 - ON_TOL;
+  };
+  const cuts = [];
+  for (let k = 0; k + 1 < runs.length; k++) {
+    const r = runs[k], s = runs[k + 1];
+    if (Math.abs(r.line - s.line) <= ON_TOL) { cuts.push(null); continue; }
+    if (r.b > s.a + ON_TOL) return null;                       // two lines side by side: not a step
+    const U = nodeAt(r.b, r.line), V = nodeAt(s.a, s.line);
+    if (!U || !V) return null;
+    if (s.a - r.b <= ON_TOL) {
+      // The step: the wall across between them, drawn when it is not there (a run's loose end).
+      cuts.push({ U: { x: U.x, y: U.y }, V: { x: V.x, y: V.y }, gap: false, step: !stepWall(U, V) });
+    } else {
+      // A gap of a room's width or more, with nothing of that direction in it (a wall there would be doubled
+      // by the piece across it).
+      if (s.a - r.b < snap || walls.some((x) => Math.min(s.a, x.b) - Math.max(r.b, x.a) > ON_TOL)) return null;
+      cuts.push({ U: { x: U.x, y: U.y }, V: { x: V.x, y: V.y }, gap: true });
+    }
+  }
+  // Every run followed: near the stroke's line or the pen, or stepping at a corner from one that is.
+  const ok = runs.map((r) => Math.abs(r.line - c0) <= near || Math.abs(r.line - penAt((Math.max(lo, r.a) + Math.min(hi, r.b)) / 2)) <= near);
+  for (let pass = 0; pass < runs.length; pass++) {
+    for (let k = 0; k + 1 < runs.length; k++) {
+      if (cuts[k] && !cuts[k].gap && ok[k] !== ok[k + 1]) { ok[k] = true; ok[k + 1] = true; }
+      else if (!cuts[k] && ok[k] !== ok[k + 1]) { ok[k] = true; ok[k + 1] = true; }
+    }
+  }
+  if (ok.some((x) => !x)) return null;
+  const steps = cuts.filter(Boolean);
+  if (!steps.length) return null;
+  // A stroke end beyond the first / last run that goes to a corner or a wall off that run's line: cut at the run's
+  // outer corner too (else the piece would run crooked along the run to that end, doubling it).
+  const up = q[along] >= p[along];
+  const outer = [[runs[0], runs[0].a, -1], [runs[runs.length - 1], runs[runs.length - 1].b, 1]];
+  for (const [r, u, dir] of outer) {
+    const end = ends[(dir < 0) === up ? 0 : 1];
+    const at = dir < 0 ? lo : hi;
+    if (!end || end.type === 'free' || (at - u) * dir <= ON_TOL || Math.abs(end.point[key] - r.line) <= ON_TOL) continue;
+    const N = nodeAt(u, r.line);
+    if (!N) return null;
+    const cut = { U: { x: N.x, y: N.y }, V: { x: N.x, y: N.y }, gap: false };
+    if (dir < 0) steps.unshift(cut); else steps.push(cut);
+  }
+  if (!up) steps.reverse();
+  const pieces = [];
+  let from = p;
+  for (const { U: U0, V: V0, gap, step } of steps) {
+    const [U, V] = up ? [U0, V0] : [V0, U0];
+    pieces.push([from, U]);
+    if (gap) pieces.push([U, V]);
+    if (step) pieces.push([U, V, orient === 'h' ? 'v' : 'h']);
+    from = V;
+  }
+  pieces.push([from, q]);
+  return pieces;
 }
 
 function nearestNodeIn(nodes, point, maxDist, skip = null) {
@@ -464,9 +600,12 @@ function axisPointOnEdge(w, e, key, c) {
 // A diagonal keeps the angle it was drawn at: its ends prefer corners (DIAG_NODE), an end on a wall lands
 // where its line crosses the wall (DIAG_REACH), and a corner it runs past within NODE_MARGIN × snap splits it
 // into two segments through that corner. feet: [p is a foot, q is a foot] (FOOT_NODE; the stroke ends of a
-// diagonal piece that goes on into another piece of the same stroke).
-export function addSegment(doc, p, q, { orient, kind = 'wall', snap = 200, sketchScale = 1, feet = null } = {}) {
+// diagonal piece that goes on into another piece of the same stroke). pen: [first, last] raw pen points of
+// a one-piece h / v stroke (p and q are its straightened ends): a corner end's cost is how far the PEN end
+// is from it (see the h / v block). route: false inside the two halves of an 'onto' route (below).
+export function addSegment(doc, p, q, { orient, kind = 'wall', snap = 200, sketchScale = 1, feet = null, pen = null, route = true } = {}) {
   const w = work(doc);
+  w.kind = kind;   // planEnd 'extend': a wall's corner goes on only for a new wall
   if (!orient) orient = classifyDirection({ x: q.x - p.x, y: q.y - p.y }, true).orient;
   const footP = orient === 'd' && feet && feet[0] ? { through: q } : null;
   const footQ = orient === 'd' && feet && feet[1] ? { through: p } : null;
@@ -518,7 +657,35 @@ export function addSegment(doc, p, q, { orient, kind = 'wall', snap = 200, sketc
   // Re-impose the orientation: h segments share one y, v segments one x.
   if (orient === 'h' || orient === 'v') {
     const key = orient === 'h' ? 'y' : 'x';
-    const raws = [p, q];
+    // A stroke along a stepped line: drawn piece by piece (steppedPieces; round 5).
+    const steps = route && kind === 'wall' && !feet ? steppedPieces(w, p, q, key, snap, orient, pen, ends) : null;
+    if (steps) {
+      let d = doc;
+      const edgeIds = [], splits = [];
+      let first = null, last = null;
+      steps.forEach(([A, B, across], k) => {
+        if (dist(A, B) <= ON_TOL) return;
+        const pn = pen && !across ? [k === 0 ? pen[0] : A, k === steps.length - 1 ? pen[1] : B] : null;
+        const r = addSegment(d, A, B, { orient: across || orient, kind, snap, sketchScale, pen: pn, route: false });
+        d = r.doc;
+        edgeIds.push(...r.edgeIds);
+        splits.push(...r.splits);
+        if (r.ends.length) { if (first == null) first = r.ends[0]; last = r.ends[r.ends.length - 1]; }
+      });
+      return { doc: d, edgeIds, splits, ends: [first, last].filter((x) => x != null) };
+    }
+    // Every end of a one-piece stroke costs how far its PEN end is from where it goes: the corner, the T or
+    // the loose end on the line (round 2, 2026-10-31, for a corner: the straightened ends already lie on the
+    // line of the end anchor nearer its pen point, so a corner at the other end 0.5–1.2 snap off that line
+    // looked that far from the pen, a loose end beat the T at the corner the pen started at, and the rooms on
+    // both sides merged). `pen` holds the pen points the ends were straightened from (sketch.js penStart /
+    // penEnd): a short return at a stroke end that the straightening dropped (1.1–1.45 snap) is not the end
+    // (round 3, 2026-11-01). Round 4: T and loose-end costs counted from the straightened ends too, and round
+    // 3 took the straightened distance where it was smaller; both measured the end on the line of the nearer
+    // anchor, so a wall drawn between two room corners 0.45–0.75 snap apart, the pen nearer the lower one,
+    // ran on along that corner's line and ended loose beside the other one (the rooms on both sides merged).
+    const raws = pen && pen[0] && pen[1] ? [{ ...p, [key]: pen[0][key] }, { ...q, [key]: pen[1][key] }] : [p, q];
+    if (pen && pen[0] && pen[1]) ends.forEach((s, i) => { if (s.type === 'node') s.dist = dist(pen[i], s.point); });
     // The line runs through a corner end or an end on a parallel wall; when the ends disagree, the line
     // that fits both ends best (each end's own snap distance plus what it costs the other end to reach
     // that line), else the stroke's own line. ht #9, #27: the 주방 | 거실 divider ended ON 화장실1's left
@@ -531,12 +698,157 @@ export function addSegment(doc, p, q, { orient, kind = 'wall', snap = 200, sketc
       let best = null;
       for (const cand of fixing) {
         const line = cand.point[key];
-        const ps = ends.map((s, i) => planEnd(w, s, raws[i], key, line, snap, orient));
+        const ps = ends.map((s, i) => planEnd(w, s, raws[i], key, line, snap, orient, raws[1 - i]));
         const cost = ps.reduce((a, b) => a + b.cost, 0);
         if (!best || cost < best.cost - ON_TOL) best = { cost, line, ps };
       }
       c = best.line;
       plans = best.ps;
+    }
+    // A wall drawn along an existing parallel wall a little off its line (at most SAME_LINE × snap, over
+    // at least one snap of its length) is that wall re-traced: it goes onto that line and shares its
+    // pieces (final review 2026-10-28, C3: one long stroke along the 중정's bottom wall ran 6 mm beside it,
+    // two walls overlapped, the 중정 became a hole in the room above and three 확인필요 'overlap' followed).
+    const along = key === 'y' ? 'x' : 'y';
+    const lo = Math.min(p[along], q[along]), hi = Math.max(p[along], q[along]);
+    let onto = null;
+    for (const e of w.edges) {
+      // Walls only: a 구역 나누기 선 may run beside a wall (ht #27: 예시 세대 A's 주방 | 거실 line 150 mm beside
+      // 화장실1's top wall).
+      if (kind !== 'wall' || e.kind !== 'wall' || !parallelTo(e, orient)) continue;
+      const A = pos(w, e.a), B = pos(w, e.b);
+      if (Math.abs(A[key] - B[key]) > ON_TOL) continue;
+      const off = Math.abs(A[key] - c);
+      if (off <= ON_TOL || off > SAME_LINE * snap) continue;
+      const ov = Math.min(hi, Math.max(A[along], B[along])) - Math.max(lo, Math.min(A[along], B[along]));
+      if (ov < snap) continue;
+      if (!onto || ov > onto.ov) onto = { ov, line: A[key] };
+    }
+    // Only when both ends then lie ON that line (round 2, 2026-10-31, ht #27 drawn as a wall: the 주방 | 거실
+    // wall from a corner 100 mm off 방2's bottom wall kept the corner by SAME_LINE, ran slanted onto 방2's
+    // wall line, overlapped it and merged 방2, 주방 and 거실 into one room). With exactly one end a corner off
+    // the line, the wall goes from that corner to the old wall's nearest corner on the line (a crooked h / v
+    // piece the solver straightens) and on along the old wall, re-using its pieces, where the corner's own
+    // line would cut past a wall standing at that old corner (a sliver room between the lines) or the corner
+    // is within JOG × snap of the line (C3-like: a long row wall started at a room corner drawn 20–100 mm off
+    // the 중정's wall doubled it). Otherwise the plan before stays (ht #27: 방2's corner wall goes away from
+    // the 3000 line, so the new wall keeps its own line and ends as a T on 화장실1's wall).
+    if (onto) {
+      const ps = ends.map((s, i) => planEnd(w, s, raws[i], key, onto.line, snap, orient, raws[1 - i]));
+      // A corner end whose own line has walls running along the stroke stays on its line: the stroke follows
+      // walls on two lines (a stepped line), and the route below splits it at the step (round 4: a 복도 drawn
+      // in one stroke under two rooms whose bottom walls are 0.2–0.38 snap apart doubled one of them, a 0 mm
+      // piece and '[overlap]' followed, and the 복도 merged with a room).
+      const ownLine = ends.map((s) => s.type === 'node' && Math.abs(s.point[key] - onto.line) > ON_TOL && w.edges.some((e) => {
+        if (e.kind !== 'wall' || !parallelTo(e, orient)) return false;
+        const A = pos(w, e.a), B = pos(w, e.b);
+        if (Math.abs(A[key] - s.point[key]) > ON_TOL || Math.abs(B[key] - s.point[key]) > ON_TOL) return false;
+        return Math.min(hi, Math.max(A[along], B[along])) - Math.max(lo, Math.min(A[along], B[along])) >= snap;
+      }));
+      const off = ps.map((pl, k) => ownLine[k] || Math.abs(pl.point[key] - onto.line) > ON_TOL);
+      const i = off[0] && !off[1] ? 0 : off[1] && !off[0] ? 1 : -1;
+      // Any other corner off the line meeting it as a T on a wall there, more than JOG × snap away: the wall
+      // goes on that line, from that T (round 4: a 복도 wall drawn on to the facade beside the next room's
+      // bottom wall, 60 mm off its line, left a 60 mm strip under that wall).
+      const jog = i >= 0 && !ownLine[i] && ends[i].type === 'node' && Math.abs(ends[i].point[key] - onto.line) > JOG * snap
+        ? planEnd(w, ends[i], raws[i], key, onto.line, snap, orient, raws[1 - i], true) : null;
+      if (jog && jog.type === 'edge') ps[i] = jog;
+      if (!off[0] && !off[1] || (jog && jog.type === 'edge')) {
+        c = onto.line;
+        plans = ps;
+      } else if (route && i >= 0) {
+        const pre = plans ? plans.map((pl) => pl.point[along]) : [p[along], q[along]];
+        const lo2 = Math.min(...pre) + ON_TOL, hi2 = Math.max(...pre) - ON_TOL;
+        const endPt = ownLine[i] ? ends[i].point : ps[i].point;
+        const small = Math.abs(endPt[key] - onto.line) <= JOG * snap;
+        let via = null;
+        for (const n of w.nodes) {
+          if (Math.abs(n[key] - onto.line) > ON_TOL || n[along] <= lo2 || n[along] >= hi2) continue;
+          const own = incidentOf(w, n.id);
+          if (!own.some((e) => e.kind === 'wall' && parallelTo(e, orient))) continue;
+          // A wall at n going toward the corner's own line c: that line would run past it.
+          const crosses = own.some((e) => isAxis(e) && !parallelTo(e, orient)
+            && (c - n[key]) * (pos(w, otherEnd(e, n.id))[key] - n[key]) > ON_TOL * ON_TOL);
+          if (!crosses && !small) continue;
+          if (!via || Math.abs(n[along] - endPt[along]) < Math.abs(via[along] - endPt[along])) via = n;
+        }
+        if (via) {
+          const V = { x: via.x, y: via.y };
+          const first = addSegment(doc, p, V, { orient, kind, snap, sketchScale, pen: pen ? [pen[0], V] : null, route: false });
+          const second = addSegment(first.doc, V, q, { orient, kind, snap, sketchScale, pen: pen ? [V, pen[1]] : null, route: false });
+          return {
+            doc: second.doc,
+            edgeIds: [...first.edgeIds, ...second.edgeIds],
+            splits: [...first.splits, ...second.splits],
+            ends: [first.ends[0], second.ends[second.ends.length - 1]].filter(Boolean),
+          };
+        }
+      }
+    }
+    // A corner kept off the line (SAME_LINE, or JOG) makes the wall a crooked h / v piece the solver
+    // straightens. It must not run along an existing parallel wall lying between the two lines (round 3,
+    // 2026-11-01): passing that wall's corner a few mm off, it took no breakpoint there and overlapped the
+    // wall; the rooms on both sides merged ('[overlap] 벽 두 개가 겹쳐 그려졌습니다', although both walls are
+    // needed). ht #27 drawn as a wall from 방2's corner to the corner above the T; a wall from one room's
+    // corner along the next room's wall a few mm off and past its corner; a wall re-tracing a room's wall and
+    // drawn on to the next room's corner off that line (the line c is then that wall's own, and the onto
+    // search above skips it). When that wall lies on the kept corner's own line, the wall goes on that line
+    // and the other end meets it as a T on its own wall, if it can (below). Then, more than JOG × snap off: a
+    // T on the kept corner's own wall when there is one (0.6.8's plan: a piece 60–150 mm long at that corner,
+    // as ht #27's 60–150 mm rule); else the wall goes through that parallel wall's corner nearest the kept
+    // corner (the crooked piece ends there, and the rest re-traces that wall). Inside the two halves of a route
+    // (route false) the T's only, not another split.
+    if (plans) {
+      const P0 = plans[0].point, Q0 = plans[1].point;
+      const kept = [0, 1].find((i) => plans[i].type === 'node' && Math.abs(plans[i].point[key] - c) > ON_TOL);
+      if (kept != null && Math.abs(P0[key] - Q0[key]) > ON_TOL) {
+        const loK = Math.min(P0[key], Q0[key]) - ON_TOL, hiK = Math.max(P0[key], Q0[key]) + ON_TOL;
+        const loA = Math.min(P0[along], Q0[along]) + ON_TOL, hiA = Math.max(P0[along], Q0[along]) - ON_TOL;
+        let wall = null;
+        for (const e of w.edges) {
+          if (e.kind !== 'wall' || !parallelTo(e, orient)) continue;
+          const A = pos(w, e.a), B = pos(w, e.b);
+          if (Math.abs(A[key] - B[key]) > ON_TOL || A[key] < loK || A[key] > hiK) continue;
+          const ov = Math.min(hiA, Math.max(A[along], B[along])) - Math.max(loA, Math.min(A[along], B[along]));
+          if (ov > ON_TOL && (!wall || ov > wall.ov)) wall = { ov, line: A[key] };
+        }
+        const K = wall && plans[kept].point;
+        const o = 1 - kept;
+        // That wall on the kept corner's own line: the wall goes on that line, and the other end meets it as
+        // a T on its own wall (round 4: a 복도 wall from one room's corner to where the next room's bottom wall
+        // meets the facade left a 60 mm strip under that wall; a stroke re-tracing a stepped corridor line
+        // split at the step ran its second half crooked along the next room's wall, a 0 mm piece followed).
+        const altO = wall && Math.abs(wall.line - K[key]) <= ON_TOL
+          ? planEnd(w, ends[o], raws[o], key, K[key], snap, orient, raws[kept], true) : null;
+        if (altO && altO.type === 'edge') {
+          c = K[key];
+          plans[o] = altO;
+          plans[kept] = planEnd(w, ends[kept], raws[kept], key, c, snap, orient, raws[o]);
+        } else if (wall) {
+          const offK = Math.abs(plans[kept].point[key] - c);
+          const alt = planEnd(w, ends[kept], raws[kept], key, c, snap, orient, raws[1 - kept], true);
+          if (offK > JOG * snap && alt.type === 'edge') plans[kept] = alt;
+          else if (route) {
+            let via = null;
+            for (const n of w.nodes) {
+              if (Math.abs(n[key] - wall.line) > ON_TOL || n[along] <= loA || n[along] >= hiA) continue;
+              if (!incidentOf(w, n.id).some((e) => e.kind === 'wall' && parallelTo(e, orient))) continue;
+              if (!via || Math.abs(n[along] - K[along]) < Math.abs(via[along] - K[along])) via = n;
+            }
+            if (via) {
+              const V = { x: via.x, y: via.y };
+              const first = addSegment(doc, p, V, { orient, kind, snap, sketchScale, pen: pen ? [pen[0], V] : null, route: false });
+              const second = addSegment(first.doc, V, q, { orient, kind, snap, sketchScale, pen: pen ? [V, pen[1]] : null, route: false });
+              return {
+                doc: second.doc,
+                edgeIds: [...first.edgeIds, ...second.edgeIds],
+                splits: [...first.splits, ...second.splits],
+                ends: [first.ends[0], second.ends[second.ends.length - 1]].filter(Boolean),
+              };
+            }
+          }
+        }
+      }
     }
     ends.forEach((s, i) => {
       if (plans) { applyPlan(w, s, plans[i], sketchScale); return; }
@@ -548,7 +860,7 @@ export function addSegment(doc, p, q, { orient, kind = 'wall', snap = 200, sketc
         const A = pos(w, e.a), B = pos(w, e.b);
         const nb = dist(A, s.point) <= dist(B, s.point) ? A : B;
         Object.assign(s, { type: 'node', id: nb.id, point: { x: nb.x, y: nb.y }, dist: dist(raws[i], nb) });
-        applyPlan(w, s, planEnd(w, s, raws[i], key, c, snap, orient), sketchScale);
+        applyPlan(w, s, planEnd(w, s, raws[i], key, c, snap, orient, raws[1 - i]), sketchScale);
         return;
       }
       s.point[key] = c;
@@ -642,17 +954,35 @@ function fixesLine(w, s, orient) {
 //    puts both corners on it);
 //  - a T on a wall across the line near the pen end;
 //  - a free end on the line.
-function planEnd(w, s, raw, key, c, snap, orient) {
+// noSame: without the same-line option (addSegment: a kept corner whose crooked piece would run along a wall).
+function planEnd(w, s, raw, key, c, snap, orient, toward = null, noSame = false) {
   const onLine = (pt) => { const o = { x: pt.x, y: pt.y }; o[key] = c; return o; };
   if (s.type === 'free') return { cost: Math.abs(raw[key] - c), type: 'free', point: onLine(raw) };
   if (!fixesLine(w, s, orient)) {
     const e = w.edges.find((x) => x.id === s.edgeId);
     const pt = axisPointOnEdge(w, e, key, c);
+    // The JOG rule (below) for an end that snapped to the wall rather than its corner (round 2, 2026-10-31,
+    // D6: a 구역 나누기 선's pen end 72 mm along 방1's wall from its corner snapped as a T, the line from the
+    // other end put the T 21 mm beside that corner, and a 21 mm wall piece gave 거실 two phantom sides): a T
+    // within JOG × snap of that wall's own end corner, where the new wall continues no wall of its line
+    // there (no 'beside'), is that corner.
+    if (pt && toward) {
+      const al = key === 'y' ? 'x' : 'y';
+      for (const N of [pos(w, e.a), pos(w, e.b)]) {
+        const dN = dist(N, pt);
+        if (dN <= ON_TOL || dN > snap * JOG) continue;
+        const back = sgn(toward[al] - N[al]);
+        if (!back) continue;
+        const beside = incidentOf(w, N.id).some((x) => x.orient === orient && sgn(pos(w, otherEnd(x, N.id))[al] - N[al]) === back);
+        if (beside) continue;
+        return { cost: dist(raw, N), type: 'node', id: N.id, point: { x: N.x, y: N.y } };
+      }
+    }
     if (pt) return { cost: dist(raw, pt), type: 'edge', edgeId: e.id, point: pt };
     // The line misses this wall: its nearer end, as a corner.
     const A = pos(w, e.a), B = pos(w, e.b);
     const nb = dist(A, s.point) <= dist(B, s.point) ? A : B;
-    return planEnd(w, { type: 'node', id: nb.id, point: { x: nb.x, y: nb.y }, dist: dist(raw, nb) }, raw, key, c, snap, orient);
+    return planEnd(w, { type: 'node', id: nb.id, point: { x: nb.x, y: nb.y }, dist: dist(raw, nb) }, raw, key, c, snap, orient, toward);
   }
   const off = Math.abs(s.point[key] - c);
   const same = s.type === 'node'
@@ -663,16 +993,50 @@ function planEnd(w, s, raw, key, c, snap, orient) {
   if (s.type === 'node') {
     const slid = slideTarget(w, s.id, key, c, snap);
     if (slid) options.push({ cost: s.dist, type: 'node', id: s.id, point: slid, slide: true });
-    if (off <= snap * SAME_LINE) options.push(same);
+    if (off <= snap * SAME_LINE && !noSame) options.push(same);
   }
-  const t = axisSnapAcross(w, raw, key, c, snap, orient);
+  // A T on one of this corner's own walls within JOG × snap of it, where the new wall CONTINUES a wall
+  // line ending at the corner (an L corner, or the far side of a T; no wall of that line runs back beside
+  // the new one), would only leave a jog piece a few mm long: the corner stays (final review 2026-10-28,
+  // D6: a 구역 나누기 선 closing the 복도 ended 13 mm beside 방2's corner and added a 13 mm wall piece and two
+  // phantom 주방 sides). Farther off it is another line (ht #27: 60–150 mm, a T on that wall).
+  const along = key === 'y' ? 'x' : 'y';
+  const back = toward ? sgn(toward[along] - s.point[along]) : 0;
+  const beside = s.type === 'node' && incidentOf(w, s.id).some((e) => e.orient === orient
+    && sgn(pos(w, otherEnd(e, s.id))[along] - s.point[along]) === back);
+  const jog = (edgeId) => s.type === 'node' && off <= snap * JOG && back !== 0 && !beside
+    && w.edges.some((e) => e.id === edgeId && (e.a === s.id || e.b === s.id));
+  const t = axisSnapAcross(w, raw, key, c, snap, orient, jog);
   if (t) options.push({ cost: t.d, type: 'edge', edgeId: t.edgeId, point: t.point });
+  // A corner two lines off (more than SAME_LINE × snap, at most one snap) with no wall across the line near the pen:
+  // its wall across goes on to the line (extendTarget) rather than leaving a loose end beside it (round 5, fuzz of
+  // round 4: a 복도 wall drawn between two room corners 0.56 snap apart, the pen nearer the lower one, ended loose
+  // 168 mm below the upper corner; 확인필요 'dangling').
+  else if (s.type === 'node' && off > snap * SAME_LINE && off <= snap && toward && !beside) {
+    const X = extendTarget(w, s.id, key, c, orient, toward, snap);
+    if (X) options.push({ cost: dist(raw, X) + off, type: 'node', id: s.id, point: { x: X.x, y: X.y }, extend: true, kind: X.kind, across: X.across, thickness: X.thickness, exterior: X.exterior });
+  }
   options.push({ cost: Math.abs(raw[key] - c) + snap, type: 'free', point: onLine(raw) });
   return options.reduce((a, b) => (b.cost < a.cost - ON_TOL ? b : a));
 }
 
 function applyPlan(w, s, plan, sketchScale) {
   if (plan.slide) shiftNode(w, plan.id, plan.point, sketchScale);
+  if (plan.extend) {
+    // The corner's wall across, on to the line: a new piece of that wall from the corner, the new wall's end.
+    const A = pos(w, plan.id);
+    const X = newNode(w, plan.point.x, plan.point.y);
+    const k = sketchScale > 0 ? sketchScale : 1;
+    w.edgeCounter += 1;
+    const piece = {
+      id: 'e' + w.edgeCounter, a: plan.id, b: X.id, kind: plan.kind, orient: plan.across,
+      sketch: { dx: (X.x - A.x) / k, dy: (X.y - A.y) / k }, thickness: plan.thickness,
+    };
+    if (typeof plan.exterior === 'boolean') piece.exterior = plan.exterior;
+    w.edges.push(piece);
+    Object.assign(s, { type: 'node', id: X.id, edgeId: undefined, point: { x: X.x, y: X.y } });
+    return;
+  }
   Object.assign(s, { type: plan.type, id: plan.id, edgeId: plan.edgeId, point: { x: plan.point.x, y: plan.point.y } });
 }
 
@@ -696,12 +1060,42 @@ function slideTarget(w, id, key, c, snap) {
   return X;
 }
 
+// Where corner `id` would meet the line key = c by its one wall across going on (planEnd 'extend'): that wall runs
+// from the corner away from the line, the piece on to it crosses nothing and ends on nothing, and no wall of the
+// new wall's direction runs beside that line (within 2 × SAME_LINE × snap) toward the other end `toward` (the new
+// wall would double it). → { x, y, kind, across, thickness, exterior } | null
+function extendTarget(w, id, key, c, orient, toward, snap) {
+  const own = incidentOf(w, id);
+  const across = own.filter((e) => isAxis(e) && !parallelTo(e, orient));
+  if (across.length !== 1 || across[0].kind !== 'wall' || w.kind !== 'wall') return null;
+  const E = across[0];
+  const A = pos(w, id), G = pos(w, otherEnd(E, id));
+  if ((c - A[key]) * (A[key] - G[key]) <= 0) return null;
+  const X = { x: A.x, y: A.y };
+  X[key] = c;
+  if (!pathClear(w, A, X, new Set(own.map((e) => e.id)))) return null;
+  if (w.nodes.some((n) => dist(n, X) <= ON_TOL)) return null;
+  const al = key === 'y' ? 'x' : 'y';
+  const lo = Math.min(A[al], toward[al]), hi = Math.max(A[al], toward[al]);
+  for (const e of w.edges) {
+    if (!parallelTo(e, orient)) continue;
+    const P = pos(w, e.a), Q = pos(w, e.b);
+    const d = Math.abs((P[key] + Q[key]) / 2 - c);
+    if (d <= ON_TOL || d > 2 * SAME_LINE * snap) continue;
+    if (Math.min(hi, Math.max(P[al], Q[al])) - Math.max(lo, Math.min(P[al], Q[al])) > ON_TOL) return null;
+  }
+  for (const e of w.edges) if (projectPointToSegment(X, pos(w, e.a), pos(w, e.b)).dist <= ON_TOL) return null;
+  const out = { x: X.x, y: X.y, kind: E.kind, across: E.orient, thickness: E.thickness != null ? E.thickness : null };
+  if (typeof E.exterior === 'boolean') out.exterior = E.exterior;
+  return out;
+}
+
 // Nearest point within `snap` of `raw` where the axis line (key = c) crosses an edge that is not parallel
 // to `orient`. → { edgeId, point } | null
-function axisSnapAcross(w, raw, key, c, snap, orient) {
+function axisSnapAcross(w, raw, key, c, snap, orient, skip = null) {
   let best = null;
   for (const e of w.edges) {
-    if (parallelTo(e, orient)) continue;
+    if (parallelTo(e, orient) || (skip && skip(e.id))) continue;
     const pt = axisPointOnEdge(w, e, key, c);
     if (!pt) continue;
     const d = dist(pt, raw);
@@ -890,8 +1284,9 @@ function sgn(v) { return v > 0 ? 1 : v < 0 ? -1 : 0; }
 //     past the new wall (which crosses it or ends on it) by up to OLD_CROSS × snap is cut back to it.
 //  3. A piece the stroke drew past a wall (ending free, the stroke going on behind the wall) is dropped
 //     when shorter than STUB × snap: an overshoot, not a wall.
-// An old wall moves only for a new wall (a divider never pulls a wall); old dividers move for both. Every
-// change is checked: one that would make walls cross or overlap is skipped.
+// An old wall moves only for a new wall, except in step 2 (an old wall end onto a new divider across it);
+// old dividers move for both. Every change is checked: one that would make walls cross or overlap is
+// skipped.
 // opts: { edgeIds: the stroke's pieces, ends: [nodeId, nodeId] its two outer ends, before: the doc before
 // the stroke, snap, kind, sketchScale } → { doc, edgeIds (the stroke's pieces now), splits, removed }
 export function joinStrokeEnds(doc, { edgeIds = [], ends = [], before = null, snap = 200, kind = 'wall', sketchScale = 1 } = {}) {
@@ -995,7 +1390,15 @@ export function joinStrokeEnds(doc, { edgeIds = [], ends = [], before = null, sn
     attempt((w) => {
       if (!w.nodeMap.has(fid) || degree(w, fid) !== 1) return null;
       const E = incidentOf(w, fid)[0];
-      if (!isAxis(E) || stroke.has(E.id) || !mayMove(E)) return null;
+      // A wall end near a new 구역 나누기 선 across its line is joined to it as after a wall: one it CROSSES
+      // is cut back to it (final review 2026-10-28, D6: the 거실 | 주방 wall drawn 0.2 snap past where the
+      // 복도's 구역 나누기 선 came later kept a 36 mm stub, a 확인필요 'not joined' on a correct plan, about
+      // 4 px on screen to drag), and one that stops short of it grows onto it within one snap (round 2,
+      // 2026-10-31: 11 of 25 D6 sketches kept the end loose 0.1–0.6 snap short, 거실 and 주방 were one room
+      // and a false 'fold' blamed a correct value; drawn in the other order, or with a wall, it was joined).
+      // Other moves of a wall stay for walls (step 1: a divider's own free ends do not pull walls).
+      const toDivider = !mayMove(E) && kind === 'divider' && E.kind === 'wall';
+      if (!isAxis(E) || stroke.has(E.id) || (!mayMove(E) && !toDivider)) return null;
       const F = pos(w, fid), G = pos(w, otherEnd(E, fid));
       const key = E.orient === 'v' ? 'y' : 'x', other = E.orient === 'v' ? 'x' : 'y';
       const dF = sgn(F[key] - G[key]);
@@ -1039,7 +1442,11 @@ export function joinStrokeEnds(doc, { edgeIds = [], ends = [], before = null, sn
       const atJ = incidentOf(w, jid);
       if (atJ.length < 3) return null;
       const behind = atJ.some((e) => e.id !== S.id && stroke.has(e.id));
-      const wall = atJ.some((e) => !stroke.has(e.id) && (kind === 'divider' || e.kind === 'wall'));
+      // The stroke closing on itself counts like a wall: a rectangle started a little before the corner
+      // its closing leg reaches leaves its first piece past that leg (final review 2026-10-28, E2: a 22 mm
+      // stub and a 확인필요 'not joined'; §7.13 drops the stroke's own overshoots).
+      const self = kind === 'wall' && atJ.filter((e) => e.id !== S.id && stroke.has(e.id)).length >= 2;
+      const wall = self || atJ.some((e) => !stroke.has(e.id) && (kind === 'divider' || e.kind === 'wall'));
       if (!behind || !wall || dist(pos(w, S.a), pos(w, S.b)) >= STUB * snap) return null;
       dropEdge(w, S.id);
       dropped = S.id;

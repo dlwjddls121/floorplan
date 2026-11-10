@@ -50,8 +50,8 @@
 //     across a measured side makes a span too (DESIGN.md §7.9): its parts are computed with the wall's
 //     assumed thickness between them; computed dims carry `byWall` / `wallGap` (tap text names the wall).
 
-import { cornerCoeffs } from './solver.js';
-import { pointInPolygon } from './geom.js';
+import { cornerCoeffs, islandWall } from './solver.js';
+import { pointInPolygon, segmentIntersection } from './geom.js';
 import { measureSideKey } from './rooms.js';
 import { twoSideKey, resolvedKeys } from './checkkeys.js';
 
@@ -663,6 +663,26 @@ export function dimText(dim, bothValues) {
   return main;
 }
 
+// What lies next to a computed part c (derived.computedMeasures, id 'computed:<span>:<room>:<side>') in its
+// measured span (derived.spans[].joints: joints[k - 1] before part k, joints[k] after it), as the panel says it
+// (ui/panel.js computedJoint): → { slantedJoint: a DIAGONAL wall (orient 'd') right before or after this part,
+// jointGap: the straight walls' assumed thickness taken off the span (its wallGap when no wall is slanted) }
+// (A slanted wall leaves more than its thickness along the side, e.g. 264 for a 100 wall: no '벽 두께'
+// figure then; final review round 3, the tap text said '벽 위치로 계산 …, 벽 두께 X 뺌' for those too.)
+function computedJointOf(project, derived, c) {
+  const out = { slantedJoint: false, jointGap: isNum(c && c.wallGap) && c.wallGap > 0 ? c.wallGap : 0 };
+  const spans = (derived && derived.spans) || [];
+  const sp = c && c.spanId != null ? spans.find((x) => x && x.measureId === c.spanId) : null;
+  if (!sp || !Array.isArray(sp.joints)) return out;
+  const isSlanted = (j) => !!j && j.kind === 'wall' && (project.edges || []).some((e) => e.id === j.edgeId && e.orient === 'd');
+  if (!sp.joints.some(isSlanted)) return out;
+  const parts = Array.isArray(sp.parts) ? sp.parts : [];
+  const k = parts.findIndex((p) => p && `computed:${sp.measureId}:${p.roomId}:${p.sideKey}` === c.id);
+  out.slantedJoint = k < 0 ? true : isSlanted(sp.joints[k - 1]) || isSlanted(sp.joints[k]);
+  out.jointGap = sp.joints.reduce((sum, j) => sum + (j && !isSlanted(j) && j.thickness > 0 ? j.thickness : 0), 0);
+  return out;
+}
+
 // "방3 쪽 2700 / 주방 쪽 2800" — both values of a dimension, for the editor (plan §5-4).
 export function describeDim(project, dim) {
   const rooms = new Map((project.rooms || []).map((r) => [r.id, r]));
@@ -671,9 +691,13 @@ export function describeDim(project, dim) {
     const r = rooms.get((dim.roomIds || [])[0]);
     const name = (r && r.name) || '이름 없는 실';
     if (dim.byWall) {
-      // A wall drawn across a measured side (§7.9): the parts + the assumed wall make the whole.
-      const wall = isNum(dim.wallGap) && dim.wallGap > 0 ? `, 벽 두께 ${formatDimValue(dim.wallGap)} 뺌` : '';
-      return `${name} 쪽 ${formatDimValue(dim.value)} (벽 위치로 계산${span ? ` · 전체 ${formatDimValue(span.value)}${wall}` : ''})`;
+      // A wall drawn across a measured side (§7.9): the parts + the assumed wall make the whole. Next to a
+      // slanted wall the part is where that wall stands, no thickness taken off (computedJointOf, as the panel).
+      const total = span ? ` · 전체 ${formatDimValue(span.value)}` : '';
+      if (dim.slantedJoint) return `${name} 쪽 ${formatDimValue(dim.value)} (사선 벽 자리로 계산${total})`;
+      const gap = isNum(dim.jointGap) ? dim.jointGap : dim.wallGap;
+      const wall = isNum(gap) && gap > 0 ? `, 벽 두께 ${formatDimValue(gap)} 뺌` : '';
+      return `${name} 쪽 ${formatDimValue(dim.value)} (벽 위치로 계산${span ? `${total}${wall}` : ''})`;
     }
     return `${name} 쪽 ${formatDimValue(dim.value)} (구역을 나눈 위치로 계산${span ? ` · 전체 ${formatDimValue(span.value)}` : ''})`;
   }
@@ -789,6 +813,7 @@ export function buildDimensions(project, derived, options = {}) {
       axis: cand.axis, a: cand.a, b: cand.b, line: cand.line, lineSpan: cand.lineSpan, exterior: cand.exterior,
       side: owner ? owner.side : cand.side, override: ov, text: '', extFrom: [], computed: true, spanId: c.spanId,
       byWall: !!c.byWall, byDivider: !!c.byDivider, wallGap: isNum(c.wallGap) ? c.wallGap : 0,
+      ...computedJointOf(project, derived, c),
     };
     if (ov && DIM_SIDES.includes(ov.side) && sideAxis(ov.side) === d.axis) d.side = ov.side;
     const dup = dims.some((x) => x.side === d.side && x.axis === d.axis
@@ -839,6 +864,33 @@ function spanParts(sp, roomById) {
   return parts.length && parts.every((p) => p.dr && p.i >= 0) ? parts : null;
 }
 
+// Is the free side of one-faced wall `id` inside another room's outline (an island room's wall, by the
+// solver's rule: solver.islandWall)? → bool
+function freeSideInRoom(id, pair, nodes, edges, derived) {
+  const e = edges.get(id);
+  return !!e && islandWall(e, pair[0] != null ? -1 : 1, nodes, derived.rooms);
+}
+
+// Does a room (other than roomId and those in `skip`) lie beyond point p (on an outer wall) in direction
+// v, before the plan's outer bounds? The ray from 200 mm out (past the wall) to the bounds against every
+// other room's outline. → bool
+function roomsBeyond(p, v, bounds, roomId, derived, skip = null) {
+  const reach = v.x > 0 ? bounds.maxX - p.x : v.x < 0 ? p.x - bounds.minX : v.y > 0 ? bounds.maxY - p.y : p.y - bounds.minY;
+  if (!(reach > 200)) return false;
+  const a = { x: p.x + v.x * 200, y: p.y + v.y * 200 }, b = { x: p.x + v.x * reach, y: p.y + v.y * reach };
+  const lo = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) }, hi = { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) };
+  for (const dr of derived.rooms || []) {
+    if (dr.roomId === roomId || (skip && skip.has(dr.roomId)) || !dr.face || !dr.face.points) continue;
+    const pts = dr.face.points;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of pts) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y); }
+    if (x1 < lo.x || x0 > hi.x || y1 < lo.y || y0 > hi.y) continue;
+    if (pointInPolygon(a, pts)) return true;
+    for (let i = 0; i < pts.length; i++) if (segmentIntersection(a, b, pts[i], pts[(i + 1) % pts.length])) return true;
+  }
+  return false;
+}
+
 // Candidate dimension for a straight run of room sides: one side, or the parts of a span from the first
 // part's inner corner at its start to the last part's inner corner at its end. → candidate | null
 function runCandidate(roomId, key, parts, project, derived, nodes, edges, bounds) {
@@ -862,10 +914,34 @@ function runCandidate(roomId, key, parts, project, derived, nodes, edges, bounds
     const pair = derived.edgeFaces && derived.edgeFaces.get(id);
     if (pair && (pair[0] == null) !== (pair[1] == null)) exterior = true;
   }
-  let chainSide;
+  // A wall whose outer side lies inside another room (a room standing free in a room, C5's 드레스룸) is an
+  // inner wall here (final review 2026-10-28).
+  if (exterior && parts.every((p) => p.dr.sides[p.i].edgeIds.every((id) => {
+    const pair = derived.edgeFaces && derived.edgeFaces.get(id);
+    return !(pair && (pair[0] == null) !== (pair[1] == null)) || freeSideInRoom(id, pair, nodes, edges, derived);
+  }))) exterior = false;
+  let chainSide, sideOver = null;
   if (exterior) {
     const out = axis === 'x' ? -side.inwardNormal.y : -side.inwardNormal.x;
     chainSide = axis === 'x' ? (out < 0 ? 'top' : 'bottom') : (out < 0 ? 'left' : 'right');
+    // Another wing or building beyond this outer wall (C2: 방1 · 방2 measured on the 마당 wall printed on
+    // the right chain past the right wing, beside its 화장실 / 방3 values; C6: the 본채's right side beside
+    // the 별채's): the chain on the room's other side (final review 2026-10-28, dims-far-chain). Not for a
+    // room built onto this wall (a 베란다 on part of it: round 2, 2026-10-31, the 거실's 4875 went to the
+    // top chain under 방1 · 방2 as if one of their widths), nor when that other chain lies past other rooms
+    // of this building (C6 turned: the 거실's 3675 printed over 방1's 3175 and the print went from 1:60 to
+    // 1:75). Then it still goes there when the same span with the same value is printed there already
+    // (applyCoverRule, sideOver: E2's 거실 3680 under a 베란다 is 방1's 3680 above it, printed once).
+    const mid = { x: (P.x + Q.x) / 2, y: (P.y + Q.y) / 2 };
+    const outV = axis === 'x' ? { x: 0, y: out < 0 ? -1 : 1 } : { x: out < 0 ? -1 : 1, y: 0 };
+    const own = new Set(parts.flatMap((p) => p.dr.sides[p.i].edgeIds));
+    const attached = new Set((derived.rooms || []).filter((dr) => dr.face && dr.face.edgeIds.some((id) => own.has(id))).map((dr) => dr.roomId));
+    const flipped = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }[chainSide];
+    const backV = { x: -outV.x, y: -outV.y };
+    if (roomsBeyond(mid, outV, bounds, roomId, derived)) {
+      if (roomsBeyond(mid, outV, bounds, roomId, derived, attached) && !roomsBeyond(mid, backV, bounds, roomId, derived)) chainSide = flipped;
+      else sideOver = flipped;
+    }
   } else if (axis === 'x') {
     chainSide = line - bounds.minY <= bounds.maxY - line ? 'top' : 'bottom';
   } else {
@@ -875,6 +951,8 @@ function runCandidate(roomId, key, parts, project, derived, nodes, edges, bounds
   const nA = first.dr.sides.length, nB = last.dr.sides.length;
   return {
     roomId, sideKey: key, axis, a, b, line, exterior, side: chainSide,
+    // The chain past a room built onto this wall, taken only to show this value once (rule 3).
+    ...(sideOver ? { sideOver } : {}),
     // Wall centre lines at both ends (for rule 3).
     lineSpan: [Math.min(P[axis], Q[axis]), Math.max(P[axis], Q[axis])],
     // A corner of this run is a diagonal wall's (rule 3: then the inner faces decide "the same span").
@@ -969,6 +1047,7 @@ function mergeCandidates(members, overrides, st, resolved = new Set(), pairOf = 
     lineSpan: primary.lineSpan,
     exterior: members.some((c) => c.exterior),
     side: (members.find((c) => c.exterior) || primary).side,
+    sideOver: (members.find((c) => c.exterior) || primary).sideOver || null,
     override,
     text: '', extFrom: [],
     diagonalEnd: members.some((c) => c.diagonalEnd),
@@ -1012,6 +1091,11 @@ function applyCoverRule(dims, bounds, hidden) {
       hidden.push({ key: x.key, measureIds: x.measureIds, value: x.value, reason, by: by ? by.measureIds : [] });
     };
     if (hasExterior) for (const x of group) if (!x.exterior) hide(x, group.find((y) => y.exterior), 'covered');
+    // An outer side whose chain lies past a room built onto its wall: on the other chain when the same
+    // span with the same value is printed there (it is then that one, see runCandidate).
+    for (const x of group) {
+      if (x.sideOver && out.has(x) && group.some((y) => y !== x && out.has(y) && y.side === x.sideOver && Math.abs(y.value - x.value) < 1)) x.side = x.sideOver;
+    }
     for (const side of DIM_SIDES) {
       const onSide = group.filter((x) => out.has(x) && x.side === side);
       if (onSide.length < 2) continue;
@@ -1127,20 +1211,35 @@ export function assignRows(list, opts = {}) {
   return rows;
 }
 
-// Where the numbers of one row go (shared by draw-dims.js and printlayout.js).
+// Where the numbers of one row go (placeChainTexts below, for every row of every chain: shared by
+// draw-dims.js, printlayout.js and the aligned dimensions' chainObstacles).
 //   row: dims of one row; k: drawing units per world mm; textWidth(dim) → drawing units;
-//   arrow: arrow length, gap: clearance, both in drawing units.
+//   arrow: arrow length, gap: clearance, both in drawing units; obstacles: { outer, flip } — [[lo, hi]]
+//   (drawing units along the axis) taken already on this row's number band on the outer side of the line /
+//   on its plan side (the numbers the other chains put past the plan's corners, placeChainTexts).
 // A number goes between the arrows when it fits; otherwise beside the span (after it, else before it),
 // where it does not run into a neighbour's number; then just past the number that blocks that slot,
 // if that stays close to the span; then (allowFlip: the row next to the plan, where the band between
-// the wall and the line is free) centred on the plan side of the line; as the last resort the slot
+// the wall and the line is free) centred on the plan side of the line; then over its own span (moved along
+// it to be clear of the numbers beside it, still over its span's middle); as the last resort the slot
 // that overlaps the other numbers least (two short spans in a row, e.g. two 100 mm steps).
 // → Map dim → { mode: 'inside' | 'after' | 'before' | 'center' | 'flip', center (world coordinate along
 //               the axis), half (half text width in world mm) }   ('flip' = on the plan side of the line)
-export function placeRowTexts(row, { k, textWidth, arrow, gap, allowFlip = false }) {
+const WALL_BETWEEN_MM = 160; // placeRowTexts: two spans this far apart (world mm) are side by side
+// placeRowTexts: the least clearance (share of `gap`) at which two numbers kept in order still read apart.
+export const SNUG_GAP = 0.8;
+export function placeRowTexts(row, { k, textWidth, arrow, gap, allowFlip = false, obstacles = null, keepOrder = false }) {
   const items = row.map((d) => ({ d, a: d.a * k, b: d.b * k, w: textWidth(d) })).sort((p, q) => p.a - q.a);
   const boxes = [];      // numbers on the outer side of the line
   const flipped = [];    // numbers on the plan side
+  // The other chains' numbers on this row's bands (placeChainTexts): kept clear of like this row's own. They
+  // lie past an end of the plan (past a corner), so a number never jumps past one of them (see jump).
+  const isSpan = (x) => Array.isArray(x) && isNum(x[0]) && isNum(x[1]) && x[1] > x[0];
+  const other = (x) => Object.assign([x[0], x[1]], { other: true });
+  if (obstacles) {
+    for (const x of obstacles.outer || []) if (isSpan(x)) boxes.push(other(x));
+    for (const x of obstacles.flip || []) if (isSpan(x)) flipped.push(other(x));
+  }
   const res = new Map();
   const put = (it, mode, c) => {
     (mode === 'flip' ? flipped : boxes).push([c - it.w / 2, c + it.w / 2]);
@@ -1151,44 +1250,204 @@ export function placeRowTexts(row, { k, textWidth, arrow, gap, allowFlip = false
     if (it.w <= it.b - it.a) put(it, 'inside', (it.a + it.b) / 2);
     else pending.push(it);
   }
-  const freeIn = (list, lo, hi) => list.every(([p, q]) => hi + gap <= p || lo - gap >= q);
+  // (1e-9: a slot just past a number, at exactly `gap` from it, is clear of it; in floating point it came
+  // out a hair inside, and the search for the next slot stood still on it.)
+  const clearOf = (lo, hi, [p, q]) => hi + gap <= p + 1e-9 || lo - gap >= q - 1e-9;
+  const freeIn = (list, lo, hi) => list.every((box) => clearOf(lo, hi, box));
   const free = (lo, hi) => freeIn(boxes, lo, hi);
   const overlapOf = (lo, hi) => boxes.reduce((s, [p, q]) => s + Math.max(0, Math.min(hi + gap, q) - Math.max(lo - gap, p)), 0);
+  // The numbers keep the order of their spans (final review 2026-10-28, D1 at 1:150: two short spans side
+  // by side, 다용도실 1100 | 보일러실 1200, each wrote its number beside the OTHER span, so they read
+  // swapped; 드레스룸 1500 was written left of 안방's 4300). A number beside its span stays between the
+  // numbers of its neighbours on the row (a placed one is a bound); of two short spans side by side the
+  // first writes its number before, the second after.
+  const idx = new Map(items.map((it, i) => [it, i]));
+  const isPending = new Set(pending);
+  // Side by side: touching, or with a wall between them (round 2, 2026-10-31: two short spans either side
+  // of a 100 mm wall are 1.3 mm apart at 1:75, and the rule did not hold for them).
+  const touching = (p, q) => q.a - p.b <= gap + WALL_BETWEEN_MM * k + 1e-9;
+  const placedAt = (it) => (res.has(it.d) ? res.get(it.d).center * k : null);
   for (const it of pending) {
+    const i = idx.get(it);
+    const prev = i > 0 ? items[i - 1] : null, next = i + 1 < items.length ? items[i + 1] : null;
+    const prevC = prev ? placedAt(prev) : null, nextC = next ? placedAt(next) : null;
+    const nextWaits = !!(next && isPending.has(next) && !res.has(next.d) && touching(it, next));
+    const inOrder = (c) => (prevC == null || c > prevC) && (nextC == null || c < nextC);
     const half = it.w / 2;
     const out = it.b - it.a < 2 * arrow ? arrow : 0; // arrows drawn outside a very short span
     const after = it.b + out + gap + half;
     const before = it.a - out - gap - half;
-    const cands = [['after', after], ['before', before]];
-    // Just past the numbers blocking a slot, while the number stays within ~1.5 widths of its span.
-    const reach = 1.5 * it.w + out + gap;
-    const past = (c, dir) => {
-      for (let n = 0; n < 4; n++) {
-        const lo = c - half, hi = c + half;
-        const blockers = boxes.filter(([p, q]) => !(hi + gap <= p || lo - gap >= q));
+    const cands = nextWaits ? [['before', before], ['after', after]] : [['after', after], ['before', before]];
+    // The first free slot from c on in direction dir, just past the numbers blocking each slot tried (at most
+    // `tries` slots), or null. Never past another chain's number: that is past a corner of the plan, away from
+    // the span (final review round 4, E4 / A5 at 1:150: a short end span's number was pushed past the top
+    // chain's number into the corner, 10 mm from its span; it goes on the plan side of its line instead).
+    const jump = (c, dir, tries) => {
+      for (let n = 0; n < tries && c != null; n++) {
+        const blockers = boxes.filter((box) => !clearOf(c - half, c + half, box));
         if (!blockers.length) return c;
+        if (blockers.some((box) => box.other)) return null;
         c = dir > 0 ? Math.max(...blockers.map((x) => x[1])) + gap + half : Math.min(...blockers.map((x) => x[0])) - gap - half;
       }
       return null;
     };
+    // Just past the numbers blocking a slot, while the number stays within ~1.5 widths of its span.
+    const reach = 1.5 * it.w + out + gap;
+    const past = (c, dir) => jump(c, dir, 4);
     const pa = past(after, 1), pb = past(before, -1);
-    if (pa != null && pa - half - it.b <= reach) cands.push(['after', pa]);
-    if (pb != null && it.a - (pb + half) <= reach) cands.push(['before', pb]);
-    const hit = cands.find(([, c]) => free(c - half, c + half));
+    const pastCands = [];
+    if (pa != null && pa - half - it.b <= reach) pastCands.push(['after', pa]);
+    if (pb != null && it.a - (pb + half) <= reach) pastCands.push(['before', pb]);
+    if (nextWaits) pastCands.reverse();
+    cands.push(...pastCands);
+    // The slot after a short span whose right neighbour's number waits too belongs to that neighbour.
+    const ok = (m, c) => free(c - half, c + half) && inOrder(c) && !(nextWaits && m === 'after' && c + half > next.a);
+    const hit = cands.find(([m, c]) => ok(m, c));
     if (hit) { put(it, hit[0], hit[1]); continue; }
     const mid = (it.a + it.b) / 2;
     if (allowFlip && freeIn(flipped, mid - half, mid + half)) { put(it, 'flip', mid); continue; }
     // Further away is still better than two numbers printed over each other.
     const far = [['after', pa, pa != null ? pa - half - it.b : Infinity], ['before', pb, pb != null ? it.a - (pb + half) : Infinity]]
-      .filter(([, c, dist]) => c != null && isFinite(dist) && free(c - half, c + half))
+      .filter(([m, c, dist]) => c != null && isFinite(dist) && ok(m, c))
       .sort((p, q) => p[2] - q[2])[0];
     if (far) { put(it, far[0], far[1]); continue; }
+    // In order a little farther: up to 3 widths past the blocking numbers, the slot after a span whose
+    // neighbour waits included (that neighbour then goes past it).
+    const wide = (c, dir) => jump(c, dir, 8);
+    const wa = wide(after, 1), wb = wide(before, -1);
+    const farther = [['after', wa, wa != null ? wa - half - it.b : Infinity], ['before', wb, wb != null ? it.a - (wb + half) : Infinity]]
+      .filter(([, c, dist]) => c != null && dist <= 2 * reach && free(c - half, c + half) && inOrder(c))
+      .sort((p, q) => p[2] - q[2])[0];
+    // Over its own span, wider than it: centred where nothing else is, else moved along the span just clear
+    // of the numbers beside it (`clear` from them), in order, as long as it still covers the span's middle
+    // (final review round 4, A1 at 1:150: '1100' fitted between the 3175 and the 2450 beside it 0.65 mm off
+    // its middle; only the fixed slots were tried, and it was written after the 2450, over the 1500's span,
+    // out of order). → centre (drawing units) | undefined
+    const overOwn = (clear) => [mid, ...boxes.flatMap(([p, q]) => [p - clear - half, q + clear + half])]
+      .filter((c) => Math.abs(c - mid) <= half + 1e-9 && inOrder(c)
+        && boxes.every(([p, q]) => c + half + clear <= p + 1e-9 || c - half - clear >= q - 1e-9))
+      .sort((p, q) => Math.abs(p - mid) - Math.abs(q - mid))[0];
+    const own = overOwn(gap);
+    // The slot after this span over the span of a neighbour whose number waits (that number then goes past
+    // it) only when this number has no place over its own span: else it read as the neighbour's (A1 at 1:150:
+    // '1500' over the 1575's span, the 1575 past the end of the chain; since 0.6.8).
+    const takesNext = (m, c) => nextWaits && m === 'after' && c + half > next.a;
+    if (farther && !(own != null && takesNext(farther[0], farther[1]))) { put(it, farther[0], farther[1]); continue; }
+    if (own != null) { put(it, 'center', own); continue; }
+    // No free spot keeps the order: a free one that does not is still better than numbers printed over
+    // each other (two 100 mm spans between two long ones on an outer row at 1:60), the nearest, however far
+    // past the blocking numbers (round 2, 2026-10-31: only the near slots were tried, and 185 | 150 of
+    // 1275 | 185 | 150 | 2890 | 420 at 1:75 were printed 4 mm over each other; 0.6.8 never did).
+    const scan = (c, dir) => jump(c, dir, 64);
+    const dist = (c) => (c >= mid ? c - half - it.b : it.a - (c + half));
+    // In order, the numbers apart though closer than `gap` (D1 at 1:150: 1500 over its own span 0.85 mm
+    // from the 2300 beside it) is better than out of order, down to SNUG_GAP of it: closer, two numbers read
+    // as one ('1405' and '1940' 0.33 paper mm apart at 1:150 read '14051940', '1140 195 960' at 1:75 read
+    // '1140195960'; final review round 3), and a free slot out of order (anyFree, below) is better.
+    const snug = (c) => c != null && boxes.every(([p, q]) => c + half + SNUG_GAP * gap <= p + 1e-9 || c - half - SNUG_GAP * gap >= q - 1e-9);
+    const inOrderSnug = [['center', mid], ...cands, ['after', wa], ['before', wb], ['center', overOwn(SNUG_GAP * gap)]]
+      .filter(([, c]) => snug(c) && inOrder(c))
+      .sort((p, q) => Math.max(0, dist(p[1])) - Math.max(0, dist(q[1])))[0];
+    if (inOrderSnug) { put(it, inOrderSnug[0], inOrderSnug[1]); continue; }
+    const anyFree = [...cands, ['center', mid], ['after', scan(after, 1)], ['before', scan(before, -1)]]
+      .filter(([, c]) => c != null && free(c - half, c + half))
+      .sort((p, q) => Math.max(0, dist(p[1])) - Math.max(0, dist(q[1])))[0];
+    if (anyFree) { put(it, anyFree[0], anyFree[1]); continue; }
     const last = [['center', mid], ['after', after], ['before', before]]
       .map(([m, c]) => ({ m, c, o: overlapOf(c - half, c + half) }))
       .sort((p, q) => p.o - q.o)[0];
     put(it, last.m, last.c);
   }
+  if (keepOrder) putRowInOrder(items, res, k, gap, boxes.filter((box) => box.other));
   return res;
+}
+
+// placeRowTexts with keepOrder (the chains of a separately drawn part on paper, printlayout.js separateParts): a row whose
+// numbers still do not read in the order of their spans (no number had a free spot between its neighbours; question 8: D1
+// 1층's own right chain at 1:150, 3000 | 1200 | 2270 | 1800 | 1200) is laid out again in that order, each number as near the
+// middle of its span as the others let it (the least squares: neighbours pooled while they would cross), unless that runs
+// into a number of another chain (others). Every other row stays where it is: a plan of one part prints as it always has,
+// and zoomed out on the screen every row is out of order. items: placeRowTexts's; res: its result, changed in place. → nothing
+function putRowInOrder(items, res, k, gap, others) {
+  const row = items.filter((it) => res.get(it.d).mode !== 'flip');
+  const placedAt = (it) => res.get(it.d).center * k;
+  if (row.every((it, i) => i === 0 || placedAt(row[i - 1]) < placedAt(it))) return;
+  const before = [0];   // the room the numbers before each one take
+  for (let i = 1; i < row.length; i++) before.push(before[i - 1] + (row[i - 1].w + row[i].w) / 2 + gap);
+  const pools = [];
+  row.forEach((it, i) => {
+    let pool = { sum: (it.a + it.b) / 2 - before[i], n: 1 };
+    while (pools.length && pools[pools.length - 1].sum / pools[pools.length - 1].n >= pool.sum / pool.n) {
+      const q = pools.pop();
+      pool = { sum: q.sum + pool.sum, n: q.n + pool.n };
+    }
+    pools.push(pool);
+  });
+  const centres = pools.flatMap((pool) => Array(pool.n).fill(pool.sum / pool.n)).map((c, i) => c + before[i]);
+  const clear = (c, half) => others.every(([p, q]) => c + half + gap <= p + 1e-9 || c - half - gap >= q - 1e-9);
+  if (!row.every((it, i) => clear(centres[i], it.w / 2))) return;
+  row.forEach((it, i) => {
+    const moved = Math.abs(centres[i] - placedAt(it)) > 1e-6;
+    if (moved) res.set(it.d, { mode: 'center', center: centres[i] / k, half: it.w / 2 / k });
+  });
+}
+
+// placeChainTexts: how far (share of the number height) another chain's number may reach into a row's number band
+// before it holds that row's numbers off (the digits of the output font leave 10–13 % of their box free at the top
+// and bottom, 4 % at the ends; the screen's 7–19 %).
+export const CORNER_TOUCH = 0.1;
+
+// Where the numbers of every row of every chain go (shared by draw-dims.js, printlayout.js and chainObstacles):
+// placeRowTexts row by row, the chains in order (top, right, bottom, left), each row clear of the numbers the
+// chains before it put on its number bands: past a corner of the plan a number written beside a short end span
+// reaches into the other chain's rows (final review round 4, 1:150: E1's bottom '1500' after its span and the
+// right chain's '1700' after its span met past the bottom-right corner, 12 mm² over each other; E4's top '1800'
+// and left '1500' before theirs at the top-left corner). Coordinates: drawing units = world mm × k.
+//   res: buildDimensions result; opts: { k, textWidth(dim) → drawing units, arrow, gap (as placeRowTexts),
+//   first: { top, right, bottom, left } (each side's first row from the plan's outer face; a missing one:
+//   firstDefault), row (between rows), textGap (line → number), text (number height), allowFlip(rowIndex)
+//   (default: the row next to the plan), keepOrder (placeRowTexts: only for a separately drawn part on paper) }, all in drawing units.
+// → Map dim → { mode, center, half } (placeRowTexts)
+export function placeChainTexts(res, opts = {}) {
+  const out = new Map();
+  const b = res && res.bounds;
+  if (!b || !(opts.k > 0)) return out;
+  const { k, textWidth, arrow, gap } = opts;
+  const step = opts.row || 0, textGap = opts.textGap || 0, text = opts.text || 0;
+  const allowFlip = typeof opts.allowFlip === 'function' ? opts.allowFlip : (r) => r === 0;
+  const taken = [];   // numbers placed so far: { side, x0, x1, y0, y1 } (drawing units)
+  for (const chain of res.chains || []) {
+    const side = chain.side, sign = side === 'top' || side === 'left' ? -1 : 1;
+    const horizontal = side === 'top' || side === 'bottom';
+    const face = (side === 'top' ? b.minY : side === 'bottom' ? b.maxY : side === 'left' ? b.minX : b.maxX) * k;
+    const first = opts.first && opts.first[side] > 0 ? opts.first[side] : (opts.firstDefault || 0);
+    chain.rows.forEach((row, r) => {
+      const s = face + sign * (first + r * step);
+      // The band a number takes across the chain: outside the line (dir 1) or on its plan side (dir −1).
+      const band = (dir) => { const p = s + dir * sign * textGap, q = s + dir * sign * (textGap + text); return [Math.min(p, q), Math.max(p, q)]; };
+      const outer = band(1), flip = band(-1);
+      const across = (t) => (horizontal ? [t.y0, t.y1] : [t.x0, t.x1]);
+      const along = (t) => (horizontal ? [t.x0, t.x1] : [t.y0, t.y1]);
+      // (Only a number that reaches into the band by more than CORNER_TOUCH of the number height: two numbers of
+      // a corner diagonal to each other whose boxes just touch there do not touch with their digits, which keep
+      // about that much of the box free at the top and bottom (HEO at 1:150: the right chain's '750' 0.4 mm into
+      // the bottom row's band beside its '700', as since 0.6.8). Along the row it keeps `gap` from those it holds off.)
+      const touch = CORNER_TOUCH * text;
+      const on = (bd) => taken.filter((t) => {
+        if (t.side === side) return false;
+        const [p, q] = across(t);
+        return Math.min(q, bd[1]) - Math.max(p, bd[0]) > touch + 1e-9;
+      }).map(along);
+      const flipOk = !!allowFlip(r);
+      const placed = placeRowTexts(row, { k, textWidth, arrow, gap, allowFlip: flipOk, obstacles: { outer: on(outer), flip: flipOk ? on(flip) : [] }, keepOrder: !!opts.keepOrder });
+      for (const [d, tp] of placed) {
+        out.set(d, tp);
+        const c = tp.center * k, h = tp.half * k, bd = tp.mode === 'flip' ? flip : outer;
+        taken.push(horizontal ? { side, x0: c - h, x1: c + h, y0: bd[0], y1: bd[1] } : { side, x0: bd[0], x1: bd[1], y0: c - h, y1: c + h });
+      }
+    });
+  }
+  return out;
 }
 
 // ---- aligned dimensions of diagonal sides (rule 7) ------------------------------------------------
@@ -1203,23 +1462,28 @@ export function uprightAngle(u) {
 
 // The axis chains as the drawing lays them out (draw-dims.js layoutDimensions), in world mm: their
 // dimension and extension lines as segments, their numbers as boxes (numbers moved by hand are left
-// at their automatic place). wpu = world mm per drawing unit; S: sizes in drawing units.
-function chainObstacles(res, wpu, S, textWidth) {
+// at their automatic place). wpu = world mm per drawing unit; S: sizes in drawing units; firsts: each
+// side's first row (drawing units; printlayout.js chainFirstRows, past an outward door's swing), else S.first;
+// keepOrder: placeRowTexts. → { segs: [{ p, q, kind: 'line' | 'ext', side (of 'line') }], boxes (with their side) }
+export function chainObstacles(res, wpu, S, textWidth, firsts = null, keepOrder = false) {
   const b = res.bounds;
   const segs = [], boxes = [];
   if (!b) return { segs, boxes };
   const k = 1 / wpu;
+  const texts = placeChainTexts(res, {
+    k, textWidth, arrow: S.arrow, gap: S.clear, first: firsts, firstDefault: S.first, row: S.row, textGap: S.textGap, text: S.text, keepOrder,
+  });
   for (const chain of res.chains || []) {
     const side = chain.side, sign = side === 'top' || side === 'left' ? -1 : 1;
     const horizontal = side === 'top' || side === 'bottom';
     const face = side === 'top' ? b.minY : side === 'bottom' ? b.maxY : side === 'left' ? b.minX : b.maxX;
     const P = (t, s) => (horizontal ? { x: t, y: s } : { x: s, y: t });
+    const first = firsts && firsts[side] > 0 ? firsts[side] : S.first;
     chain.rows.forEach((row, r) => {
-      const s = face + sign * (S.first + r * S.row) * wpu;
-      const texts = placeRowTexts(row, { k, textWidth, arrow: S.arrow, gap: S.clear, allowFlip: r === 0 });
+      const s = face + sign * (first + r * S.row) * wpu;
       for (const d of row) {
         const t1 = d.drawA != null ? d.drawA : d.a, t2 = d.drawB != null ? d.drawB : d.b;
-        segs.push({ p: P(t1, s), q: P(t2, s), kind: 'line' });
+        segs.push({ p: P(t1, s), q: P(t2, s), kind: 'line', side });
         (d.extFrom || []).forEach((pt, i) => {
           const f = horizontal ? pt.y : pt.x;
           const t = i === 0 ? t1 : t2;
@@ -1229,8 +1493,8 @@ function chainObstacles(res, wpu, S, textWidth) {
         if (!tp) continue;
         const c = s + (tp.mode === 'flip' ? -sign : sign) * (S.textGap + S.text / 2) * wpu, hh = (S.text / 2) * wpu;
         boxes.push(horizontal
-          ? { minX: tp.center - tp.half, maxX: tp.center + tp.half, minY: c - hh, maxY: c + hh }
-          : { minX: c - hh, maxX: c + hh, minY: tp.center - tp.half, maxY: tp.center + tp.half });
+          ? { minX: tp.center - tp.half, maxX: tp.center + tp.half, minY: c - hh, maxY: c + hh, side }
+          : { minX: c - hh, maxX: c + hh, minY: tp.center - tp.half, maxY: tp.center + tp.half, side });
       }
     });
   }
@@ -1241,7 +1505,10 @@ function chainObstacles(res, wpu, S, textWidth) {
 //   res: buildDimensions result; opts: { wpu (world mm per drawing unit), S: { first, row, textGap,
 //   text, arrow, arrowHalf, extGap, extOver, clear } (drawing units, as draw-dims dimStyle),
 //   textWidth(dim) → drawing units, walls: wallPolygons, obstacles: world polygons the numbers keep off
-//   (printlayout.js dimObstacles: fixtures, door swings) }
+//   (printlayout.js dimObstacles: fixtures, door swings), firsts: { top, right, bottom, left } the axis
+//   chains' first rows in drawing units where they differ from S.first (paper: printlayout.js chainFirstRows,
+//   past an outward door's swing; final review round 3: the diagonal sides' numbers kept off the old 8 mm
+//   row and could run into the real one), keepOrder: the chains' numbers as placeRowTexts then places them }
 // Candidates, in order (the first that runs into nothing wins, else the one that runs into least):
 //   outer wall: outside at chain row 0, 1, 2 (rows from the outer face, as the chains), then inside,
 //     then (fixer 2026-10-20) outside half a row out, the number between the line and the wall, the
@@ -1257,7 +1524,7 @@ export function layoutAlignedDims(res, opts = {}) {
   if (!list.length || !opts.S || typeof opts.textWidth !== 'function') return [];
   const wpu = opts.wpu > 0 ? opts.wpu : 1;
   const S = opts.S;
-  const chain = chainObstacles(res, wpu, S, opts.textWidth);
+  const chain = chainObstacles(res, wpu, S, opts.textWidth, opts.firsts || null, !!opts.keepOrder);
   const walls = (opts.walls || []).map((w) => w.points).filter((p) => Array.isArray(p) && p.length >= 3);
   const things = (opts.obstacles || []).filter((p) => Array.isArray(p) && p.length >= 3);
   const placed = [];

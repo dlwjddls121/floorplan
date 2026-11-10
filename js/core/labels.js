@@ -29,42 +29,50 @@
 //    which in a strip lies at one end: user 2026-10-25, 예시 세대 A 베란다1), 'H: 2280' (blue) below it. A name
 //    that does not fit the room's width shrinks down to 70 %, then wraps onto two lines ('화장실' / '2', as
 //    in the 예시 세대 A drawing). A name that would cover every spot of one of its room's window / door labels
-//    over their openings (openingLabelSpots), or lie on a door's swing, moves off them where it can:
-//    across its room's largest open part, then a little along it, then smaller (nameSpotClear); still on
-//    more than NAME_SWING_MIN_PAPER_MM2 of a swing, along the room as far as it takes, then anywhere in it.
+//    over their openings (openingLabelSpots) moves off them where it can: across its room's largest open
+//    part, then a little along it, then smaller (nameSpotClear). On paper it may lie over a door's swing
+//    (the rule for texts over lines, below); the screen keeps it off the swings (ui/render.js).
 //    Places as near as each other are taken in a fixed order, so a value typed in another room never
 //    moves a name to another place (checker 2026-10-25, NAME_SPOT_TIE_PAPER_MM).
 //    Spaces marked 실 아님 use the smaller fixture size, no H, and turn vertical in tall narrow spaces.
 //    Unnamed rooms get no label on paper.
 //  - Opening labels (blue) are ATTACHED to their opening (user 2026-10-24: "바로 붙어 있어야 알아보잖아";
 //    see openingLabelFit for the exact rule): every candidate spot has its near edge about 1.2 paper mm
-//    beyond the face of the wall on its side (a finish layer drawn there counts as wall), and on the
-//    side a hinged door swings into, 1.2 mm beyond the swing (arc and open leaf) wherever the label lies
-//    over it, as the 예시 세대 A drawing writes 'ABS도어 800*2000' just outside its arc. Sliding doors (미서기문,
-//    3연동 도어) and windows have no swing; the side a hinged door does not open into has none either.
+//    beyond the face of the wall on its side (a finish layer drawn there counts as wall), on the side a
+//    hinged door opens into too: there the label lies over its own door's swing (arc and open leaf), a
+//    thin line (user 2026-10-31: '문 위로 겹치게 하는것도 괜찮아. 벽이랑 겹치는거만 아니면'), and after that
+//    spot also 1.2 mm beyond the swing, as the 예시 세대 A drawing writes 'ABS도어 800*2000' just outside its arc
+//    (there only, until then: with no room there, A1 turned wrote the 화장실1 door's label over '목문
+//    700*2000'; 치수선 없이 takes it where the wall's own value holds the face, ui/render.js).
 //    (Before 2026-10-24 every door tried the width of the door beyond the wall first, on whichever side
 //    came first: a 미서기문 1800 label floated 1800 mm into the room.) Sides: inside a room, the larger
 //    real room first, then the other side, then outside an exterior wall. On horizontal walls the label
 //    is one line; on vertical walls it turns and splits into '재질종류' / 'W*H' (left half of the plan
 //    reads bottom→top, right half top→bottom, like the dimension chains). Candidate positions are tried
-//    in order and the first one that hits no wall, no placed label, no dimension number, no fixture and
-//    no other door's swing wins: inside over the opening (centred, then shifted by ¼ / ½ of its width)
-//    at full size, then at 85 %, then beside the opening past its end, then outside an exterior wall
+//    in order and the first one that hits no wall, no placed label, no dimension number and no fixture
+//    (the other doors' swings do not count) wins: inside over the opening (centred, then shifted by ¼ /
+//    ½ of its width) at full size, then at 85 %, then beside the opening past its end, then outside an exterior wall
 //    at full size and at 85 % (the 예시 세대 A drawing puts the 화장실1 window label there, between the wall
 //    and the dimension chain; on a diagonal wall outside comes before past the end). In a crowded spot
 //    where none of these is clear (recheck 2026-10-25, 예시 세대 A turned: the small 베란다1 jog window), the
 //    print slides the label along its wall to the nearest clear attached spot, also written the other way
 //    ('AL단창' / '1000*1050' on two lines beside a horizontal wall) and at 70 %, and a room name moves
-//    elsewhere in its room (smaller if need be, never into a door's swing) to make room for it
-//    (placeOpening crowdedSpot, makeRoomFor). Then the
+//    elsewhere in its room (smaller if need be) to make room for it
+//    (placeOpening crowdedSpot, makeRoomFor); where nothing is clear, those spots over a fixture's outline
+//    band only (texts over lines, below; round 4) before the least overlap. Then the
 //    least-overlap candidate — always one of these attached spots, never a spot further into the room.
+//    The finish layers printed as wall count as wall (paper, round 4).
 //    On paper, when such a fallback is written across another label, the labels are placed again with
 //    the ones that fell back first, and the arrangement with fewer labels across another is kept
 //    (placeOpenings; final check 2026-10-25).
-//    In that fallback a wall counts like a dimension number (4×: blue text on a black wall is lost).
+//    In that fallback a wall counts like a dimension number (4×: blue text on a black wall is lost), a
+//    fixture's outline little and its middle like a wall (the rule for texts over lines, below).
 //    A spot that reads as ANOTHER opening's label (its centre over an opening in a parallel wall, right
-//    at that wall's face, nearer to that opening than to its own: past its end, over the next door) is
-//    taken only when there is no other spot at all (checker 2026-10-24).
+//    at that wall's face, nearer to that opening than to its own: past its end, over the next door; or,
+//    paper, over another door's swing nearer to that door: round 4) is taken only when there is no other
+//    spot at all (checker 2026-10-24).
+//    The editor's screen (opts.screen) keeps its spots from before the rules for texts over lines: on the
+//    side a door opens into, beyond its swing (user 2026-11-01; ui/render.js).
 //  - Fixture labels (black) at the fixture's centre (or in the part not taken by a symbol given as
 //    box.avoid), turned in tall narrow fixtures, shrunk to fit (down to 70 %). A white halo only
 //    where lines can cross the text (toilet / basin / bath symbols); 싱크대, 옷장 and 신발장 have a
@@ -79,8 +87,15 @@
 //  - 실 아님 names sit in the middle of the space (gray fill, no diagonal; no halo).
 //  - Fixtures are obstacles (2026-10-17, plan §1-2): a room name (with its H) that would sit on a
 //    fixture, column or stair moves to the nearest free spot inside the room (findFreeSpot); window /
-//    door labels count fixture boxes like the dimension numbers (columns: never); a fixture label keeps
+//    door labels take a spot clear of the fixtures first (columns: never); a fixture label keeps
 //    to the part of its box not covered by another fixture. Columns are solid black: no text on them.
+//  - Texts over lines on paper (user 2026-10-31, the same rule as 치수선 없이 in ui/render.js): a name
+//    (with its H) and a window / door label may lie over thin lines — a door's swing (arc and open leaf)
+//    and a fixture's outline — but never over a thick wall, another text, or a fixture's middle
+//    (fixtureCore: its box FIXTURE_CORE_INSET_MM paper mm in from the outline, where a number reads as
+//    the fixture's size). Swings are no obstacle; a spot clear of the whole fixture is still taken first,
+//    and where none is clear the outline costs little, the middle and the fixture's own label (placed
+//    last, but known in advance) as much as a wall or a text.
 //  - Manual offsets (moved by hand, plan §2-7): project.labelOffsets[key] = { dx, dy } in PAPER mm (key
 //    'room:<id>', 'opening:<id>', 'fixture:<id>'); converted with opts.worldPerPaperMM (= the print
 //    scale; the screen uses the same automatic print scale, so screen and paper agree). A moved label
@@ -96,8 +111,12 @@
 //    as wide as the room there pokes through the slanted wall): nearest to the label point, then 85 %,
 //    70 %, then wrapped onto two lines. It also keeps clear of opts.nameObstacles (paper: the
 //    dimensions of diagonal sides written inside the rooms). Window / door labels count the diagonal
-//    walls by their real outline (polygonBoxArea), and next to a diagonal wall they keep the whole
-//    label box off the wall (its extent across the wall, not only its height).
+//    walls by their real outline (polygonBoxArea). A window / door label ON a diagonal wall (user 2026-11-08)
+//    is written along that wall, as the number of the diagonal side (read left to right: dims.js
+//    uprightAngle), right beside it, on two lines along the wall where one is too long for a free spot.
+//    Such a label's rot is neither 0 nor a quarter turn; besides its upright bounding box (box) it carries
+//    its turned rectangle (shape: [corners], parts: small upright boxes along it), and whatever hits or weighs
+//    it goes by those (a bounding box at 45° covers far more than the text).
 //  - opts.withCandidates (screen): every opening / fixture label also carries `cands`, its candidate
 //    spots in order of preference, so the screen can pick the first one clear of the other texts
 //    (ui/render.js; level of detail). opts.extraDepth (world mm, a number or a list) adds window / door
@@ -109,7 +128,7 @@
 //    The label carries dir (its wall's direction) next to base (its opening's centre).
 
 import { pointInPolygon, polygonCentroid } from './geom.js';
-import { wallPolygons, planOuterBounds, wallThickness, boxOf, polygonBoxArea, innerCorners, finishBeside } from './dims.js';
+import { wallPolygons, finishPolygons, planOuterBounds, wallThickness, boxOf, polygonBoxArea, innerCorners, finishBeside, uprightAngle, rotatedRect, rotatedRectParts } from './dims.js';
 import { hasGrayFill, normalizeFixture, fixtureBounds, isColumn, isStair, isPlainBox } from './fixtures.js';
 
 export const labelHooks = { labelOf: null, fixtureLabel: null, openingAnchor: null, fixtureBox: null };
@@ -273,11 +292,51 @@ export function scanExtent(points, p, axis) {
   return null;
 }
 
+// A label's rot (degrees) when it is written along a diagonal wall: neither 0 nor a quarter turn.
+const turnedRot = (rot) => !!rot && Math.abs(Math.abs(rot) - 90) > 1e-6;
+// The turned rectangle of such a label, as the number of a diagonal side (ui/render.js valueCandAlong):
+// { shape: [its 4 corners], parts: small upright boxes along it }.
+const turnedShape = (x, y, rot, w, h) => {
+  const a = (rot * Math.PI) / 180;
+  return { shape: [rotatedRect({ x, y }, a, w, h)], parts: rotatedRectParts({ x, y }, a, w, h) };
+};
+
+// The same rectangle as a grid of small upright boxes (about `step` world mm each), for the costs on paper: right
+// beside a diagonal wall even the pieces of `parts` would lie on the wall.
+const turnedBits = (x, y, rot, w, h, step) => {
+  const a = (rot * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
+  const n = Math.max(1, Math.ceil(w / step)), m = Math.max(1, Math.ceil(h / step)), pw = w / n, ph = h / m;
+  const hw = (pw * Math.abs(ux) + ph * Math.abs(uy)) / 2, hh = (pw * Math.abs(uy) + ph * Math.abs(ux)) / 2;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < m; j++) {
+      const s = -w / 2 + (i + 0.5) * pw, t = -h / 2 + (j + 0.5) * ph;
+      const cx = x + ux * s - uy * t, cy = y + uy * s + ux * t;
+      out.push({ minX: cx - hw, minY: cy - hh, maxX: cx + hw, maxY: cy + hh });
+    }
+  }
+  return out;
+};
+
 function aabb(cx, cy, w, h, rot) {
+  if (turnedRot(rot)) {
+    const a = (rot * Math.PI) / 180, ca = Math.abs(Math.cos(a)), sa = Math.abs(Math.sin(a));
+    const hw = (w * ca + h * sa) / 2, hh = (w * sa + h * ca) / 2;
+    return { minX: cx - hw, minY: cy - hh, maxX: cx + hw, maxY: cy + hh };
+  }
   const vertical = rot === 90 || rot === -90;
   const bw = vertical ? h : w, bh = vertical ? w : h;
   return { minX: cx - bw / 2, minY: cy - bh / 2, maxX: cx + bw / 2, maxY: cy + bh / 2 };
 }
+
+// What a placed label covers: its turned rectangle's pieces, or its box.
+const boxesOf = (l) => l.parts || [l.box];
+// How much two placed labels overlap, each by what it covers (world mm²).
+const labelsOverlap = (a, b) => boxesOf(a).reduce((s, p) => s + boxesOf(b).reduce((t, q) => t + overlapArea(p, q), 0), 0);
+// How much a box (grown by pad) lies on a window / door label's spot (openingLabelSpots: one along a diagonal wall by its
+// parts), and those spots as plain boxes for the sliding and the grid of nameSpotClear.
+const spotOverlap = (box, s, pad = 0) => (s.parts ? s.parts.reduce((t, q) => t + overlapArea(box, q, pad), 0) : overlapArea(box, s, pad));
+const spotBoxes = (groups) => groups.flat().flatMap((s) => s.parts || [s]);
 
 function hits(a, b, pad = 0) {
   return a.minX < b.maxX + pad && a.maxX > b.minX - pad && a.minY < b.maxY + pad && a.maxY > b.minY - pad;
@@ -346,7 +405,24 @@ export function fixtureObstacles(project) {
   return out;
 }
 
-// Weighted overlap of a box with obstacle boxes; a column (solid black) counts 100 times.
+// A fixture's middle (texts over lines, see the header): its box FIXTURE_CORE_INSET_MM paper mm in from the
+// outline on every side, but at least the middle FIXTURE_CORE_MIN of its width and of its depth (a 세면대
+// 5 mm wide on paper keeps its middle 2 mm). A text may cross the outline band, never this box: a number
+// there reads as the fixture's size. f: a world box (fixtureObstacles); → { minX, minY, maxX, maxY, id }
+export const FIXTURE_CORE_INSET_MM = 2.5;
+const FIXTURE_CORE_MIN = 0.4;
+export function fixtureCore(f, worldPerPaperMM) {
+  const g = FIXTURE_CORE_INSET_MM * (worldPerPaperMM > 0 ? worldPerPaperMM : 60);
+  const w = f.maxX - f.minX, h = f.maxY - f.minY, cx = (f.minX + f.maxX) / 2, cy = (f.minY + f.maxY) / 2;
+  const hx = Math.max(w / 2 - g, (FIXTURE_CORE_MIN * w) / 2), hy = Math.max(h / 2 - g, (FIXTURE_CORE_MIN * h) / 2);
+  return { minX: cx - hx, minY: cy - hy, maxX: cx + hx, maxY: cy + hy, id: f.id };
+}
+// Where nothing clear is found, what a text pays per mm² over a fixture's outline band, against 1 (a room
+// name) or 4 (a window / door label) for its middle.
+const FIXTURE_OUTLINE_COST = 0.25;
+
+// Weighted overlap of a box with obstacle boxes; a column (solid black) counts 100 times, an obstacle with
+// a `weight` that many times.
 // Weighted overlaps (world mm²) within this are the same: a label right at a wall face, a value or another
 // label touches it by construction (0 or a sliver), and spots placed symmetrically about an opening cover
 // the same wall area; the solve's rounding (some 1e-4 mm; a household solved again when it is opened, here
@@ -364,10 +440,20 @@ const LABEL_TIE_MM = 0.01;
 // Crowded window / door labels (placeOpening crowdedSpot): the step (paper mm) of the slide along the wall,
 // and the smallest size (of the 8.8 pt), as for room names.
 const CROWDED_STEP_MM = 0.25;
+// (Round 5, survey S4: the window / door labels' spots weighed (calls) and the obstacle boxes each was weighed against
+// (terms) out of all of them (all); a print's labels weigh each spot against the boxes near it only. Tests read it.)
+export const costStats = { calls: 0, terms: 0, all: 0 };
 const MIN_OPENING_SCALE = 0.7;
+// Paper at 1:150 and at a scale picked by hand smaller than [자동]'s (opts.tinyOpenings, printlayout.js paperSmallTexts;
+// question 5, 1안): a window / door label with no spot clear of the walls and the other texts down to 70 % may be smaller
+// still, these sizes in turn (of the 8.8 pt), where that makes it clear; with none such the least overlap as before.
+export const OPENING_TINY_SCALES = [0.6, 0.5];
 // Paper: how many times the window / door labels are placed again with those that fell back first
 // (placeLabels placeOpenings).
 const OPENING_REPLACE_PASSES = 3;
+// Paper: a finish layer at least this thick (paper mm) is a wall to the window / door labels (as ui/render.js
+// PAPER_LABEL_FINISH_MM for 치수선 없이); a thinner one is no more than the wall's face line.
+const LABEL_FINISH_PAPER_MM = 0.1;
 
 // An obstacle with `points` (a door's swing, doorSwingShapes) counts by its real outline, not its box.
 function obstacleCost(box, obstacles, pad = 0) {
@@ -377,7 +463,7 @@ function obstacleCost(box, obstacles, pad = 0) {
     if (a > 0 && Array.isArray(ob.points)) {
       a = polygonBoxArea(ob.points, { minX: box.minX - pad, minY: box.minY - pad, maxX: box.maxX + pad, maxY: box.maxY + pad });
     }
-    if (a > 0) s += ob.column ? 100 * a : a;
+    if (a > 0) s += (ob.weight > 0 ? ob.weight : ob.column ? 100 : 1) * a;
   }
   return s;
 }
@@ -390,14 +476,23 @@ function obstacleCost(box, obstacles, pad = 0) {
 // middle of the polygon's free width and of its free height through it. In a strip the box only just
 // fits across, the grid stepped over the one line where it fits (recheck 2026-10-25: 예시 세대 A turned, the
 // '베란다1' name left its 950 mm strip for the corner where its small window's label belongs).
+const POLY_CROSSINGS = new WeakMap(); // polygon → Map(axis + line → sorted crossings), see findFreeSpot
 export function findFreeSpot(poly, w, h, start, obstacles, opts = {}) {
   const margin = opts.margin > 0 ? opts.margin : 0;
   const pad = opts.pad > 0 ? opts.pad : 0;
   const step = opts.step > 0 ? opts.step : Math.max(h / 2, 1);
-  const maxRing = opts.maxRing > 0 ? opts.maxRing : 24;
   const hw = w / 2 + margin, hh = h / 2 + margin;
-  const inside = (c) => !poly || [[-1, -1], [1, -1], [1, 1], [-1, 1], [0, 0]]
-    .every(([sx, sy]) => pointInPolygon({ x: c.x + sx * hw, y: c.y + sy * hh }, poly));
+  // The polygon's box: a spot whose box leaves it is not inside, and no ring beyond it holds one
+  // (final review 2026-10-28: a crowded 1:150 tried all 24 rings of 3 candidates around small rooms).
+  let pb = null;
+  if (poly && poly.length) {
+    pb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const q of poly) { pb.minX = Math.min(pb.minX, q.x); pb.minY = Math.min(pb.minY, q.y); pb.maxX = Math.max(pb.maxX, q.x); pb.maxY = Math.max(pb.maxY, q.y); }
+  }
+  const reachRings = pb ? Math.ceil(Math.max(start.x - pb.minX, pb.maxX - start.x, start.y - pb.minY, pb.maxY - start.y) / step) + 1 : Infinity;
+  const maxRing = Math.min(opts.maxRing > 0 ? opts.maxRing : 24, Math.max(0, reachRings));
+  const inside = (c) => !poly || (!(pb && (c.x - hw < pb.minX || c.x + hw > pb.maxX || c.y - hh < pb.minY || c.y + hh > pb.maxY))
+    && [[-1, -1], [1, -1], [1, 1], [-1, 1], [0, 0]].every(([sx, sy]) => pointInPolygon({ x: c.x + sx * hw, y: c.y + sy * hh }, poly)));
   const costAt = (c) => obstacleCost({ minX: c.x - w / 2, minY: c.y - h / 2, maxX: c.x + w / 2, maxY: c.y + h / 2 }, obstacles, pad);
   let best = null;
   const consider = (c) => {
@@ -407,10 +502,34 @@ export function findFreeSpot(poly, w, h, start, obstacles, opts = {}) {
     if (!best || cost < best.cost - LABEL_COST_EPS || (Math.abs(cost - best.cost) <= LABEL_COST_EPS && d < best.d)) best = { x: c.x, y: c.y, cost, d };
     return cost <= LABEL_COST_EPS;
   };
+  // The polygon's crossings along each grid row / column, once (the grid repeats them: final review
+  // 2026-10-28, a crowded 1:150 spent most of its 0.5–1.3 s scanning the same lines again).
+  let crossings = POLY_CROSSINGS.get(poly);
+  if (!crossings && poly) { crossings = new Map(); POLY_CROSSINGS.set(poly, crossings); }
+  const scan = (c, axis) => {
+    const across = axis === 'x' ? 'y' : 'x';
+    const key = axis + c[across];
+    let xs = crossings.get(key);
+    if (!xs) {
+      xs = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        if ((a[across] - c[across]) * (b[across] - c[across]) < 0) {
+          const t = (c[across] - a[across]) / (b[across] - a[across]);
+          xs.push(a[axis] + t * (b[axis] - a[axis]));
+        }
+      }
+      xs.sort((u, v) => u - v);
+      crossings.set(key, xs);
+    }
+    for (let i = 0; i + 1 < xs.length; i += 2) if (xs[i] <= c[axis] && c[axis] <= xs[i + 1]) return [xs[i], xs[i + 1]];
+    return null;
+  };
   const centred = (c) => {
     if (!opts.centre || !poly) return [c];
+    if (pb && (c.x < pb.minX || c.x > pb.maxX || c.y < pb.minY || c.y > pb.maxY)) return [c];
     const out = [c];
-    const ex = scanExtent(poly, c, 'x'), ey = scanExtent(poly, c, 'y');
+    const ex = scan(c, 'x'), ey = scan(c, 'y');
     if (ex) out.push({ x: (ex[0] + ex[1]) / 2, y: c.y });
     if (ey) out.push({ x: c.x, y: (ey[0] + ey[1]) / 2 });
     return out;
@@ -468,18 +587,20 @@ export function boxInPolygon(poly, c, w, h, margin = 0) {
 //
 // ATTACHED (user 2026-10-24) — a window / door label box B (world AABB) is attached to its opening when
 //   - B lies on one side n of the wall (the side of its centre), and its near edge (the corner of B
-//     nearest the wall, measured along n from the wall's centre line) is at least the CLEARANCE of
-//     that side and at most `tol` beyond it; and
+//     nearest the wall, measured along n from the wall's centre line) is at least the FACE of that
+//     side and at most `tol` beyond it, or (the side a hinged door opens into) at least the reach of its
+//     SWING over B and at most `tol` beyond that; and
 //   - B's extent along the wall overlaps the opening's [−W/2, W/2] (from its centre), or ends within
 //     `tol` of one of its ends (a label beside the opening, past its end).
-// CLEARANCE of side n over B's extent along the wall [a0, a1]: half the wall's thickness plus the finish
-// layer drawn on that side; on the side a hinged door opens into, at least the reach of its swing over
-// [a0, a1] (the quarter disc of radius W around the hinge, which sits `offset` off the centre line:
-// offset + √(W² − d²), d = the distance along the wall from the hinge to the nearest point of [a0, a1]
-// over the disc; the open leaf is its edge at d = 0). A label over the hinge therefore keeps W + offset
-// from the centre line, one beside the free jamb less.
+// FACE of side n: half the wall's thickness plus the finish layer drawn on that side; a label there on the
+// side a door opens into lies over the door's swing (user 2026-10-31). SWING of that side over B's extent
+// along the wall [a0, a1]: the reach of the quarter disc of radius W around the hinge, which sits `offset`
+// off the centre line: offset + √(W² − d²), d = the distance along the wall from the hinge to the nearest
+// point of [a0, a1] over the disc (the open leaf is its edge at d = 0); a label over the hinge keeps W +
+// offset from the centre line, one beside the free jamb less.
 // tol = ATTACH_TOL_MM paper mm (world: × the print scale; the screen uses 1:60). The automatic spots are
-// LABEL_GAP_MM beyond the clearance. Labels moved by hand are not automatic and are not judged.
+// LABEL_GAP_MM beyond the face, then (the side a door opens into) beyond the swing. Labels moved by hand
+// are not automatic and are not judged.
 // STACKED — only where the per-side values are written inside the rooms at the walls (the editor, 치수선
 // 없이: opts.extraDepth): when no attached spot is free, a label may sit over the opening right beyond
 // that wall's value (face + depth + LABEL_GAP_MM, the first depth with a value really between: ui/render.js
@@ -514,8 +635,11 @@ function swingOfAnchor(anchor, t) {
   return { normal, hinge, radius, offset, lo, hi };
 }
 
-// Geometry of an opening for its label: { anchor, edge, t, W, face(n), clearance(n, a0, a1), swing }
-// (see the rule above; n a unit normal of the wall, a0..a1 mm along anchor.dir from the centre).
+// Geometry of an opening for its label: { anchor, edge, t, W, face(n), beyond(n, a0, a1), clearance(n, a0, a1),
+// swing } (see the rule above; n a unit normal of the wall, a0..a1 mm along anchor.dir from the centre; beyond:
+// the reach of the swing on side n over a0..a1, null where it does not pass the face; clearance: the screen's
+// near edge, beyond the swing wherever the label lies over it, else the face (placeLabels opts.screen); swing:
+// for doorSwingShapes).
 export function openingLabelGeometry(o, project, derived) {
   if (!o || !project) return null;
   const anchor = safeCall(labelHooks.openingAnchor, o, project, derived) || defaultOpeningAnchor(o, project, derived);
@@ -537,24 +661,28 @@ export function openingLabelGeometry(o, project, derived) {
     return t / 2 + (f > 0 ? f : 0);
   };
   const swing = swingOfAnchor(anchor, t);
-  const clearance = (n, a0, a1) => {
-    let c = face(n);
-    if (swing && (!swing.normal || n.x * swing.normal.x + n.y * swing.normal.y > 0.5)) {
-      const lo = Math.max(a0, swing.lo), hi = Math.min(a1, swing.hi);
-      if (lo <= hi) {
-        const d = swing.hinge == null ? 0 : Math.abs(Math.min(hi, Math.max(lo, swing.hinge)) - swing.hinge);
-        if (d <= swing.radius) c = Math.max(c, swing.offset + Math.sqrt(swing.radius * swing.radius - d * d));
-      }
-    }
-    return c;
+  const beyond = (n, a0, a1) => {
+    if (!swing || (swing.normal && n.x * swing.normal.x + n.y * swing.normal.y <= 0.5)) return null;
+    const lo = Math.max(a0, swing.lo), hi = Math.min(a1, swing.hi);
+    if (lo > hi) return null;
+    const d = swing.hinge == null ? 0 : Math.abs(Math.min(hi, Math.max(lo, swing.hinge)) - swing.hinge);
+    if (d > swing.radius) return null;
+    const c = swing.offset + Math.sqrt(swing.radius * swing.radius - d * d);
+    return c > face(n) ? c : null;
   };
-  return { anchor, edge, t, W, face, clearance, swing };
+  const clearance = (n, a0, a1) => {
+    const c = beyond(n, a0, a1);
+    return c != null ? c : face(n);
+  };
+  return { anchor, edge, t, W, face, beyond, clearance, swing };
 }
 
 // How a label box (world AABB) sits against its opening (see ATTACHED above). opts: { worldPerPaperMM
-// (default 60), tol (world mm; default ATTACH_TOL_MM paper mm) }. → { attached, gap (mm of the near edge
-// beyond the clearance; < 0: on the wall or the swing), alongGap (mm past the opening's nearer end; 0 =
-// over it), normal, clearance, swingSide (true: the side the door opens into) } | null
+// (default 60), tol (world mm; default ATTACH_TOL_MM paper mm), corners (a label written along a diagonal wall:
+// the 4 corners of its turned rectangle, used instead of the box's) }. → { attached, gap (mm of the near edge
+// beyond the wall face, or beyond the swing for a label attached there; < 0: on the wall), alongGap (mm past
+// the opening's nearer end; 0 = over it), normal, swingSide (true: the side the door opens into), overSwing
+// (true: at the face on that side, over the swing) } | null
 export function openingLabelFit(project, derived, o, box, opts = {}) {
   return labelFitOf(openingLabelGeometry(o, project, derived), box, opts);
 }
@@ -566,7 +694,7 @@ function labelFitOf(g, box, opts = {}) {
   const tol = opts.tol > 0 ? opts.tol : ATTACH_TOL_MM * wppm;
   const P = g.anchor.point, dir = g.anchor.dir;
   const nL = { x: -dir.y, y: dir.x };
-  const corners = [[box.minX, box.minY], [box.maxX, box.minY], [box.maxX, box.maxY], [box.minX, box.maxY]];
+  const corners = opts.corners ? opts.corners.map((q) => [q.x, q.y]) : [[box.minX, box.minY], [box.maxX, box.minY], [box.maxX, box.maxY], [box.minX, box.maxY]];
   const along = corners.map(([x, y]) => (x - P.x) * dir.x + (y - P.y) * dir.y);
   const across = corners.map(([x, y]) => (x - P.x) * nL.x + (y - P.y) * nL.y);
   const a0 = Math.min(...along), a1 = Math.max(...along);
@@ -574,17 +702,20 @@ function labelFitOf(g, box, opts = {}) {
   const sgn = c0 + c1 >= 0 ? 1 : -1;
   const normal = { x: nL.x * sgn, y: nL.y * sgn };
   const near = sgn > 0 ? c0 : -c1;
-  const clearance = g.clearance(normal, a0, a1);
-  const gap = near - clearance;
+  const face = g.face(normal);
+  const swingReach = g.beyond(normal, a0, a1);
+  const atFace = near - face <= tol;
+  const gap = atFace || swingReach == null ? near - face : near - swingReach;
   const alongGap = Math.max(0, a0 - g.W / 2, -g.W / 2 - a1);
   const swingSide = !!(g.swing && (!g.swing.normal || normal.x * g.swing.normal.x + normal.y * g.swing.normal.y > 0.5));
   const attached = gap >= -1 && gap <= tol && alongGap <= tol;
+  const overSwing = attached && atFace && swingReach != null;
   // STACKED (screen and 치수선 없이, opts.valueBand = the per-side value band in world mm): over the
-  // opening, clear of the wall and the swing, its near edge within `tol` beyond face + valueBand —
-  // the wall's own measured value written between it and the wall.
+  // opening, clear of the wall, its near edge within `tol` beyond face + valueBand — the wall's own
+  // measured value written between it and the wall.
   const band = opts.valueBand > 0 ? opts.valueBand : 0;
-  const stacked = !attached && band > 0 && gap >= -1 && alongGap <= 1 && near - (g.face(normal) + band) <= tol;
-  return { attached, stacked, gap, alongGap, normal, clearance, swingSide, near, face: g.face(normal) };
+  const stacked = !attached && band > 0 && near - face >= -1 && alongGap <= 1 && near - (face + band) <= tol;
+  return { attached, stacked, gap, alongGap, normal, swingSide, overSwing, near, face };
 }
 
 // The swing of every hinged door (a quarter disc around its hinge, as draw-openings.js draws it), for
@@ -673,9 +804,9 @@ const OPEN_PART_SHARE = 2 / 3;
 // NAME_SPOT_TIE_PAPER_MM at their scale (the screen: 2 px).
 export const NAME_SPOT_TIE_PAPER_MM = 0.5;
 export const NAME_SPOT_TIE_MM = 30;
-// A name over more than this much of a door's swing (paper mm²) is moved off it where its room has a place
-// (placeLabels placeRoom, ui/render.js); a corner of the text box over the arc's edge is not worth a name
-// pushed into a corner of its room.
+// On the screen, a name over more than this much of a door's swing (paper mm²) is moved off it where its room
+// has a place (ui/render.js; on paper a name may lie over a swing); a corner of the text box over the arc's
+// edge is not worth a name pushed into a corner of its room.
 export const NAME_SWING_MIN_PAPER_MM2 = 2;
 const namePoints = new WeakMap();
 const openParts = new WeakMap();
@@ -868,7 +999,7 @@ export function nameSpotClear(poly, start, bw, bh, obstacles, opts = {}) {
     if (!boxInPolygon(poly, c, bw, bh, t.margin)) return false;
     const box = { minX: c.x - bw / 2, minY: c.y - bh / 2, maxX: c.x + bw / 2, maxY: c.y + bh / 2 };
     if (obstacleCost(box, t.obstacles, t.pad) > LABEL_COST_EPS) return false;
-    return t.groups.every((g) => g.some((s) => overlapArea(box, s, t.pad) <= LABEL_COST_EPS));
+    return t.groups.every((g) => g.some((s) => spotOverlap(box, s, t.pad) <= LABEL_COST_EPS));
   };
   for (const t of tries) if (fits(start, t)) return { x: start.x, y: start.y };
   const slide = (axis, t, reach = Infinity) => {
@@ -878,7 +1009,7 @@ export function nameSpotClear(poly, start, bw, bh, obstacles, opts = {}) {
     const [loO, hiO] = axis === 'y' ? ['minX', 'maxX'] : ['minY', 'maxY'];
     const e = 0.01;
     const vals = [];
-    for (const ob of t.obstacles.concat(...t.groups)) {
+    for (const ob of t.obstacles.concat(spotBoxes(t.groups))) {
       if (ob[hiO] + t.pad <= start[other] - halfO || ob[loO] - t.pad >= start[other] + halfO) continue;
       vals.push(ob[lo] - t.pad - half - e, ob[hi] + t.pad + half + e);
     }
@@ -900,7 +1031,7 @@ export function nameSpotClear(poly, start, bw, bh, obstacles, opts = {}) {
     if (move === 'grid') {
       for (const t of tries) {
         // The grid knows plain obstacles: every label's spots count there (then the check above).
-        const g = findFreeSpot(poly, bw, bh, start, t.obstacles.concat(...t.groups), { margin: t.margin, pad: t.pad, step: opts.step, centre: true });
+        const g = findFreeSpot(poly, bw, bh, start, t.obstacles.concat(spotBoxes(t.groups)), { margin: t.margin, pad: t.pad, step: opts.step, centre: true });
         if (g.cost <= LABEL_COST_EPS && fits(g, t)) return { x: g.x, y: g.y };
       }
       continue;
@@ -947,7 +1078,8 @@ function normalOrder(anchor, derivedData) {
 // room's name to leave at least one of them free where it can (user 2026-10-25: centred in its strip,
 // the '베란다1' name covered every spot of the 'AL단창 2520*1050' label, which went past the end of its
 // window). Labels moved by hand are left out. opts: as placeLabels (fonts.opening, worldPerUnit,
-// worldPerPaperMM, measure). → [{ id, roomId, spots: [{ minX, minY, maxX, maxY }] }] (world mm)
+// worldPerPaperMM, measure, screen: the screen's spots, beyond a door's swing as placeLabels opts.screen).
+// → [{ id, roomId, spots: [{ minX, minY, maxX, maxY }] }] (world mm)
 export function openingLabelSpots(project, derived, opts = {}) {
   const out = [];
   if (!project || !derived || !Array.isArray(derived.rooms)) return out;
@@ -967,14 +1099,16 @@ export function openingLabelSpots(project, derived, opts = {}) {
     const { anchor } = geo;
     const n = normalOrder(anchor, derived)[0];
     if (!n || !n.poly || !n.roomId) continue;
-    // As placeOpening: one line along a horizontal wall; turned on two lines along a vertical one.
+    // As placeOpening: one line along a horizontal wall; turned on two lines along a vertical one; along a
+    // diagonal wall, one line turned with it.
     const horizontal = Math.abs(anchor.dir.x) >= Math.abs(anchor.dir.y);
-    const parts = horizontal ? [text] : splitOpeningLabel(text);
+    const slanted = Math.abs(anchor.dir.x) > 1e-3 && Math.abs(anchor.dir.y) > 1e-3;
+    const parts = horizontal || slanted ? [text] : splitOpeningLabel(text);
     const w = Math.max(...parts.map((t) => measure(t, size, 'normal'))) * wpu;
     const h = parts.length * size * LINE_HEIGHT * wpu;
     const bw = horizontal ? w : h, bh = horizontal ? h : w;
-    const acrossHalf = (Math.abs(n.x) * bw + Math.abs(n.y) * bh) / 2;
-    const alongHalf = (Math.abs(anchor.dir.x) * bw + Math.abs(anchor.dir.y) * bh) / 2;
+    const acrossHalf = slanted ? h / 2 : (Math.abs(n.x) * bw + Math.abs(n.y) * bh) / 2;
+    const alongHalf = slanted ? w / 2 : (Math.abs(anchor.dir.x) * bw + Math.abs(anchor.dir.y) * bh) / 2;
     if (!inner.has(n.roomId)) {
       const dr = derived.rooms.find((r) => r.roomId === n.roomId);
       let poly = null;
@@ -987,21 +1121,26 @@ export function openingLabelSpots(project, derived, opts = {}) {
     const spots = [];
     for (const s of [0, W / 4, -W / 4, W / 2, -W / 2]) {
       if (s !== 0 && Math.abs(s) < 1) continue;
-      const d = geo.clearance(n, s - alongHalf, s + alongHalf) + gap + acrossHalf;
+      const d = (opts.screen ? geo.clearance(n, s - alongHalf, s + alongHalf) : geo.face(n)) + gap + acrossHalf;
       const c = { x: anchor.point.x + n.x * d + anchor.dir.x * s, y: anchor.point.y + n.y * d + anchor.dir.y * s };
       // Only spots inside the room's inner faces: one across a wall is not where the label goes (the
       // turned label of the 430 mm 베란다1 step window is longer than its wall).
-      if (boxInPolygon(poly, c, bw, bh, 0)) spots.push({ minX: c.x - bw / 2, minY: c.y - bh / 2, maxX: c.x + bw / 2, maxY: c.y + bh / 2 });
+      if (slanted) {
+        const rot = (uprightAngle(anchor.dir) * 180) / Math.PI, t = turnedShape(c.x, c.y, rot, w, h);
+        if (t.shape[0].concat(c).every((q) => pointInPolygon(q, poly))) spots.push({ ...aabb(c.x, c.y, w, h, rot), parts: t.parts });
+      } else if (boxInPolygon(poly, c, bw, bh, 0)) spots.push({ minX: c.x - bw / 2, minY: c.y - bh / 2, maxX: c.x + bw / 2, maxY: c.y + bh / 2 });
     }
     if (spots.length) out.push({ id: o.id, roomId: n.roomId, spots });
   }
   return out;
 }
 
-// The spots (openingLabelSpots) of the labels written inside room roomId, each grown by pad. → [[box]]
+// The spots (openingLabelSpots) of the labels written inside room roomId, each grown by pad. → [[box]] (a spot
+// written along a diagonal wall with its parts, grown too)
 export function labelSpotGroups(list, roomId, pad = 0) {
+  const grown = (s) => ({ minX: s.minX - pad, minY: s.minY - pad, maxX: s.maxX + pad, maxY: s.maxY + pad });
   return (list || []).filter((l) => l.roomId === roomId)
-    .map((l) => l.spots.map((s) => ({ minX: s.minX - pad, minY: s.minY - pad, maxX: s.maxX + pad, maxY: s.maxY + pad })));
+    .map((l) => l.spots.map((s) => (s.parts ? { ...grown(s), parts: s.parts.map(grown) } : grown(s))));
 }
 
 // Does a name box take every spot of some label (groups, labelSpotGroups) or lie on an obstacle (a door's
@@ -1009,7 +1148,7 @@ export function labelSpotGroups(list, roomId, pad = 0) {
 export function nameTakesLabelSpots(box, avoid) {
   if (!avoid) return false;
   if (obstacleCost(box, avoid.obstacles || []) > LABEL_COST_EPS) return true;
-  return (avoid.groups || []).some((g) => g.every((s) => overlapArea(box, s) > LABEL_COST_EPS));
+  return (avoid.groups || []).some((g) => g.every((s) => spotOverlap(box, s) > LABEL_COST_EPS));
 }
 
 // A project with one label moved (or reset), as the command stores it; also used for the live preview
@@ -1202,7 +1341,8 @@ export function isLabelMoved(project, key, measureId = null) {
 //         label keeps inside that line where it is drawn, see fixtureInnerLineShown),
 //         thinLines: world segments [[p, q]] (or [{ a, b }]) of thin drawn lines the opening labels
 //         keep off where they can, e.g. the dimension extension lines (the 구역 나누기 선 always count),
-//         withCandidates, extraDepth: screen only (see the header) }
+//         withCandidates, extraDepth: screen only (see the header); screen: the editor's own window / door
+//         spots (below) }
 // Paper mm a room's name block keeps from the room's inner faces when it has to be fitted (rooms with a
 // diagonal side always; other rooms when the block does not fit where it stands).
 const ROOM_NAME_WALL_CLEAR_MM = 0.8;
@@ -1226,6 +1366,24 @@ export function placeLabels(project, derived, opts = {}) {
   const wallBoxes = walls.filter((w) => w.orient !== 'd').map((w) => w.box);
   // Diagonal walls by their outline (their bounding box would cover the rooms beside them).
   const diagWalls = walls.filter((w) => w.orient === 'd').map((w) => w.points);
+  // Paper: the finish layers are printed black with their walls (ui/output.js), so a window / door label keeps off
+  // them as off a wall, those at least LABEL_FINISH_PAPER_MM thick as 치수선 없이 does (ui/render.js; round 4: 예시 세대 A
+  // turned, '목문 800*2000' lay on the 화장실's tile layer, 4.4 mm²; C4 turned, '방화문 900*2100' 0.6 mm²). Their own
+  // wall's layer is in their face already (openingLabelGeometry). Not on the screen (its rules before round 3).
+  if (!opts.screen && include.openings) {
+    let fins = [];
+    try { fins = finishPolygons(project, derived); } catch (_) { fins = []; }
+    for (const f of fins) {
+      const pts = f && f.points;
+      if (!Array.isArray(pts) || pts.length < 4) continue;
+      const [a, b, , d] = pts;
+      const depth = Math.abs((b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x)) / (Math.hypot(b.x - a.x, b.y - a.y) || 1);
+      if (!(depth >= LABEL_FINISH_PAPER_MM * wppm)) continue;
+      const bb = boxOf(pts);
+      const upright = pts.every((q) => [bb.minX, bb.maxX].some((x) => Math.abs(q.x - x) < 0.5) && [bb.minY, bb.maxY].some((y) => Math.abs(q.y - y) < 0.5));
+      if (upright) wallBoxes.push(bb); else diagWalls.push(pts);
+    }
+  }
   const nameObstacles = Array.isArray(opts.nameObstacles) ? opts.nameObstacles.filter(Boolean) : [];
   // Boxes (world mm) the labels should keep clear of, e.g. the printed dimension numbers and lines.
   const obstacles = Array.isArray(opts.obstacles) ? opts.obstacles.filter(Boolean) : [];
@@ -1244,14 +1402,28 @@ export function placeLabels(project, derived, opts = {}) {
     const g = { minX: box.minX - thinHalf, minY: box.minY - thinHalf, maxX: box.maxX + thinHalf, maxY: box.maxY + thinHalf };
     return thinLines.reduce((s, [a, b]) => s + segmentLengthInBox(a, b, g) * 2 * thinHalf, 0);
   };
-  // The swings of the hinged doors: window / door labels keep off the other doors' arcs.
-  const swings = include.openings ? doorSwingShapes(project, derived) : [];
   // Every opening's label geometry: a label must not sit where it reads as ANOTHER opening's (checker
   // 2026-10-24: past the end of a 다용도실 door its label lay over the 화장실 door next to it).
   const geos = include.openings
     ? (project.openings || []).map((o) => ({ id: o.id, g: openingLabelGeometry(o, project, derived) })).filter((x) => x.g)
     : [];
   const withCands = !!opts.withCandidates;
+  // The editor's screen (ui/render.js, not 치수선 없이) keeps its window / door spots as they were before the rules
+  // for texts over lines (user 2026-11-01: the screen keeps its rules; round 4: on the screen the door labels at the
+  // wall face lay over their own swings on the per-side values' line, 'PVC이중창 1500*1200 현관문 900*2100' and
+  // '방화문 900*2100 5275' read as one text, and the room names gave up their H for those spots): on the side a
+  // hinged door opens into every spot lies beyond the swing wherever the label lies over it (clearance), a stacked
+  // spot only where it reaches past the swing.
+  const screen = !!opts.screen;
+  // The swings of the hinged doors, for the screen only (label.avoid: ui/render.js keeps a window / door
+  // label off the other doors' arcs there where it can); on paper a text may lie over a swing.
+  const swings = include.openings && withCands ? doorSwingShapes(project, derived) : [];
+  // Paper and 치수선 없이: the same swings, for a label that would read as another door's (placeOpening misleads).
+  let paperSwings = null;
+  const swingsOf = () => {
+    if (!paperSwings) paperSwings = !include.openings || screen ? [] : withCands ? swings : doorSwingShapes(project, derived);
+    return paperSwings;
+  };
   const fixtureInner = opts.fixtureInner && opts.fixtureInner.gap > 0 ? opts.fixtureInner : null;
   // Extra distances from the wall for window / door spots (screen): a number or a list.
   const depths = [0].concat((Array.isArray(opts.extraDepth) ? opts.extraDepth : [opts.extraDepth]).filter((v) => v > 0));
@@ -1263,8 +1435,8 @@ export function placeLabels(project, derived, opts = {}) {
     w: Math.max(0, ...lines.map((l) => width(l.text, l.size, l.weight))),
     h: lines.reduce((s, l) => s + l.size * LINE_HEIGHT * wpu, 0),
   });
-  // A label moved by hand sits at its base point + the offset (paper mm × print scale).
-  const finish = (label) => {
+  // A label moved by hand sits at its base point + the offset (paper mm × print scale). → label
+  const settle = (label) => {
     const off = offsets[label.key];
     if (off) {
       const base = label.base || { x: label.x, y: label.y };
@@ -1274,21 +1446,41 @@ export function placeLabels(project, derived, opts = {}) {
     }
     label.box = aabb(label.x, label.y, label.w, label.h, label.rot);
     if (withCands && (label.moved || !label.cands)) {
-      label.cands = [{ x: label.x, y: label.y, rot: label.rot, lines: label.lines, w: label.w, h: label.h, box: label.box }];
+      label.cands = [{ x: label.x, y: label.y, rot: label.rot, lines: label.lines, w: label.w, h: label.h, box: label.box, ...(turnedRot(label.rot) ? turnedShape(label.x, label.y, label.rot, label.w, label.h) : null) }];
     }
-    placed.push(label);
+    if (turnedRot(label.rot)) Object.assign(label, turnedShape(label.x, label.y, label.rot, label.w, label.h));
+    return label;
+  };
+  const finish = (label) => {
+    placed.push(settle(label));
     return label;
   };
   const cand = (x, y, rot, lines, b, attached, extra = null) => {
     const c = { x, y, rot, lines, w: b.w, h: b.h, box: aabb(x, y, b.w, b.h, rot) };
+    if (turnedRot(rot)) Object.assign(c, turnedShape(x, y, rot, b.w, b.h));
     if (attached !== undefined) c.attached = attached;
     if (extra) Object.assign(c, extra);
     return c;
   };
 
+  // Texts over lines (see the header): a fixture's middle (fixtureCore) and its own label are kept clear of
+  // like a wall or another text, its outline only a little; the labels go last, but each depends on its
+  // fixture alone, so where they will be is known now.
+  const cores = fixtureBoxes.filter((f) => !f.column).map((f) => fixtureCore(f, wppm));
+  const fixtureTexts = include.fixtures ? (project.fixtures || []).map(fixtureLabel).filter(Boolean) : [];
+  // For a room name where nothing is clear (findFreeSpot's least overlap): the middle and the label as much
+  // as a dimension number (1×), the outline FIXTURE_OUTLINE_COST, a column as before (100×).
+  const nameFixtures = fixtureBoxes.map((f) => (f.column ? f : { ...f, weight: FIXTURE_OUTLINE_COST })).concat(cores, fixtureTexts.map((l) => l.box));
+  // For a window / door label (placeOpening's least overlap): a column 50×, the outline FIXTURE_OUTLINE_COST,
+  // the middle 4× (as a wall), the fixture's label 2× (as another label, grown by pad as those).
+  // lines = false (crowded spots over thin lines, placeOpening crowdedSpot): a fixture's outline band costs nothing.
+  const fixtureCost = (box, pad = 0, lines = true) => fixtureBoxes.reduce((s, ob) => s + (ob.column ? 50 : lines ? FIXTURE_OUTLINE_COST : 0) * overlapArea(box, ob), 0)
+    + cores.reduce((s, ob) => s + 4 * overlapArea(box, ob), 0)
+    + fixtureTexts.reduce((s, l) => s + 2 * overlapArea(box, l.box, pad), 0);
+
   if (include.rooms) for (const dr of derived.rooms) placeRoom(dr);
   if (include.openings) placeOpenings((project.openings || []).filter(Boolean));
-  if (include.fixtures) for (const f of project.fixtures || []) placeFixture(f);
+  placed.push(...fixtureTexts);
   return placed;
 
   // Window / door labels, each taking its first clear spot in the project's order. On paper, a label that
@@ -1332,21 +1524,20 @@ export function placeLabels(project, derived, opts = {}) {
     let across = 0, cost = 0;
     for (const l of placed.slice(n0)) {
       if (l.kind !== 'opening') continue;
-      const texts = placed.reduce((s, x) => s + (x === l ? 0 : overlapArea(l.box, x.box)), 0);
+      const texts = placed.reduce((s, x) => s + (x === l ? 0 : labelsOverlap(l, x)), 0);
       if (texts > LABEL_COST_EPS) across++;
-      cost += 2 * texts + openingClutter(l.box, l.refId);
+      cost += 2 * texts + boxesOf(l).reduce((s, q) => s + openingClutter(q), 0);
     }
     return { across, cost };
   }
 
-  // What a window / door label box overlaps besides the other labels: walls (4×), other doors' swings,
-  // dimension numbers (4×), fixtures (4×, columns 50×), as placeOpening counts it.
-  function openingClutter(box, ownId) {
+  // What a window / door label box overlaps besides the other labels: walls (4×), dimension numbers (4×),
+  // fixtures (fixtureCost), as placeOpening counts it.
+  function openingClutter(box) {
     return wallBoxes.reduce((s, w) => s + 4 * overlapArea(box, w), 0)
       + diagWalls.reduce((s, w) => s + 4 * polygonBoxArea(w, box), 0)
-      + swings.reduce((s, sw) => s + (sw.id !== ownId && hits(box, sw) ? polygonBoxArea(sw.points, box) : 0), 0)
       + obstacles.reduce((s, ob) => s + 4 * overlapArea(box, ob), 0)
-      + fixtureBoxes.reduce((s, ob) => s + (ob.column ? 50 : 4) * overlapArea(box, ob), 0);
+      + fixtureCost(box);
   }
 
   function placeRoom(dr) {
@@ -1402,46 +1593,49 @@ export function placeLabels(project, derived, opts = {}) {
     // On a fixture, column or stair: the nearest free spot inside the room (a moved name stays put).
     let at = p;
     const slanted = (dr.sides || []).some((sd) => sd.orient === 'd');
-    // The spots of this room's window / door labels over their openings and the doors' swings: the name
-    // leaves one spot of each label free, and the swings, where it finds a clear spot of the same size
-    // (nameAvoid).
-    const avoid = offsets[key] ? { obstacles: [], groups: [] } : nameAvoid(dr);
-    const avoiding = avoid.obstacles.length > 0 || avoid.groups.length > 0;
+    // The spots of this room's window / door labels over their openings: the name leaves one spot of each
+    // label free where it finds a clear spot of the same size (nameAvoid).
+    const avoid = offsets[key] ? [] : nameAvoid(dr);
     let cleared = false;   // moved off them (below): already inside the room off its walls
     if (slanted && !offsets[key]) {
       // A room with a diagonal side: the whole block inside, off the walls (see the header); at full size
-      // off the swings and each label's first spot first.
-      const extra = avoid.obstacles.concat(avoid.groups.map((g) => g[0]));
-      const fit = (avoiding && fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p, { extra, clearOnly: true, fullOnly: true }))
+      // off each label's first spot first.
+      const extra = spotBoxes(avoid.map((g) => [g[0]]));
+      const fit = (avoid.length && fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p, { extra, clearOnly: true, fullOnly: true }))
         || fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p);
       if (fit) { at = fit.at; lines.splice(0, lines.length, ...fit.lines); b = block(lines); }
     } else if (!offsets[key] && fixtureBoxes.length) {
       const box0 = aabb(p.x, p.y, b.w, b.h, rot);
       if (fixtureBoxes.some((ob) => hits(box0, ob))) {
         const bw = box0.maxX - box0.minX, bh = box0.maxY - box0.minY;
-        at = findFreeSpot(dr.face.points, bw, bh, p, fixtureBoxes, { margin: 80, step: Math.max(bh / 3, 0.5 * wppm) });
+        at = findFreeSpot(dr.face.points, bw, bh, p, nameFixtures, { margin: 80, step: Math.max(bh / 3, 0.5 * wppm) });
+        // Over a fixture's label even so (a text over a text): smaller or wrapped where that is clear (off the
+        // first spot of each of the room's window / door labels where it can; A2's 드레스룸 between two 옷장s,
+        // its name over both '옷장 1500', and A4's 보일러실 over the '보일러').
+        if (obstacleCost(aabb(at.x, at.y, b.w, b.h, rot), fixtureTexts.map((l) => l.box)) > LABEL_COST_EPS) {
+          const fit = (avoid.length && fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p, { extra: spotBoxes(avoid.map((g) => [g[0]])), clearOnly: true }))
+            || fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines, p, { clearOnly: true });
+          if (fit) { at = fit.at; lines.splice(0, lines.length, ...fit.lines); b = block(lines); }
+        }
       }
     }
-    // A rectangular room's block that takes every spot of a label, or lies on a swing: the nearest spot
-    // that does not, inside the room's inner faces off the walls, clear of the fixtures. First the same
+    // A rectangular room's block that takes every spot of a label: the nearest spot that does not,
+    // inside the room's inner faces off the walls, clear of the fixtures. First the same
     // size moved across the room's largest open part (in a strip the name keeps the middle of its length),
     // LABEL_GAP_MM from the label spots where it can (a name 0.5 mm above a window label in a 950 베란다
     // read as one block with it), then 0.5 mm, then 0.2 mm from the walls; then moved along it, no
     // further than NAME_ALONG_REACH from the middle and never closer than 0.8 mm to a wall (the name is
     // not squeezed against an end wall again); then smaller (85 %, 70 %, H at 85 % / 80 %) across, as a
     // name making room for a label (makeRoomFor; 예시 세대 A at 1:75: '베란다1' at 70 % in the middle of its strip
-    // above 'AL단창 2520*1050', not squeezed against the 방1 wall). Still on a door's swing after all that:
-    // off the swing first, along the room as far as it takes and then anywhere in it (findFreeSpot),
-    // leaving a label spot free where it can, else not (the label finds another spot, as before): a name
-    // over a swing's arc reads worse than one off the middle (checker 2026-10-25: centred, a narrow
-    // 다용도실's name sat on the swing of its door, the label of its window taking the place above it).
-    // None: it stays (the labels find other spots, as before).
-    if (!slanted && avoiding) {
+    // above 'AL단창 2520*1050', not squeezed against the 방1 wall). None: it stays (the labels find other
+    // spots, as before). (A door's swing no longer moves it: until 2026-10-31 a name on one went along the
+    // room as far as it took, then anywhere in it.)
+    if (!slanted && avoid.length) {
       const box1 = aabb(at.x, at.y, b.w, b.h, rot);
-      if (nameTakesLabelSpots(box1, avoid)) {
+      if (nameTakesLabelSpots(box1, { groups: avoid })) {
         const poly = roomInnerPolygon(dr, project, derived);
-        const keep = fixtureBoxes.concat(nameObstacles, avoid.obstacles);
-        const wide = nameAvoid(dr, LABEL_GAP_MM * wppm).groups, near = avoid.groups;
+        const keep = fixtureBoxes.concat(nameObstacles);
+        const wide = nameAvoid(dr, LABEL_GAP_MM * wppm), near = avoid;
         const m = ROOM_NAME_WALL_CLEAR_MM * wppm, m2 = 0.2 * wppm;
         const part = roomOpenPart(dr, derived);
         const tryAt = (ls, moves, tries, reach = NAME_ALONG_REACH) => {
@@ -1463,10 +1657,6 @@ export function placeLabels(project, derived, opts = {}) {
             c = tryAt(ls, ['across'], [[near, m], [near, m2]]);
             if (c) { lines.splice(0, lines.length, ...ls); b = block(lines); break; }
           }
-        }
-        if (poly && !c && obstacleCost(aabb(at.x, at.y, b.w, b.h, rot), avoid.obstacles) > NAME_SWING_MIN_PAPER_MM2 * wppm * wppm) {
-          c = tryAt(lines, ['along', 'grid'], [[near, m], [near, m2]], Infinity)
-            || tryAt(lines, ['along', 'grid'], [[[], m], [[], m2]], Infinity);
         }
         if (c) { at = c; cleared = true; }
       }
@@ -1508,7 +1698,7 @@ export function placeLabels(project, derived, opts = {}) {
     const poly = roomInnerPolygon(dr, project, derived);
     if (!poly) return null;
     const margin = (opt.margin != null ? opt.margin : ROOM_NAME_WALL_CLEAR_MM) * wppm;
-    const obst = fixtureBoxes.concat(nameObstacles, Array.isArray(opt.extra) ? opt.extra : []);
+    const obst = nameFixtures.concat(nameObstacles, Array.isArray(opt.extra) ? opt.extra : []);
     const hLine = lines0.find((l) => l.color === LABEL_COLORS.height && /^H: /.test(l.text)) || null;
     const nameSets = [[room.name]];
     const wrapped = wrapName(room.name);
@@ -1537,26 +1727,22 @@ export function placeLabels(project, derived, opts = {}) {
 
   // What a room's name leaves free where it can (placeRoom): one spot at least of each window / door
   // label written inside this room (openingLabelSpots, grown by `pad`: at least the 0.5 paper mm a label
-  // keeps from a name), and the doors' swings (by their outline). Only when the window / door labels are
-  // written. → { obstacles: [swing], groups: [[box]] }
+  // keeps from a name). Only when the window / door labels are written. → [[box]] (labelSpotGroups)
   function nameAvoid(dr, pad = 0.5 * wppm) {
-    if (!include.openings) return { obstacles: [], groups: [] };
+    if (!include.openings) return [];
     if (!spotList) spotList = openingLabelSpots(project, derived, { fonts, worldPerUnit: wpu, worldPerPaperMM: wppm, measure });
-    return { obstacles: swings, groups: labelSpotGroups(spotList, dr.roomId, pad) };
+    return labelSpotGroups(spotList, dr.roomId, pad);
   }
 
   // A room name makes room for a window / door label (placeOpening, crowded spots): the block placed
   // again as a name that does not fit where it stands (fitSlantedName: off the walls, then closer to
   // them, then smaller; last at 55 % / 50 % with H at 60 %, which only a name making room gets), clear
-  // of `extra` too, and clear of every door's swing (final check 2026-10-25: names that stood clear were
-  // moved into a door's arc, often at 70 %, to make room — the arc then ran through the name). When the
-  // only free place is on a swing the name stays where it was, and the window / door label takes its
-  // other spots. Names moved by hand never move. → true when moved
+  // of `extra` too (a door's swing may run through it, a thin line: until 2026-10-31 a name kept clear of
+  // every swing here). Names moved by hand never move. → true when moved
   function makeRoomFor(label, extra) {
     const info = roomFits.get(label.key);
     if (!info || label.moved) return false;
     const { dr, room, notRoom, rot, baseSize, color, lines0, p } = info;
-    extra = (extra || []).concat(swings);
     const fit = fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines0, p, { extra, clearOnly: true })
       || fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines0, p, { extra, clearOnly: true, margin: 0.2 })
       || fitSlantedName(dr, room, notRoom, rot, baseSize, color, lines0, p, { extra, clearOnly: true, margin: 0.2, tight: true })
@@ -1576,28 +1762,35 @@ export function placeLabels(project, derived, opts = {}) {
     const { anchor } = geo;
     const horizontal = Math.abs(anchor.dir.x) >= Math.abs(anchor.dir.y);
     const midX = bounds ? (bounds.minX + bounds.maxX) / 2 : anchor.point.x;
-    const rot = horizontal ? 0 : (anchor.point.x < midX ? -90 : 90);
+    // On a diagonal wall the label is written along it, as the number of that side (read left to right).
+    const slanted = Math.abs(anchor.dir.x) > 1e-3 && Math.abs(anchor.dir.y) > 1e-3;
+    const rot = slanted ? (uprightAngle(anchor.dir) * 180) / Math.PI : horizontal ? 0 : (anchor.point.x < midX ? -90 : 90);
     const key = `opening:${o.id}`;
-    const gap = LABEL_GAP_MM * wppm;           // about 1.2 paper mm beyond the wall face / the swing
+    const gap = LABEL_GAP_MM * wppm;           // about 1.2 paper mm beyond the wall face
     const mkLines = (parts, scale) => parts.map((s) => ({ text: s, size: fonts.opening * scale, color: LABEL_COLORS.opening, weight: 'normal' }));
     const normals = normalOrder(anchor, derived);
     // The spot of a label block (rot, b) on side n, shifted s mm along the wall: its near edge `gap`
-    // beyond the clearance of that side over the label's extent along the wall (the wall face, or the
-    // door's swing on the side it opens into). depth > 0 (screen and 치수선 없이: STACKED beyond the
-    // per-side value written at the wall face): `gap` beyond face + depth, or beyond the swing where
-    // that reaches further; null when the swing alone already clears the values (the plain spot
-    // beyond the swing is that spot). The box is upright or turned; next to a diagonal wall its whole
-    // extent across the wall counts.
-    const spotAt = (n, s, rotC, b, depth) => {
+    // beyond the face of that side (over the door's swing on the side it opens into), or with `pastSwing`
+    // beyond the swing over the label's extent along the wall (null where it does not reach past the face).
+    // depth > 0 (screen and 치수선 없이: STACKED beyond the per-side value written at the wall face): `gap`
+    // beyond face + depth. A label across its wall counts its box; one along a diagonal wall its own length and height.
+    const spotAt = (n, s, rotC, b, depth, pastSwing = false) => {
       const bw0 = rotC ? b.h : b.w, bh0 = rotC ? b.w : b.h;
-      const acrossHalf = (Math.abs(n.x) * bw0 + Math.abs(n.y) * bh0) / 2;
-      const alongHalf = (Math.abs(anchor.dir.x) * bw0 + Math.abs(anchor.dir.y) * bh0) / 2;
-      let c = geo.clearance(n, s - alongHalf, s + alongHalf);
-      if (depth > 0) {
-        const stacked = geo.face(n) + depth;
-        if (stacked <= c + 1) return null;
-        c = stacked;
+      const acrossHalf = turnedRot(rotC) ? b.h / 2 : (Math.abs(n.x) * bw0 + Math.abs(n.y) * bh0) / 2;
+      const alongHalf = turnedRot(rotC) ? b.w / 2 : (Math.abs(anchor.dir.x) * bw0 + Math.abs(anchor.dir.y) * bh0) / 2;
+      let c;
+      if (screen) {
+        // The screen (opts.screen): beyond the swing wherever it lies over it; stacked only past the swing.
+        c = geo.clearance(n, s - alongHalf, s + alongHalf);
+        if (depth > 0) {
+          const stacked = geo.face(n) + depth;
+          if (stacked <= c + 1) return null;
+          c = stacked;
+        }
+      } else {
+        c = pastSwing ? geo.beyond(n, s - alongHalf, s + alongHalf) : geo.face(n) + depth;
       }
+      if (c == null) return null;
       const d = c + gap + acrossHalf;
       return { x: anchor.point.x + n.x * d + anchor.dir.x * s, y: anchor.point.y + n.y * d + anchor.dir.y * s, near: c + gap };
     };
@@ -1611,42 +1804,55 @@ export function placeLabels(project, derived, opts = {}) {
     const tryAt = (scale, reach = 'near', depth = 0) => {
       const cands = [];
       if (depth > 0 && reach !== 'near') return cands;
-      const lines = mkLines(horizontal ? [text] : splitOpeningLabel(text), scale);
+      const lines = mkLines(horizontal || slanted ? [text] : splitOpeningLabel(text), scale);
       const b = block(lines);
       const W = anchor.width || 0;
-      // 'far': the box's extent along the wall starts `gap` past the opening's end (its upright box
-      // next to a diagonal wall: that box's extent along the wall, so it still touches the end).
+      // 'far': the label's extent along the wall starts `gap` past the opening's end.
       const bw0 = rot ? b.h : b.w, bh0 = rot ? b.w : b.h;
-      const alongHalf = (Math.abs(anchor.dir.x) * bw0 + Math.abs(anchor.dir.y) * bh0) / 2;
+      const alongHalf = slanted ? b.w / 2 : (Math.abs(anchor.dir.x) * bw0 + Math.abs(anchor.dir.y) * bh0) / 2;
       const shifts = reach === 'near'
         ? [0, W / 4, -W / 4, W / 2, -W / 2].filter((s, i) => i === 0 || Math.abs(s) >= 1)
         : [alongHalf + W / 2 + gap, -(alongHalf + W / 2 + gap)];
-      const push = (at, n, rotC, ls, bb) => {
+      const push = (at, n, rotC, ls, bb, pastSwing = false) => {
         if (!at) return;
         const c = { x: at.x, y: at.y, poly: n.poly, rot: rotC, lines: ls, b: bb, attached: depth === 0 };
         if (depth > 0) c.stack = { n: { x: n.x, y: n.y }, face: geo.face(n), near: at.near };
+        // (Beyond the door's swing, a swing's reach from the door: ui/render.js takes such a spot at 70 % only after
+        // the spots at the wall face; round 5.)
+        if (pastSwing) c.pastSwing = true;
         cands.push(c);
       };
       for (const n of normals) {
         if (depth > 0 && !n.poly) continue;
         for (const s of shifts) push(spotAt(n, s, rot, b, depth), n, rot, lines, b);
+        // The side a door opens into: also beyond its swing, after the spots over it (the screen's spots are
+        // beyond it already).
+        if (depth === 0 && !screen) for (const s of shifts) push(spotAt(n, s, rot, b, 0, true), n, rot, lines, b, true);
         // A vertical wall shorter than the turned label (예시 세대 A A34 on the 430 mm step): one horizontal
         // line beside the wall instead.
-        if (!horizontal && reach === 'near') {
+        if (!horizontal && !slanted && reach === 'near') {
           const l1 = mkLines([text], scale);
           const b1 = block(l1);
           push(spotAt(n, 0, 0, b1, depth), n, 0, l1, b1);
+        }
+        // Along a diagonal wall too short or too crowded for the one line: on two lines, still along it.
+        if (slanted && reach === 'near') {
+          const l2 = mkLines(splitOpeningLabel(text), scale);
+          if (l2.length > 1) {
+            const b2 = block(l2);
+            for (const s of shifts) push(spotAt(n, s, rot, b2, depth), n, rot, l2, b2);
+          }
         }
       }
       return cands;
     };
     // A diagonal wall (a cut corner, a bay side) is short and meets the next wall at an angle: past its
-    // ends an upright label sits in that corner and reads as the next wall's, so right outside it at
-    // its face comes first there. Outside also at 85 % (checker 2026-10-24: a small 화장실 window
-    // between its wall and the dimension chain, as the 예시 세대 A drawing writes 'PVC이중창 600*650').
-    const slanted = Math.abs(anchor.dir.x) > 1e-3 && Math.abs(anchor.dir.y) > 1e-3;
+    // ends a label sits in that corner and reads as the next wall's, so right outside it at its face comes
+    // first there. Outside also at 85 % (checker 2026-10-24: a small 화장실 window between its wall and
+    // the dimension chain, as the 예시 세대 A drawing writes 'PVC이중창 600*650'), then at 70 % on either side before
+    // any spot past its ends (a label along its wall stays at its opening).
     const tiers = slanted
-      ? [[1, true, 'near'], [0.85, true, 'near'], [1, false, 'near'], [0.85, false, 'near'], [1, true, 'far'], [0.85, true, 'far'], [1, false, 'far'], [0.85, false, 'far']]
+      ? [[1, true, 'near'], [0.85, true, 'near'], [1, false, 'near'], [0.85, false, 'near'], [MIN_OPENING_SCALE, true, 'near'], [MIN_OPENING_SCALE, false, 'near'], [1, true, 'far'], [0.85, true, 'far'], [1, false, 'far'], [0.85, false, 'far']]
       : [[1, true, 'near'], [0.85, true, 'near'], [1, true, 'far'], [0.85, true, 'far'], [1, false, 'near'], [0.85, false, 'near'], [1, false, 'far'], [0.85, false, 'far']];
     // A spot that reads as ANOTHER opening's label: that opening in a wall parallel to this one's
     // (the same wall line, or across a narrow room), the label's centre over it (along its wall), the
@@ -1688,20 +1894,83 @@ export function placeLabels(project, derived, opts = {}) {
       }
       return false;
     };
-    const misleads = (box) => {
-      if (!rivals.length) return false;
+    // How much of an opening's extent along its wall a box lies over (world mm). turned: a spot written along a
+    // diagonal wall (turnedShape), by its own corners.
+    const overOpening = (box, a, turned = null) => {
+      const W = a.width || 0;
+      const cs = (turned ? turned.shape[0].map((q) => [q.x, q.y]) : [[box.minX, box.minY], [box.maxX, box.minY], [box.maxX, box.maxY], [box.minX, box.maxY]])
+        .map(([x, y]) => (x - a.point.x) * a.dir.x + (y - a.point.y) * a.dir.y);
+      return Math.max(0, Math.min(W / 2, Math.max(...cs)) - Math.max(-W / 2, Math.min(...cs)));
+    };
+    // A spot reads as another opening's when it lies more over that opening (along its wall, at its face)
+    // than over its own: by its centre, or by its extent (final review 2026-10-28: D3's 'AL단창 500*600'
+    // slid past its own window's end over the 화장실 window beside it; A1 turned, the 화장실1 door's label
+    // lay over the whole 안방 door on the same wall). The screen and 치수선 없이 choose among the
+    // candidates themselves (ui/render.js, beside the per-side values): there such a spot is flagged
+    // misleading and comes last (round 2, 2026-10-31: the extent rule was paper-only, and 치수선 없이 still
+    // wrote 'AL단창 500*600' under the 화장실 window).
+    // The box's centre over its own opening (along its wall).
+    const overOwn = (c) => Math.abs((c.x - anchor.point.x) * anchor.dir.x + (c.y - anchor.point.y) * anchor.dir.y) <= (anchor.width || 0) / 2;
+    // A spot over ANOTHER door's swing (its arc and open leaf, more than NAME_SWING_MIN_PAPER_MM2), its centre nearer to
+    // that door than to its own, reads as that door's label: the same wall line or not (round 4, C4: 'AL단창 900*900'
+    // turned above its window's end in the 세탁실, over the 목문's swing; C3: the 방2 door's label written across beside
+    // its wall in the 거실, over the 중정 door's swing right above that door's own label; the parallel rivals below
+    // never saw them). A window has no swing (예시 세대 A A34 written beside its 430 step over the end of A35
+    // stays). Paper and 치수선 없이: there a label may lie over another door's swing (rule 3); the screen keeps off the
+    // swings anyway (ui/render.js).
+    const swingMin = NAME_SWING_MIN_PAPER_MM2 * wppm * wppm;
+    const overOtherSwing = (box, turned = null) => {
       const c = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
+      // (Centred over its own opening along its wall and written along it, it reads as its own: E3's '방화문
+      // 900*2100' right under its arc, over the end of the 현관's ABS도어 swing. Written across its wall, one line beside
+      // a vertical wall, it reaches far into the room: C3's 방2 door label right above the 중정 door's own label.)
+      const readsAlong = !!turned || Math.abs(anchor.dir.x) * (box.maxX - box.minX) + Math.abs(anchor.dir.y) * (box.maxY - box.minY)
+        >= Math.abs(anchor.dir.y) * (box.maxX - box.minX) + Math.abs(anchor.dir.x) * (box.maxY - box.minY);
+      if (readsAlong && overOwn(c)) return false;
+      // 치수선 없이 (the values placed first choose among the spots, ui/render.js): only the label written across its
+      // wall (C3), so that fewer spots go last there (round 3 widened them once; B3 turned at 1:75 then wrote its
+      // diagonal door's label over a value).
+      if (withCands && readsAlong) return false;
       let own = null;
+      for (const sw of swingsOf()) {
+        if (sw.id === o.id || !hits(box, sw) || (turned ? turned.parts : [box]).reduce((s, q) => s + polygonBoxArea(sw.points, q), 0) <= swingMin) continue;
+        const g2 = geos.find((x) => x.id === sw.id);
+        if (!g2) continue;
+        if (own == null) own = segDist(c, anchor);
+        if (segDist(c, g2.g.anchor) < own - LABEL_TIE_MM) return true;
+      }
+      return false;
+    };
+    // turned: a spot written along a diagonal wall (turnedShape), measured by its own rectangle.
+    const misleads = (box, turned = null) => {
+      if (overOtherSwing(box, turned)) return true;
+      if (!rivals.length) return false;
+      const extent = (u) => {
+        const cs = turned.shape[0].map((q) => q.x * u.x + q.y * u.y);
+        return Math.max(...cs) - Math.min(...cs);
+      };
+      const c = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
+      let own = null, ownOver = null;
       for (const { g } of rivals) {
         const a2 = g.anchor, W2 = a2.width || 0;
         const u = (c.x - a2.point.x) * a2.dir.x + (c.y - a2.point.y) * a2.dir.y;
-        if (!(Math.abs(u) < W2 / 2 - LABEL_TIE_MM)) continue;
+        const over2 = overOpening(box, a2, turned);
+        const centred = Math.abs(u) < W2 / 2 - LABEL_TIE_MM;
+        if (!centred && !(over2 > LABEL_TIE_MM)) continue;
         const nL = { x: -a2.dir.y, y: a2.dir.x };
         const v = (c.x - a2.point.x) * nL.x + (c.y - a2.point.y) * nL.y;
-        const half = (Math.abs(nL.x) * (box.maxX - box.minX) + Math.abs(nL.y) * (box.maxY - box.minY)) / 2;
+        const half = turned ? extent(nL) / 2 : (Math.abs(nL.x) * (box.maxX - box.minX) + Math.abs(nL.y) * (box.maxY - box.minY)) / 2;
         if (Math.abs(v) - half > g.face(v >= 0 ? nL : { x: -nL.x, y: -nL.y }) + tolW - LABEL_TIE_MM) continue;
-        if (own == null) own = segDist(c, anchor);
-        if (segDist(c, a2) < own - LABEL_TIE_MM) return true;
+        if (centred) {
+          if (own == null) own = segDist(c, anchor);
+          if (segDist(c, a2) < own - LABEL_TIE_MM) return true;
+        }
+        if (ownOver == null) ownOver = overOpening(box, anchor, turned);
+        // Over at least half of that opening, or half of the label's own length along the wall.
+        const len = turned ? extent(a2.dir) : Math.abs(a2.dir.x) * (box.maxX - box.minX) + Math.abs(a2.dir.y) * (box.maxY - box.minY);
+        // (Screen / 치수선 없이: only a spot slid past its own opening's end, as D3's; a spot centred over its own
+        // opening stays an ordinary candidate there, where ui/render.js decides among them beside the values.)
+        if (over2 > ownOver + LABEL_TIE_MM && over2 >= Math.min(W2, len) / 2 && (!withCands || !overOwn(c))) return true;
       }
       return false;
     };
@@ -1717,14 +1986,15 @@ export function placeLabels(project, derived, opts = {}) {
           for (const c of tryAt(scale, reach, depth)) {
             if (!!c.poly !== inside) continue;
             if (c.poly && !pointInPolygon(c, c.poly)) continue;
-            const k = cand(c.x, c.y, c.rot, c.lines, c.b, c.attached, c.stack ? { stack: c.stack } : null);
-            if (misleads(k.box)) { k.misleading = true; late.push(k); } else cands.push(k);
+            const k = cand(c.x, c.y, c.rot, c.lines, c.b, c.attached, c.stack ? { stack: c.stack } : c.pastSwing ? { pastSwing: true } : null);
+            if (misleads(k.box, k.shape ? k : null)) { k.misleading = true; late.push(k); } else cands.push(k);
           }
         }
       }
       cands.push(...late);
     }
-    // The other doors' swings, for the screen (ui/render.js keeps the label off them where it can).
+    // The other doors' swings, for the screen (ui/render.js keeps the label off them there where it can;
+    // none on paper).
     const avoid = swings.filter((sw) => sw.id !== o.id);
     const place = (c) => finish({
       key, kind: 'opening', refId: o.id, x: c.x, y: c.y, base: { x: anchor.point.x, y: anchor.point.y },
@@ -1760,13 +2030,13 @@ export function placeLabels(project, derived, opts = {}) {
     // lines and the dashed 구역 나누기 선 ran through 'PVC이중창 600*650', '목문 800*2000', 'AL단창 2520*1050').
     const placeClear = (c) => {
       const l = place(c);
-      if (l && !l.moved && thinCost(l.box) > LABEL_COST_EPS) l.knockout = true;
+      if (l && !l.moved && boxesOf(l).reduce((s, q) => s + thinNear(q), 0) > LABEL_COST_EPS) l.knockout = true;
     };
     // CROWDED spots (recheck 2026-10-25: 예시 세대 A turned, the label 'AL단창 1000*1050' of the small window in
     // the 550 mm jog of 베란다1 lay on the frames of the two long windows beside it; every spot above hit
     // a wall, a window frame or the 베란다1 name). When no spot above is clear, the label slides along
-    // its wall to the nearest spot clear of everything — walls and so the other openings' frames, door
-    // swings, labels, numbers, fixtures — keeping LABEL_GAP_MM from them along the wall as well (the end
+    // its wall to the nearest spot clear of everything — walls and so the other openings' frames, labels,
+    // numbers, fixtures — keeping LABEL_GAP_MM from them along the wall as well (the end
     // of a frame never touches a letter); it stays attached: first with its centre over the opening, then
     // further, up to just past the opening's end. Forms: as it is at 100 % and 85 %, then written the
     // other way (a horizontal wall: 'AL단창' / '1000*1050' on two lines; a vertical wall: one line
@@ -1779,6 +2049,12 @@ export function placeLabels(project, derived, opts = {}) {
     //      this label could stand: a name may go anywhere in its room, smaller or wrapped; a window / door
     //      label has to stay at its opening, and a name making room comes before a smaller label
     //      (예시 세대 A turned at 1:60: 'AL단창 / 1000*1050' at full size below its window, not at 70 % outside).
+    // Texts over lines (rule 4, user 2026-10-31): where no spot at 100 / 85 % is clear of everything, those over a
+    // fixture's outline band (never its middle, fixtureCore, nor its label) come before the 70 % ones, and the
+    // 70 % ones over an outline after the clear ones, as 치수선 없이 tries its passes (ui/render.js
+    // PAPER_LABEL_STEPS; round 4: A1's '목문 700*2000' lay 4.3 mm² on a wall and 3.1 mm² on the 욕조's middle at
+    // 85 % where '목문' / '700*2000' fits right under its door over the 싱크대's outline; D2's 'ABS도어 600*2000'
+    // 6.3 mm² on a wall since 0.6.8).
     // Thin lines only choose among the shifts of one form (a label is never turned or shrunk for them);
     // a spot over one gets the knockout. Nothing clear: the least-overlap spot below, as before.
     // → candidate | null
@@ -1789,40 +2065,50 @@ export function placeLabels(project, derived, opts = {}) {
       const other = !horizontal || parts2.length > 1;
       const formsAt = (scales) => scales.map((k) => [parts1, rot, k]).concat(other ? scales.map((k) => [parts2, 0, k]) : []);
       const big = formsAt([1, 0.85]), small = formsAt([MIN_OPENING_SCALE]);
+      const tiny = opts.tinyOpenings && !screen ? OPENING_TINY_SCALES.map((k) => formsAt([k])) : [];
       const gx = Math.abs(anchor.dir.x) * gap, gy = Math.abs(anchor.dir.y) * gap;
       const grown = (box) => ({ minX: box.minX - gx, minY: box.minY - gy, maxX: box.maxX + gx, maxY: box.maxY + gy });
       const pad = 0.5 * wppm;
       const step = CROWDED_STEP_MM * wppm;
       // The nearest clear shift of one form on side n, thin-line free first: near, the centre over the
       // opening (|shift| ≤ W/2); far, beyond that up to just past the opening's end. → candidate | null
-      const slide = (n, [parts, rotC, scale], yieldingNames, far) => {
+      const slide = (n, [parts, rotC, scale], yieldingNames, far, overLines = false) => {
         const lines = mkLines(parts, scale);
         const b = block(lines);
         const bw0 = rotC ? b.h : b.w, bh0 = rotC ? b.w : b.h;
         const sEnd = (Math.abs(anchor.dir.x) * bw0 + Math.abs(anchor.dir.y) * bh0) / 2 + W / 2 + gap;
         const lo = far ? W / 2 : -1, hi = far ? sEnd : W / 2;
+        // (Round 5, S4: what the spots of this slide can touch at all: the box swept by them, grown by the gaps.)
+        const ends = [spotAt(n, -hi, rotC, b, 0), spotAt(n, hi, rotC, b, 0)].map((at) => aabb(at.x, at.y, b.w, b.h, rotC));
+        const g2 = 2 * gap + pad + 1;
+        const sweep = { minX: Math.min(ends[0].minX, ends[1].minX) - g2, minY: Math.min(ends[0].minY, ends[1].minY) - g2, maxX: Math.max(ends[0].maxX, ends[1].maxX) + g2, maxY: Math.max(ends[0].maxY, ends[1].maxY) + g2 };
+        const costHere = sweepCost(sweep);
         let kept = null;
         for (let i = 0; i <= Math.ceil(hi / step); i++) {
           const d = Math.min(hi, i * step);
           if (!(d > lo)) continue;
           for (const sg of d > 0 ? [1, -1] : [1]) {
             const at = spotAt(n, sg * d, rotC, b, 0);
-            if (!at || (n.poly && !pointInPolygon(at, n.poly))) continue;
+            if (n.poly && !pointInPolygon(at, n.poly)) continue;
             const box = aabb(at.x, at.y, b.w, b.h, rotC);
-            if (misleads(box) || misleadsAcross(box) || costOf(grown(box), pad, yieldingNames) > LABEL_COST_EPS) continue;
+            // (Over lines: the fixtures' middles and labels by the label's own box; the middle lies 2.5 paper mm in from
+            // the outline already, the gap along the wall is the walls', frames' and other labels'.)
+            // (Its cost first: most spots of a crowded label are blocked, and misleads is the slower test; round 5, S4.)
+            if (costHere(grown(box), pad, yieldingNames, !overLines, overLines ? box : null) > LABEL_COST_EPS || misleads(box) || misleadsAcross(box)) continue;
             const c = { x: at.x, y: at.y, poly: n.poly, rot: rotC, lines, b, attached: true, box };
-            if (thinCost(box) <= LABEL_COST_EPS) return c;
+            if (thinNear(box) <= LABEL_COST_EPS) return c;
             if (!kept) kept = c;
           }
         }
         return kept;
       };
-      // The first clear spot of these forms on these sides, near then far.
-      const first = (forms, sides, yieldingNames, accept = () => true) => {
-        for (const far of [false, true]) {
+      // The first clear spot of these forms on these sides, near then far (overLines: over fixture outlines too;
+      // fars: which of them).
+      const first = (forms, sides, yieldingNames, accept = () => true, overLines = false, fars = [false, true]) => {
+        for (const far of fars) {
           for (const form of forms) {
             for (const n of sides) {
-              const c = slide(n, form, yieldingNames, far);
+              const c = slide(n, form, yieldingNames, far, overLines);
               if (c && accept(c, n)) return c;
             }
           }
@@ -1849,24 +2135,82 @@ export function placeLabels(project, derived, opts = {}) {
           minX: opening.minX - ax * across - ay * along, maxX: opening.maxX + ax * across + ay * along,
           minY: opening.minY - ay * across - ax * along, maxY: opening.maxY + ay * across + ax * along,
         };
-        const keep = [padded(c.box, gap), zone, ...placed.filter((l) => l.kind === 'opening').map((l) => padded(l.box, pad))];
+        const keep = [padded(c.box, gap), zone, ...placed.filter((l) => l.kind === 'opening').flatMap((l) => boxesOf(l).map((q) => padded(q, pad)))];
         const was = inWay.map((l) => ({ l, s: { x: l.x, y: l.y, lines: l.lines, w: l.w, h: l.h, box: l.box, cands: l.cands } }));
         if (inWay.every((l) => makeRoomFor(l, keep))) return true;
         for (const { l, s } of was) Object.assign(l, s);
         return false;
       };
       const inside = normals.filter((n) => n.poly), outside = normals.filter((n) => !n.poly);
+      // (Over lines at 100 / 85 % only with the centre over the opening before the 70 % ones; past its end after them:
+      // C1's 'PVC단창 1200*900' stays at 70 % right beside its window, not at full size under the 싱크대 past its end.)
+      const any = () => true, NEAR = [false], FAR = [true];
       return first(big, inside, false) || first(big, outside, false) || first(big, inside, true, makeRoom)
-        || first(small, inside, false) || first(small, outside, false) || first(small, inside, true, makeRoom);
+        || first(big, inside, false, any, true, NEAR) || first(big, outside, false, any, true, NEAR) || first(big, inside, true, makeRoom, true, NEAR)
+        || first(small, inside, false) || first(small, outside, false) || first(small, inside, true, makeRoom)
+        || first(big, inside, false, any, true, FAR) || first(big, outside, false, any, true, FAR) || first(big, inside, true, makeRoom, true, FAR)
+        || first(small, inside, false, any, true) || first(small, outside, false, any, true) || first(small, inside, true, makeRoom, true)
+        || tiny.reduce((c, f) => c || first(f, inside, false) || first(f, outside, false)
+          || first(f, inside, false, any, true) || first(f, outside, false, any, true), null);
     };
     // yieldingNames: the room names that may make room (not counted; see crowdedSpot).
     const yieldingName = (l) => l.kind === 'room' && !l.moved && roomFits.has(l.key);
-    const costOf = (box, pad, yieldingNames = false) => wallBoxes.reduce((s, w) => s + 4 * overlapArea(box, w), 0)
-      + diagWalls.reduce((s, w) => s + 4 * polygonBoxArea(w, box), 0)
-      + avoid.reduce((s, sw) => s + (hits(box, sw) ? polygonBoxArea(sw.points, box) : 0), 0)
-      + placed.reduce((s, l) => s + (yieldingNames && yieldingName(l) ? 0 : 2 * overlapArea(box, l.box, pad)), 0)
-      + obstacles.reduce((s, ob) => s + 4 * overlapArea(box, ob, pad), 0)
-      + fixtureBoxes.reduce((s, ob) => s + (ob.column ? 50 : 4) * overlapArea(box, ob), 0);
+    // fbox: the box the fixtures are weighed by (default box).
+    // (Round 5, survey S4: the walls, other obstacles, fixtures, fixture labels and thin lines that can reach a spot of this
+    // label at all, worked out once: every spot of it lies within `reach` of the opening (along its wall up to past its
+    // end, across beyond its door's swing, with the label's own extent and the gaps), so the others add nothing to any
+    // cost. The costs, and so the spots, are the same (each sum keeps its order); D1 at 1:150 weighs thousands of spots.)
+    let nearR = null;
+    const nearOf = () => {
+      if (nearR) return nearR;
+      const ext = Math.max(...[[text], splitOpeningLabel(text)].map((ps) => { const bb = block(mkLines(ps, 1)); return Math.max(bb.w, bb.h); }));
+      const Wd = anchor.width || 0;
+      const reach = 2 * Wd + 3 * ext + 4 * gap + 2 * (geo.t || 0) + 2 * Math.max(0, ...normals.map((n) => geo.face(n) || 0)) + 4 * wppm;
+      const P0 = anchor.point;
+      const R = { minX: P0.x - reach, minY: P0.y - reach, maxX: P0.x + reach, maxY: P0.y + reach };
+      const inR = (bx) => !!bx && bx.maxX >= R.minX && bx.minX <= R.maxX && bx.maxY >= R.minY && bx.minY <= R.maxY;
+      nearR = {
+        walls: wallBoxes.filter(inR), diag: diagWalls.filter((pts) => inR(boxOf(pts))), obstacles: obstacles.filter(inR),
+        fixtures: fixtureBoxes.filter(inR), cores: cores.filter(inR), texts: fixtureTexts.filter((l) => inR(l.box)),
+        thin: thinLines.filter(([a, q]) => inR({ minX: Math.min(a.x, q.x), minY: Math.min(a.y, q.y), maxX: Math.max(a.x, q.x), maxY: Math.max(a.y, q.y) })),
+        // (The texts placed so far: a room name that makes room for this label moves only from a spot in the way, inside
+        // R, and the list does not grow while this label is placed.)
+        placed: placed.filter((l) => inR(l.box)), n: placed.length,
+      };
+      return nearR;
+    };
+    const costWith = (L, PL) => (box, pad, yieldingNames = false, lines = true, fbox = null) => {
+      const fb = fbox || box;
+      costStats.calls++;
+      costStats.terms += L.walls.length + L.diag.length + L.obstacles.length + L.fixtures.length + L.cores.length + L.texts.length;
+      costStats.all += wallBoxes.length + diagWalls.length + obstacles.length + fixtureBoxes.length + cores.length + fixtureTexts.length;
+      return L.walls.reduce((s, w) => s + 4 * overlapArea(box, w), 0)
+        + L.diag.reduce((s, w) => s + 4 * polygonBoxArea(w, box), 0)
+        + PL().reduce((s, l) => s + (yieldingNames && yieldingName(l) ? 0 : 2 * boxesOf(l).reduce((t, q) => t + overlapArea(box, q, pad), 0)), 0)
+        + L.obstacles.reduce((s, ob) => s + 4 * overlapArea(box, ob, pad), 0)
+        + (L.fixtures.reduce((s, ob) => s + (ob.column ? 50 : lines ? FIXTURE_OUTLINE_COST : 0) * overlapArea(fb, ob), 0)
+          + L.cores.reduce((s, ob) => s + 4 * overlapArea(fb, ob), 0)
+          + L.texts.reduce((s, l) => s + 2 * overlapArea(fb, l.box, pad), 0));
+    };
+    const costOf = (...a) => { const L = nearOf(); return costWith(L, () => (placed.length === L.n ? L.placed : placed))(...a); };
+    // The same for spots inside box `sw` only (crowdedSpot's slides): the lists cut to it once. (A room name making
+    // room moves out of the way, and the label being placed is not in the list yet.)
+    const sweepCost = (sw) => {
+      const L = nearOf();
+      const inS = (bx) => !!bx && bx.maxX >= sw.minX && bx.minX <= sw.maxX && bx.maxY >= sw.minY && bx.minY <= sw.maxY;
+      const S = {
+        walls: L.walls.filter(inS), diag: L.diag.filter((pts) => inS(boxOf(pts))), obstacles: L.obstacles.filter(inS),
+        fixtures: L.fixtures.filter(inS), cores: L.cores.filter(inS), texts: L.texts.filter((l) => inS(l.box)),
+      };
+      const n0 = placed.length, P0 = placed.filter((l) => inS(l.box));
+      return costWith(S, () => (placed.length === n0 ? P0 : placed));
+    };
+    const thinNear = (box) => {
+      const L = nearOf();
+      if (!L.thin.length) return 0;
+      const g = { minX: box.minX - thinHalf, minY: box.minY - thinHalf, maxX: box.maxX + thinHalf, maxY: box.maxY + thinHalf };
+      return L.thin.reduce((s, [a, q]) => s + segmentLengthInBox(a, q, g) * 2 * thinHalf, 0);
+    };
     for (const [scale, inside, reach] of tiers) {
       if (pending) { placeClear(pending); return; }
       if ((reach === 'far' || !inside) && nearOk) { place(nearOk); return; }
@@ -1875,42 +2219,63 @@ export function placeLabels(project, derived, opts = {}) {
         if (c.poly && !pointInPolygon(c, c.poly)) continue;
         if (pending && (c.poly !== pending.poly || c.rot !== pending.rot || c.lines.length !== pending.lines.length)) { placeClear(pending); return; }
         const box = aabb(c.x, c.y, c.b.w, c.b.h, c.rot);
-        if (misleads(box)) { if (!misled) misled = c; continue; }
-        const cost = costOf(box, 0.5 * wppm);
+        if (misleads(box, slanted ? turnedShape(c.x, c.y, c.rot, c.b.w, c.b.h) : null)) { if (!misled) misled = c; continue; }
+        // A label along a diagonal wall is weighed by the small boxes it is made of, not by its bounding box.
+        const bits = slanted ? turnedBits(c.x, c.y, c.rot, c.b.w, c.b.h, 1.2 * wppm) : [box];
+        const costP = (pad) => bits.reduce((sum, q) => sum + costOf(q, pad), 0);
+        const thinP = () => bits.reduce((sum, q) => sum + thinNear(q), 0);
+        const cost = costP(0.5 * wppm);
         if (cost <= LABEL_COST_EPS) {
-          if (thinCost(box) <= LABEL_COST_EPS) { place(c); return; }
+          if (thinP() <= LABEL_COST_EPS) { place(c); return; }
           if (!pending) pending = c;
           continue;
         }
         if (pending) continue;
-        if (!nearOk && reach === 'near' && inside && costOf(box, 0.15 * wppm) <= LABEL_COST_EPS) nearOk = c;
-        const thin = thinCost(box);
+        if (!nearOk && reach === 'near' && inside && costP(0.15 * wppm) <= LABEL_COST_EPS) nearOk = c;
+        const thin = thinP();
         if (!best || cost < best.cost - LABEL_COST_EPS || (cost <= best.cost + LABEL_COST_EPS && thin < best.thin - LABEL_COST_EPS)) best = { cost, thin, c };
       }
     }
     if (pending) { placeClear(pending); return; }
     if (nearOk) { place(nearOk); return; }
-    // The print only (the screen picks among `cands` itself, ui/render.js).
-    if (!withCands) {
+    // The print only (the screen picks among `cands` itself, ui/render.js). Not along a diagonal wall: such a label has
+    // its 70 % spots and two lines among the tiers above, and stays over its own opening.
+    if (!withCands && !slanted) {
       const crowd = crowdedSpot();
       if (crowd) { placeClear(crowd); return; }
     }
     // fell (paper, placeOpenings): the openings whose fallback is written across another label.
     const fellBack = (l) => {
-      if (fell && l && placed.some((x) => x !== l && overlapArea(l.box, x.box) > LABEL_COST_EPS)) fell.push(o.id);
+      if (fell && l && placed.some((x) => x !== l && labelsOverlap(l, x) > LABEL_COST_EPS)) fell.push(o.id);
     };
+    // Written over a room name (and its H): the name makes room when it finds another clear place in its
+    // room, as for a crowded spot (round 2, 2026-10-31, B3: the label of the door on the diagonal lay over
+    // the 드레스룸's 'H: 2300' and read '…700*2000H: 2300').
+    if (best && !withCands) {
+      const box = aabb(best.c.x, best.c.y, best.c.b.w, best.c.b.h, best.c.rot);
+      const pad = 0.5 * wppm;
+      const pieces = slanted ? turnedShape(best.c.x, best.c.y, best.c.rot, best.c.b.w, best.c.b.h).parts : [box];
+      const inWay = placed.filter((l) => yieldingName(l) && pieces.some((q) => overlapArea(q, l.box, pad) > 0));
+      if (inWay.length) {
+        const padded = (b, d) => ({ minX: b.minX - d, minY: b.minY - d, maxX: b.maxX + d, maxY: b.maxY + d });
+        const keep = [...pieces.map((q) => padded(q, gap)), ...placed.filter((l) => l.kind === 'opening').flatMap((l) => boxesOf(l).map((q) => padded(q, pad)))];
+        const was = inWay.map((l) => ({ l, s: { x: l.x, y: l.y, lines: l.lines, w: l.w, h: l.h, box: l.box, cands: l.cands } }));
+        if (!inWay.every((l) => makeRoomFor(l, keep))) for (const { l, s } of was) Object.assign(l, s);
+      }
+    }
     if (best) { fellBack(place(best.c)); return; }
     if (misled) { fellBack(place(misled)); return; }
     const all = tryAt(1);
     if (all.length) fellBack(place(all[0]));
   }
 
-  function placeFixture(f) {
+  // A fixture's label (placed after the rooms and openings, see fixtureTexts). → label | null
+  function fixtureLabel(f) {
     const text = String(safeCall(labelHooks.fixtureLabel, f) || '').trim();
-    if (!text) return;
+    if (!text) return null;
     // Other fixtures (a column in a 옷장) are avoided like the symbols inside the box.
     const area = fixtureTextArea(f, project, derived, fixtureBoxes);
-    if (!area) return;
+    if (!area) return null;
     const { full } = area;
     let box = area.box;
     const tw = width(text, fonts.fixture);
@@ -1924,8 +2289,73 @@ export function placeLabels(project, derived, opts = {}) {
       const inset = fixtureInnerTextInset(fixtureInner.gap, fixtureInner.line);
       box = { ...box, w: Math.max(0, box.w - 2 * inset), h: Math.max(0, box.h - 2 * inset) };
     }
-    const { rot, k } = fixtureTextFit(tw, em, box.w, box.h, inner);
-    const lines = [{ text, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
+    const fit = fixtureTextFit(tw, em, box.w, box.h, inner);
+    let { rot, k } = fit;
+    let lines = [{ text, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
+    // Too long even at 70 % (final review 2026-10-28, C1: '신발장 600' in an 8 × 4.7 mm box spilled onto
+    // the wall and a door frame): the name over the size on two lines, else the name alone, else the name
+    // as small as it has to be (at least half size). Never across the wall.
+    if (!fit.fits) {
+      const m = /^(.*\S)\s+(\d[\d*×x]*)$/.exec(text);
+      const tries = m ? [[m[1], m[2]]] : [];
+      let done = false;
+      for (const parts of tries) {
+        const twp = Math.max(...parts.map((t) => width(t, fonts.fixture)));
+        const f2 = fixtureTextFit(twp, em * (parts.length > 1 ? LINE_HEIGHT * parts.length : 1), box.w, box.h, true);
+        if (!f2.fits) continue;
+        rot = f2.rot; k = f2.k;
+        lines = parts.map((t) => ({ text: t, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }));
+        done = true;
+        break;
+      }
+      // The measured size is a typed value printed nowhere else (round 3, 2026-11-01: C1's 신발장 600, C3's
+      // 신발장 1000 and D1's 옷장 1200 printed as the name alone in every output, although the size fits
+      // their boxes at 55–60 %): before the name alone, the name over the size and 'name size' on one line,
+      // across or turned along the box, as large as fits between half and 70 % size.
+      if (!done && m) {
+        let best = null;
+        for (const parts of [[m[1], m[2]], [text]]) {
+          const twp = Math.max(...parts.map((t) => width(t, fonts.fixture)));
+          const tall = em * LINE_HEIGHT * parts.length;   // the whole block inside the box
+          for (const [r, along, across] of [[0, box.w, box.h], [-90, box.h, box.w]]) {
+            const kk = Math.min(MIN_NAME_SCALE, twp > 0 ? (along * 0.95) / twp : Infinity, tall > 0 ? (across * 0.95) / tall : Infinity);
+            if (kk >= 0.5 && (!best || kk > best.k + 1e-9)) best = { k: kk, r, parts };
+          }
+        }
+        if (best) {
+          rot = best.r; k = best.k;
+          lines = best.parts.map((t) => ({ text: t, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }));
+          done = true;
+        }
+      }
+      if (!done && m) {
+        // (before the name alone at 70 %: tried after the size-keeping forms above)
+        const nameOnly = m[1];
+        const twn0 = width(nameOnly, fonts.fixture);
+        const f3 = fixtureTextFit(twn0, em, box.w, box.h, true);
+        if (f3.fits) {
+          rot = f3.rot; k = f3.k;
+          lines = [{ text: nameOnly, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
+          done = true;
+        }
+      }
+      if (!done && m) {
+        const twn = width(m[1], fonts.fixture);
+        const avail = (rot ? box.h : box.w) * 0.95;
+        k = Math.max(0.5, Math.min(MIN_NAME_SCALE, avail / twn));
+        lines = [{ text: m[1], size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
+      } else if (!done && !withCands) {
+        // A name without a size (세면대, 보일러) as small as it has to be too, along the box's longer way
+        // (round 2, 2026-10-31: it stopped at 70 % and spilled 0.8–1.8 mm past the box, C3 / D1). On paper;
+        // the screen and 치수선 없이 have their own smaller spots in the box (ui/render.js).
+        const best = [[0, box.w, box.h], [-90, box.h, box.w]]
+          .map(([r, along, across]) => ({ r, kk: Math.min((along * 0.95) / tw, em > 0 ? (across * 0.95) / em : Infinity) }))
+          .sort((p, q) => q.kk - p.kk)[0];
+        rot = best.r;
+        k = Math.max(0.5, Math.min(k, best.kk));
+        lines = [{ text, size: fonts.fixture * k, color: LABEL_COLORS.fixture, weight: 'normal' }];
+      }
+    }
     const b = block(lines);
     // halo: drawn with a white outline, so a line of the symbol under it never strikes through it;
     // not on the plain gray boxes (싱크대, 옷장, 신발장), where no line crosses the text.
@@ -1933,16 +2363,24 @@ export function placeLabels(project, derived, opts = {}) {
     let cands = null;
     if (withCands) {
       // Screen: in the box, smaller, then just outside the box's front (a small fixture far out).
+      // (A label on two lines, the name over its size, keeps both lines in these spots, the name alone
+      // only after them: round 2 finisher, 2026-10-31, C4 치수선 없이: '세탁기 700' came out as '세탁기'
+      // once a room name stood beside its box, the smaller spot holding only the first line.)
       cands = [cand(box.center.x, box.center.y, rot, lines, b)];
-      const small = [{ ...lines[0], size: lines[0].size * 0.8 }];
+      const small = lines.map((ln) => ({ ...ln, size: ln.size * 0.8 }));
       cands.push(cand(box.center.x, box.center.y, rot, small, block(small)));
-      const flat = [{ ...lines[0], size: fonts.fixture }];
+      if (lines.length > 1) {
+        const name = [{ ...lines[0], size: lines[0].size * 0.8 }];
+        cands.push(cand(box.center.x, box.center.y, rot, name, block(name)));
+      }
+      // (the whole label, its size too, as in 0.6.8: round 3, 2026-11-01)
+      const flat = [{ ...lines[0], text, size: fonts.fixture }];
       const bf = block(flat);
       const front = frontOf(f);
       const reach = Math.abs(front.x) * (full.w / 2 + bf.w / 2) + Math.abs(front.y) * (full.h / 2 + bf.h / 2) + 0.4 * bf.h;
       cands.push(cand(full.center.x + front.x * reach, full.center.y + front.y * reach, 0, flat, bf));
     }
-    finish({
+    return settle({
       key: `fixture:${f.id}`, kind: 'fixture', refId: f.id, x: box.center.x, y: box.center.y,
       base: { x: full.center.x, y: full.center.y }, rot, lines, lineHeight: LINE_HEIGHT, w: b.w, h: b.h, halo, cands,
     });
