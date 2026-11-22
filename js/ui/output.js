@@ -18,7 +18,7 @@
 //   opts = { toPx, pxPerMM, paper: { pxPerPaperMM, scale }, layout, options }
 // except openingCutouts(project, derived) → [{ points: [{x,y}] } | [{x,y}]] (world polygons cleared to
 // white in the walls before drawOpenings). Those packages must not draw their own text labels when
-// opts.paper is set (labels come from draw-labels.js, so '그림만' can leave them out).
+// opts.paper is set (labels come from draw-labels.js, so '그림만' can leave them out and write the room names alone).
 // wallCutouts(project, derived) → polygons, like openingCutouts: the wall parts taken by fixtures put
 // into a wall (벽 속에 넣기), cleared white in every kind of output (also 그림만).
 //
@@ -26,8 +26,9 @@
 // 표시 되면서 외벽 표시 된거랑. 치수선 표시되고 외벽 표시 안된거": 전체 도면 with the walls marked 외벽 by
 // hand in COLORS.exterior and a small legend, core/exterior.js; none marked: 전체 도면 exactly), 치수선 없이 (choices.noDims, user 2026-10-18:
 // the plan as the editor shows it without 치수선 보기 — each side's measured value written inside the
-// room, ui/render.js drawPaperPlanText), 그림만 (choices.drawingOnly: no text at all). All four use the
-// same layout (scale and position), so they overlay exactly; 전체 도면 is 외벽 표시 without the red and the
+// room, ui/render.js drawPaperPlanText), 그림만 (choices.drawingOnly: the picture and the room names only, user
+// 2026-11-21: "그림만에 실 이름까지는 표시 되도록"; each name written where 전체 도면 writes it, without its H). All four
+// use the same layout (scale and position), so they overlay exactly; 전체 도면 is 외벽 표시 without the red and the
 // legend, pixel for pixel.
 // [↻ 도면 회전] in the dialog turns the plan itself a quarter turn (ctx.rotate; core/rotate.js).
 // Every text of every kind is measured and drawn in the bundled output font (theme.js PAPER_FONT_STACK,
@@ -51,8 +52,8 @@
 
 import { wallPolygons, finishPolygons, exteriorJointPolygons, installDims, buildDimensions, SPLIT_COMPUTED_NOTES, splitComputedNote } from '../core/dims.js';
 import { computePrintLayout, withDpi, SCALES, partDimensions } from '../core/printlayout.js';
-import { drawDimensions } from './draw-dims.js';
-import { drawLabels, drawTitle, drawNotes } from './draw-labels.js';
+import { drawDimensions, layoutDimensions } from './draw-dims.js';
+import { drawLabels, drawRoomNames, isRoomNameLine, drawTitle, drawNotes } from './draw-labels.js';
 import { drawPaperPlanText, paintExterior, trimmedLine } from './render.js';
 import { LINES, COLORS, paperFont } from './theme.js';
 import { ensurePaperFont, loadPaperFont, onPaperFontReady, paperFontReady, paperTextWidth } from './paperfont.js';
@@ -255,7 +256,8 @@ function drawPaperDividers(ctx, project, derived, opts, redWalls = null) {
 }
 
 // Draws the whole page. options: DEFAULT_CHOICES fields plus { notes: [string] } (already filtered).
-// 그림만 (drawingOnly) draws exactly the same picture without any text, number or dimension line;
+// 그림만 (drawingOnly) draws exactly the same picture with the room names alone (as 전체 도면 writes them, without
+// their H) and no other text, number or dimension line;
 // 치수선 없이 (noDims) the same picture with the editor's texts instead of the dimension chains.
 // What the printed window / door labels keep clear of, from the drawn dimensions (drawDimensions items,
 // canvas px → world mm): obstacles: the numbers and dimension lines (a diagonal side's turned number as
@@ -276,7 +278,8 @@ export function paperLabelObstacles(dimItems, opts) {
   return { obstacles, nameObstacles, thinLines };
 }
 
-// → the placed labels (core/labels.js placeLabels; [] for 치수선 없이 / 그림만), for tests.
+// → the placed labels (core/labels.js placeLabels; [] for 치수선 없이; 그림만: the room labels whose names it writes,
+// as 전체 도면 places them), for tests.
 // The page in two parts (paintPicture, then paintTexts over it; the 외벽 legend last), so the dialog's preview
 // can keep the texts of 전체 도면 for 외벽 표시 (OutputDialog _drawPreview).
 export function renderPaper(ctx, project, derived, layout, options = {}) {
@@ -343,26 +346,43 @@ function paintPicture(ctx, project, derived, job) {
 }
 
 // The texts over the picture: 치수선 없이 the editor's texts (ui/render.js drawPaperPlanText), 전체 도면 and
-// 외벽 표시 the dimensions and labels (the same for both); then the title, the notes and the memo. 그림만: none.
-// They do not depend on 외벽 표시. → the placed labels ([] for 치수선 없이 / 그림만)
-function paintTexts(ctx, project, derived, job) {
+// 외벽 표시 the dimensions and labels (the same for both); then the title, the notes and the memo. 그림만: the room
+// names alone (draw-labels.js drawRoomNames): the labels placed as for 전체 도면 with these choices (the dimensions
+// laid out, not drawn, so the names keep clear of what 전체 도면 has there: the same spots), no title, notes or memo.
+// They do not depend on 외벽 표시.
+// placed (the dialog's preview): [the labels of each part] placed before for the same texts, or [] to be filled (전체
+// 도면, 외벽 표시 and 그림만 place the same labels). → the placed labels ([] for 치수선 없이; 그림만: the room labels
+// whose names it writes)
+function paintTexts(ctx, project, derived, job, placed = null) {
   const { o, opts } = job;
-  if (!project || !derived || (o.drawingOnly && !o.noDims)) return [];
+  if (!project || !derived) return [];
+  const names = o.drawingOnly && !o.noDims;
   const parts = pageParts(project, derived, job);
   let labels = [];
   ctx.save();
-  for (const q of parts) {
+  parts.forEach((q, i) => {
     if (o.noDims) {
       try { drawPaperPlanText(ctx, q.project, q.derived, q.opts); } catch (err) { console.error('[output] plan text failed', err); }
-    } else {
-      const dimItems = drawDimensions(ctx, q.project, q.derived, q.opts) || [];
-      const { obstacles, nameObstacles, thinLines } = paperLabelObstacles(dimItems, q.opts);
-      labels = labels.concat(drawLabels(ctx, q.project, q.derived, { ...q.opts, obstacles, nameObstacles, thinLines }) || []);
+      return;
     }
+    const kept = placed && Array.isArray(placed[i]) ? placed[i] : null;
+    let lopts = { ...q.opts, placed: kept };
+    if (!names || !kept) {
+      const dimItems = (names ? layoutDimensions(ctx, q.project, q.derived, q.opts) : drawDimensions(ctx, q.project, q.derived, q.opts)) || [];
+      const { obstacles, nameObstacles, thinLines } = paperLabelObstacles(dimItems, q.opts);
+      lopts = { ...lopts, obstacles, nameObstacles, thinLines };
+    }
+    const all = (names ? drawRoomNames(ctx, q.project, q.derived, lopts) : drawLabels(ctx, q.project, q.derived, lopts)) || [];
+    if (placed) placed[i] = all;
+    if (!names) { labels = labels.concat(all); return; }
+    const rooms = new Map((q.derived.rooms || []).map((dr) => [dr.roomId, dr.room]));
+    labels = labels.concat(all.filter((l) => l.lines.some((ln) => isRoomNameLine(l, ln, rooms))));
+  });
+  if (!names) {
+    if (o.includeTitle) drawTitle(ctx, project, derived, opts);
+    drawNotes(ctx, project, derived, opts);
+    if (o.showMemo) for (const q of parts) callDrawer('drawMemo', ctx, q.project, q.derived, q.opts);
   }
-  if (o.includeTitle) drawTitle(ctx, project, derived, opts);
-  drawNotes(ctx, project, derived, opts);
-  if (o.showMemo) for (const q of parts) callDrawer('drawMemo', ctx, q.project, q.derived, q.opts);
   ctx.restore();
   return labels;
 }
@@ -515,8 +535,9 @@ function makeCanvas(w, h) {
 // recently shown dropped. Closing the dialog drops them all.
 const PREVIEW_PAGES = 6;
 const PREVIEW_TEXT_LAYERS = 3;
-// What the preview drew (tests): pages drawn, text layers drawn (each places the labels), pages copied back.
-export const previewStats = { pages: 0, texts: 0, copied: 0 };
+// What the preview drew (tests): pages drawn, text layers drawn, pages copied back, and how often the labels of 전체 도면 /
+// 외벽 표시 / 그림만 were placed (a text layer or a 그림만 page that found none placed for its texts).
+export const previewStats = { pages: 0, texts: 0, copied: 0, placed: 0 };
 function takeCached(map, key) {
   const v = map.get(key);
   if (v) { map.delete(key); map.set(key, v); }
@@ -536,6 +557,16 @@ function dropPreviewCache(pv) {
     for (const c of map.values()) c.width = c.height = 0;
     map.clear();
   }
+  pv.placed.clear();
+}
+// The labels placed for the texts of `key` (paintTexts placed: one list per part), kept like the pages: the last
+// PREVIEW_PAGES used. A new entry is [] (paintTexts fills it).
+function placedLabels(pv, key) {
+  let list = pv.placed.get(key);
+  if (list) pv.placed.delete(key); else list = [];
+  pv.placed.set(key, list);
+  while (pv.placed.size > PREVIEW_PAGES) pv.placed.delete(pv.placed.keys().next().value);
+  return list;
 }
 // src (a canvas) onto g pixel for pixel (same size; 'copy': its pixels as they are, alpha too).
 function copyCanvas(src, g) {
@@ -932,7 +963,9 @@ export class OutputDialog {
   //   - a page already drawn (the same state, 종류, choices, notes, scale and size; the format does not change it)
   //     is copied back at once;
   //   - the texts of 전체 도면 are those of 외벽 표시 (only the red walls and the legend differ): drawn once on a
-  //     clear layer over the picture, they are laid over the other's picture at once.
+  //     clear layer over the picture, they are laid over the other's picture at once;
+  //   - 그림만 writes the room names of those texts (paintTexts): its page and their layer write them from the labels
+  //     placed once for both (and for 외벽 표시), whichever is shown first (placing them is the slow part).
   // The files (produceOutput) are always drawn whole (renderPaper). → nothing
   _drawPreview(g, project, derived, layout, options) {
     const job = pageJob(layout, options);
@@ -941,24 +974,33 @@ export class OutputDialog {
     let pv = this._pv;
     if (!pv || pv.project !== project || pv.derived !== derived) {
       dropPreviewCache(pv);
-      pv = this._pv = { project, derived, pages: new Map(), texts: new Map() };
+      pv = this._pv = { project, derived, pages: new Map(), texts: new Map(), placed: new Map() };
     }
     const rect = (r) => (r ? [r.x, r.y, r.w, r.h].map((v) => Math.round(v * 1000) / 1000) : null);
-    const textsKey = JSON.stringify([o.noDims ? 'nodims' : o.drawingOnly ? 'drawing' : 'full', w, h, layout.dpi, layout.scale, layout.orientation,
+    const keyOf = (kind) => JSON.stringify([kind, w, h, layout.dpi, layout.scale, layout.orientation,
       rect(layout.planRect), rect(layout.titleRect), rect(layout.notesRect), !!o.extensionLines, !!o.bothValues, !!o.showMemo, !!o.includeTitle,
       o.notes || [], paperFontReady()]);
+    const textsKey = keyOf(o.noDims ? 'nodims' : o.drawingOnly ? 'drawing' : 'full');
+    // The labels of 전체 도면 with these choices (also 외벽 표시's and 그림만's).
+    const placed = o.noDims ? null : placedLabels(pv, keyOf('full'));
+    const placing = !!placed && !placed.length;
     const pageKey = JSON.stringify([!!o.exterior, textsKey]);
     const kept = takeCached(pv.pages, pageKey);
     if (kept) { copyCanvas(kept, g); previewStats.copied++; return; }
     previewStats.pages++;
     g.save();
     const exterior = paintPicture(g, project, derived, job);
-    if (!o.drawingOnly) {
+    if (o.drawingOnly) {
+      // 그림만: the room names written over its picture, as renderPaper writes them.
+      if (placing) previewStats.placed++;
+      paintTexts(g, project, derived, job, placed);
+    } else {
       let layer = takeCached(pv.texts, textsKey);
       if (!layer) {
         previewStats.texts++;
+        if (placing) previewStats.placed++;
         layer = makeCanvas(w, h);
-        paintTexts(layer.getContext('2d'), project, derived, job);
+        paintTexts(layer.getContext('2d'), project, derived, job, placed);
         keepCached(pv.texts, textsKey, layer, PREVIEW_TEXT_LAYERS);
       }
       g.drawImage(layer, 0, 0);
@@ -983,8 +1025,9 @@ export class OutputDialog {
     }
     for (const input of this.root.querySelectorAll('.out-check-input')) {
       input.checked = !!c[input.dataset.name];
-      // 그림만 has no text at all, so the text options do not apply; 치수선 없이 has no dimension
-      // lines (보조선) and writes each room's own value (양쪽 값).
+      // 그림만 writes the room names only (no dimension, title or memo), so the text options do not apply (its names
+      // stand where 전체 도면 writes them with these choices); 치수선 없이 has no dimension lines (보조선) and writes
+      // each room's own value (양쪽 값).
       const name = input.dataset.name;
       const off = c.drawingOnly || (c.noDims && (name === 'extensionLines' || name === 'bothValues'));
       input.disabled = off;

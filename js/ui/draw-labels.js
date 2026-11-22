@@ -1,6 +1,7 @@
 // Draws room names + H, opening labels, fixture labels, the title and the ※ notes (stage C; plan §1-2).
 //
 //   drawLabels(ctx, project, derived, opts) → placed labels (core/labels.js placeLabels)
+//   drawRoomNames(ctx, project, derived, opts) → placed labels; writes the room names only (그림만, ui/output.js)
 //   drawTitle(ctx, project, derived, opts)   paper only: project.info.title centred in layout.titleRect
 //   drawNotes(ctx, project, derived, opts)   paper only: opts.options.notes lines in layout.notesRect
 //   labelHitBoxes(ctx, project, derived, opts) → [{ key, kind, refId, box (px), poly (a label along a diagonal wall: its
@@ -13,13 +14,14 @@
 //         nameObstacles (paper: world boxes of the numbers of diagonal sides, which room names in rooms
 //         with a diagonal side keep clear of; core/labels.js),
 //         thinLines (paper: world segments [[p, q]] of the drawn extension lines; core/labels.js),
+//         placed (the labels drawLabels / drawRoomNames placed before for the same opts: not placed again),
 //         options: { include: { rooms, openings, fixtures }, notes: [string], includeTitle } }
 // Paper sizes: name 12.3 pt black, 'H: 2280' 8.8 pt blue, opening labels 8.8 pt blue, fixture labels
 // 8.8 pt black, title 14 pt black, notes 7.5 pt. Screen: comfortable fixed px sizes.
 // Paper texts are measured and drawn in the bundled output font (theme.js PAPER_FONT_STACK), the screen's
 // in FONT_STACK.
 
-import { placeLabels } from '../core/labels.js';
+import { placeLabels, LABEL_COLORS } from '../core/labels.js';
 import { PAPER_STYLE, PT_MM, paperSmallTexts } from '../core/printlayout.js';
 import { canvasFont, paperFont, TEXT_PX } from './theme.js';
 import { fixtureInnerLineMM } from './draw-fixtures.js';
@@ -73,13 +75,51 @@ function placeFor(ctx, project, derived, opts) {
   return { labels, U };
 }
 
+// The labels placed for these opts: opts.placed when given (labels drawLabels / drawRoomNames returned for the very
+// same opts: the 출력 dialog's preview places them once for 전체 도면, 외벽 표시 and 그림만), else placed now.
+function placedFor(ctx, project, derived, opts) {
+  if (Array.isArray(opts.placed)) return { labels: opts.placed, U: labelUnits(opts) };
+  return placeFor(ctx, project, derived, opts);
+}
+
 export function drawLabels(ctx, project, derived, opts = {}) {
   if (!project || !derived || typeof opts.toPx !== 'function') return [];
-  const { labels, U } = placeFor(ctx, project, derived, opts);
+  const { labels, U } = placedFor(ctx, project, derived, opts);
+  paintLabels(ctx, labels, U, opts);
+  return labels;
+}
+
+// 그림만 (ui/output.js; user 2026-11-21: '그림만에 실 이름까지는 표시'): the names of the rooms alone, written as
+// drawLabels writes them (the same placement, size, colour, font and spot: the two kinds overlay), each name's H
+// left out where it stands (the name keeps its place in the block). The name of a 실 아님 space too, as 전체 도면
+// writes it (fixture-label size, no H); no window / door or fixture label; an unnamed room has no label
+// (core/labels.js). opts: as drawLabels (placed too).
+// → the placed labels, all of them (opts.placed for the same opts)
+export function drawRoomNames(ctx, project, derived, opts = {}) {
+  if (!project || !derived || typeof opts.toPx !== 'function') return [];
+  const { labels, U } = placedFor(ctx, project, derived, opts);
+  const rooms = new Map((derived.rooms || []).map((dr) => [dr.roomId, dr.room]));
+  paintLabels(ctx, labels, U, opts, (l, ln) => isRoomNameLine(l, ln, rooms));
+  return labels;
+}
+
+// A line of a room's name (not its H) in a label placed for a room, 실 아님 spaces included (core/labels.js placeRoom).
+// rooms: Map roomId → room.
+export function isRoomNameLine(l, ln, rooms) {
+  if (!l || l.kind !== 'room' || !ln) return false;
+  const room = rooms.get(l.refId);
+  if (!room) return false;
+  return !(ln.color === LABEL_COLORS.height && /^H: /.test(ln.text));
+}
+
+// Writes the labels (drawLabels). keep(label, line) → false: that line is not written (its place in the block stays);
+// a label with no line kept is left out whole (and so is its knockout).
+function paintLabels(ctx, labels, U, opts, keep = null) {
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (const l of labels) {
+    if (keep && !l.lines.some((ln) => keep(l, ln))) continue;
     const c = opts.toPx({ x: l.x, y: l.y });
     if (opts.paper && l.knockout && l.box) {
       // A window / door label whose spot is clear of everything but thin lines (extension lines, the
@@ -102,6 +142,7 @@ export function drawLabels(ctx, project, derived, opts = {}) {
     const heights = l.lines.map((ln) => ln.size * l.lineHeight * U.pxPerUnit);
     let y = -heights.reduce((s, h) => s + h, 0) / 2;
     l.lines.forEach((ln, i) => {
+      if (keep && !keep(l, ln)) { y += heights[i]; return; }
       const px = ln.size * U.pxPerUnit;
       ctx.font = canvasFont(px, ln.weight || 'normal', U.paper);
       if (l.halo) {
@@ -120,7 +161,6 @@ export function drawLabels(ctx, project, derived, opts = {}) {
     ctx.restore();
   }
   ctx.restore();
-  return labels;
 }
 
 export function labelHitBoxes(ctx, project, derived, opts = {}) {
